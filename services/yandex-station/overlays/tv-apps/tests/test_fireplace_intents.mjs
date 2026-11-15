@@ -127,3 +127,27 @@ test('a stalled readiness read cannot exceed the existing four-second voice budg
  try{assert.equal(result?.status,'pending');assert.equal(writes,1)}
  finally{release(undefined);await flush();await task}
 });
+
+test('same-request starting, failure and uncertain open have distinct outcomes',async()=>{
+ for(const [state,error,wanted] of [['starting',null,'starting'],['error','source_unavailable','failed'],['unknown','open_unconfirmed','pending']]){
+  let requestId,writes=0;
+  const result=await api.executeFireplaceIntent(parse('включи камин'),{
+   callScript:async(_entity,variables)=>{writes++;requestId=variables?.request_id},
+   readNative:async()=>({state:'playing',attributes:{media_title:title}}),
+   readReadiness:async()=>({...ready(requestId,{observed_at:null,owned:false,progressing:false,error}),state}),
+   sleep:async()=>{}
+  });
+  assert.equal(writes,1);assert.equal(result.status,wanted,state);
+ }
+});
+test('starting or failure from a different command cannot describe this launch',async()=>{
+ for(const state of ['starting','error']){
+  const result=await api.executeFireplaceIntent(parse('включи камин'),{
+   callScript:async()=>{},
+   readNative:async()=>({state:'playing',attributes:{media_title:title}}),
+   readReadiness:async()=>({...ready('b153f6bc-f3e7-4e17-a138-ff15a8bcaf98',{error:state==='error'?'source_unavailable':null}),state}),
+   sleep:async()=>{}
+  });
+  assert.equal(result.status,'pending');
+ }
+});
