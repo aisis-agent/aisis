@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - services/yandex-station/overlays/tv-apps/**
+      - services/yandex-station/bluegreen/**
       - .github/workflows/fireplace-overlay.yml
   push:
     branches: [fix/fireplace-voice-request-*]
@@ -53,5 +54,31 @@ jobs:
         with:
           name: fireplace-contract-log-${{ github.sha }}
           path: ${{ env.AISIS_CI_LOG }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+  artifact-deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify persistent artifact deployment and corpus gate contracts
+        run: |
+          set -euo pipefail
+          umask 077
+          AISIS_DEPLOY_CI_LOG="$(mktemp /tmp/aisis-artifact-ci.XXXXXX.log)"
+          printf 'AISIS_DEPLOY_CI_LOG=%s\n' "$AISIS_DEPLOY_CI_LOG" >> "$GITHUB_ENV"
+          exec > >(tee "$AISIS_DEPLOY_CI_LOG") 2>&1
+          trap 'status=$?; printf "%s completion exit=%s log=%s\n" "$(date -u +%FT%TZ)" "$status" "$AISIS_DEPLOY_CI_LOG"' EXIT
+          printf '%s startup log=%s\n' "$(date -u +%FT%TZ)" "$AISIS_DEPLOY_CI_LOG"
+          bash -n services/yandex-station/bluegreen/deploy.sh
+          python3 -m unittest discover -s services/yandex-station/bluegreen/tests -v
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: artifact-deployment-log-${{ github.sha }}
+          path: ${{ env.AISIS_DEPLOY_CI_LOG }}
           if-no-files-found: ignore
           retention-days: 7
