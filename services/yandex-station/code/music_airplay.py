@@ -447,6 +447,12 @@ def music_play(query: str, media_type: str | None = None, player_id: str | None 
         matched = resolved["matched"]
         media = _artist_media(matched)
         _cache_put(key, matched, media)
+    return _start_play(record, key, matched, media, player_id, early_ack, started, cached is not None)
+
+
+def _start_play(record: dict[str, Any], key: str, matched: dict[str, Any], media: Any, player_id: str | None,
+                early_ack: bool, started: float, cached: bool) -> dict[str, Any]:
+    """Queue `media` on the speaker's player; `record` becomes the last-play record."""
     try:
         pid = player_id or _player_id()
         if early_ack:
@@ -466,8 +472,57 @@ def music_play(query: str, media_type: str | None = None, player_id: str | None 
         return {"ok": False, "err": str(err), "matched": matched}
     record.update(ok=True, matched=matched)
     _save_last(record)
-    return {"ok": True, "matched": matched, "ms": int((time.time() - started) * 1000),
-            "cached": cached is not None}
+    return {"ok": True, "matched": matched, "ms": int((time.time() - started) * 1000), "cached": cached}
+
+
+SHUFFLE_TRACKS = 25  # same queue length as an artist's first tracks
+
+
+def music_shuffle(player_id: str | None = None, early_ack: bool = True) -> dict[str, Any]:
+    """«Включи музыку» with no name: queue random tracks of the household library (MA's favourites).
+
+    Track URIs go to MA as they are: sound starts in ~3 s, where an artist or playlist URI makes MA fetch every
+    track from the provider first (20..70 s). Returns {ok, matched} like music_play (`matched` is the first
+    track); `err: "empty_library"` when MA holds no playable track. The last play record is NOT used as the
+    default: a misheard utterance would replay the misheard item.
+    """
+    started = time.time()
+    record: dict[str, Any] = {"query": "", "ts": int(started), "ok": False, "matched": None, "err": None}
+    try:
+        tracks = ma_call("music/tracks/library_items", {"limit": SHUFFLE_TRACKS, "order_by": "random"}) or []
+    except MaError as err:
+        record["err"] = str(err)
+        _save_last(record)
+        return {"ok": False, "err": str(err)}
+    playable = [t for t in tracks if t.get("uri") and t.get("name") and t.get("available", True)]
+    if not playable:
+        record["err"] = "empty_library"
+        _save_last(record)
+        return {"ok": False, "err": "empty_library"}
+    first = playable[0]
+    matched = {"score": 1.0, "media_type": "track", "name": first["name"], "uri": first["uri"],
+               "artist": _item_artist(first)}
+    record["query"] = first["name"]
+    return _start_play(record, _cache_key(first["name"], "track"), matched, [t["uri"] for t in playable], player_id,
+                       early_ack, started, False)
+
+
+def music_any() -> dict[str, Any]:
+    """«Включи музыку» without a name: leave what plays alone, else shuffle the library.
+
+    -> {ok, action: "already"|"play", matched?} or {ok: False, err}. «already» covers MA playing and a phone
+    that streams over AirPlay (the receiver plays, MA is idle): neither is replaced. «Продолжи» is the media key
+    for what was stopped; a second «включи музыку» while the first is still starting just picks again.
+    """
+    try:
+        pid = _player_id()
+    except MaError as err:
+        return {"ok": False, "err": str(err)}
+    session = _receiver_session()
+    if (session and session["playing"]) or _ma_player_state(pid) == "playing":
+        return {"ok": True, "action": "already"}
+    played = music_shuffle()
+    return {**played, "action": "play"} if played["ok"] else played
 
 
 _DASHBOARD_KEYS = {"pause": "pause", "resume": "resume", "stop": "stop", "next": "next", "prev": "previous"}

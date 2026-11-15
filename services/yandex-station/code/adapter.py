@@ -30,6 +30,7 @@ import reply_guard
 import user_prompt
 import tts_settings
 import uniproxy_tts
+import voice_skills
 import voice_vocab
 
 # Local instant-arithmetic tool (fin-bot calculator port): pure-math turns
@@ -133,6 +134,7 @@ class Adapter:
         self.allowed = {station.strip() for station in self.env.get("AISIS_ALLOWED_STATIONS", "").split(",") if station.strip()}
         if not self.allowed:
             raise ValueError("AISIS_ALLOWED_STATIONS must contain at least one speaker ID")
+        self.skills = voice_skills.Skills(self.env)
         self.chatgpt_timeout: float | None = None
         if self.env.get("AISIS_PM_URL"):
             keys = ("AISIS_PM_REPLY_TIMEOUT", "AISIS_PM_REQUEST_TIMEOUT",
@@ -429,8 +431,11 @@ class Adapter:
                     await ws.send_json({"type": "partialResponse", "data": {"text": NO_SPEECH_REPLY,
                         "directives": [], "finished": True, "shouldListen": False}})
                 return
-            # Instant arithmetic never wakes the slow browser brain.
+            # Instant arithmetic never wakes the slow browser brain; neither do weather and «включи музыку»,
+            # which the brain cannot do and would refuse (voice_skills.py).
             reply = calc_evaluate(text)
+            if reply is None:
+                reply = await self.skills.answer(text)
             if reply is None:
                 reply = await self.turn(station, text)
         except asyncio.CancelledError:
