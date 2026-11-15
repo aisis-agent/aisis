@@ -116,7 +116,8 @@ class PersistentArtifacts(unittest.TestCase):
         source = destination / FILES[0]
         source.chmod(0o644)
         source.write_text('// changed after acceptance\n')
-        with self.assertRaises((ValueError, RuntimeError)):
+        source.chmod(0o444)
+        with self.assertRaisesRegex(ValueError, 'installed source artifact changed'):
             bgctl.compose_cmd('prod', 'up', '-d')
 
     def test_changed_archive_cannot_be_imported(self):
@@ -159,6 +160,28 @@ class PersistentArtifacts(unittest.TestCase):
         command = bgctl.compose_cmd('prod', 'up', '-d', 'quasar-prod-blue')
         files = [Path(command[index + 1]) for index, value in enumerate(command) if value == '-f']
         self.assertEqual(set(json.loads(files[-1].read_text())['services']), {'quasar-prod-blue'})
+
+    def test_stage_teardown_does_not_require_an_intact_source_artifact(self):
+        state = bgctl.load_state()
+        state.update({'STAGE_IMG_BLUE': IMAGE, 'STAGE_ARTIFACT_BLUE': str(self.root / 'missing-stage-artifact')})
+        bgctl.save_state(state)
+        for arguments in [('down', '--remove-orphans'), ('rm', '-sf', 'quasar-stage-blue'), ('stop', 'quasar-stage-blue')]:
+            command = bgctl.compose_cmd('stage', *arguments)
+            files = [Path(command[index + 1]) for index, value in enumerate(command) if value == '-f']
+            self.assertEqual(json.loads(files[-1].read_text()), {'services': {}})
+        with self.assertRaises((ValueError, OSError)):
+            bgctl.compose_cmd('stage', 'up', '-d')
+
+    def test_runtime_identity_failures_include_safe_operation_and_error_category(self):
+        result = subprocess.CompletedProcess([], 1, '', 'Error response from daemon: No such container: private-secret-canary')
+        with patch.object(bgctl, '_docker', return_value=result):
+            with self.assertRaises(RuntimeError) as caught:
+                bgctl.container_id('prod', 'blue')
+        message = str(caught.exception)
+        self.assertIn('inspect', message)
+        self.assertIn('exit=1', message)
+        self.assertIn('no such container', message.lower())
+        self.assertNotIn('private-secret-canary', message)
 
     def test_runtime_identity_checks_actual_image_and_readonly_mounts(self):
         directory = self.imported()
@@ -205,7 +228,7 @@ class PersistentArtifacts(unittest.TestCase):
 
 
 class ArtifactDeploy(unittest.TestCase):
-    def run_deploy(self, *, fail_idle=False, fail_first=False, fail_restore=False, overlay=False):
+    def run_deploy(self, *, fail_idle=False, fail_first=False, fail_restore=False, fail_before=False, overlay=False, active='green'):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             shutil.copy2(HERE / 'deploy.sh', root / 'deploy.sh')
@@ -214,14 +237,17 @@ class ArtifactDeploy(unittest.TestCase):
             (root / 'docker').chmod(0o755)
             state = root / 'state'
             state.mkdir()
-            (state / 'state.env').write_text('PROD_ACTIVE=green\n')
-            previous = {'image': 'previous-blue', 'artifact': '/previous/artifact'}
-            (root / 'state.json').write_text(json.dumps({'active': 'green', 'images': {'blue': 'previous-blue', 'green': 'rollback-image'},
-                'artifacts': {'blue': '/previous/artifact', 'green': '/active/source-artifact' if overlay else ''},
-                'actual': previous, 'recreate_attempts': 0}))
+            (state / 'state.env').write_text('PROD_ACTIVE=' + active + '\n')
+            idle = 'blue' if active == 'green' else 'green'
+            previous = {'image': 'previous-' + idle, 'artifact': '/previous/artifact'}
+            (root / 'state.json').write_text(json.dumps({'active': active, 'idle_color': idle,
+                'images': {idle: previous['image'], active: 'rollback-image'},
+                'artifacts': {idle: '/previous/artifact', active: '/active/source-artifact' if overlay else ''},
+                'actual': previous, 'actual_id': 'original-idle-container', 'recreate_attempts': 0}))
             environment = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'],
                 'AISIS_BG_STATE': str(state), 'FAIL_IDLE': str(int(fail_idle)),
-                'FAIL_FIRST_RECREATE': str(int(fail_first)), 'FAIL_RESTORE': str(int(fail_restore))}
+                'FAIL_FIRST_RECREATE': str(int(fail_first)), 'FAIL_RESTORE': str(int(fail_restore)),
+                'FAIL_BEFORE_RECREATE': str(int(fail_before))}
             source = root / 'remote-output'
             source.mkdir()
             arguments = ['bash', str(root / 'deploy.sh'), 'deploy', '--overlay' if overlay else '--artifact', str(source)]
@@ -268,9 +294,26 @@ class ArtifactDeploy(unittest.TestCase):
         run, calls, state, logged = self.run_deploy(fail_first=True, fail_restore=True)
         self.assertNotEqual(run.returncode, 0)
         self.assertIsNone(state['actual'])
-        self.assertIn(['bg', 'remove-inactive', 'prod', 'blue', 'fixture-idle-container'], calls)
+        self.assertIn(['bg', 'remove-inactive', 'prod', 'blue', 'fixture-container-1'], calls)
         self.assertIn('restoration failed', logged.lower())
         self.assertEqual(state['active'], 'green')
+
+    def test_failed_compose_before_replacement_preserves_the_original_warm_container(self):
+        run, calls, state, logged = self.run_deploy(fail_before=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(state['actual'], {'image': 'previous-blue', 'artifact': '/previous/artifact'})
+        self.assertEqual(state['actual_id'], 'original-idle-container')
+        self.assertFalse(any(item[:2] == ['bg', 'remove-inactive'] for item in calls))
+        self.assertIn('original idle container', logged)
+        self.assertEqual(state['active'], 'green')
+
+    def test_deployment_targets_green_when_blue_is_active(self):
+        run, calls, state, _log = self.run_deploy(active='blue')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(['bg', 'flip', 'prod', 'green'], calls)
+        self.assertEqual(state['active'], 'green')
+        self.assertEqual(state['images']['blue'], 'rollback-image')
+        self.assertEqual(state['actual']['artifact'], '/installed/new-artifact')
 
     def test_implicit_overlay_refuses_before_changing_an_active_source_artifact(self):
         run, calls, state, logged = self.run_deploy(overlay=True)
@@ -284,6 +327,21 @@ class ArtifactDeploy(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn('fixture corpus stdout is retained', logged)
         self.assertIn('completion exit=0', logged)
+
+
+class DeploymentFixtureContracts(unittest.TestCase):
+    def test_unsupported_commands_and_wrong_target_colors_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / 'bgctl.py'
+            shutil.copy2(HERE / 'tests/fixtures/fake_bgctl.py', script)
+            state = {'active': 'green', 'idle_color': 'blue', 'recreate_attempts': 0}
+            for arguments in [['unsupported'], ['compose', 'prod', 'up', '-d', '--no-deps', '--force-recreate', 'quasar-prod-green'],
+                              ['compose', 'prod', 'up', '--wrong-option', 'quasar-prod-blue']]:
+                (root / 'state.json').write_text(json.dumps(state))
+                run = subprocess.run([sys.executable, str(script), *arguments], capture_output=True, text=True, timeout=5)
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertEqual(json.loads((root / 'state.json').read_text()), state)
 
 
 if __name__ == '__main__':

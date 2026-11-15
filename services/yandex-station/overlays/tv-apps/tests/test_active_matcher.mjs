@@ -29,14 +29,20 @@ function readinessResponse(native,calls){
  const body=Object.hasOwn(native,'proofBody')?native.proofBody:proof;
  return new Response(JSON.stringify(body),{headers:native.proofStale?{'x-aisis-cache':'stale'}:{}});
 }
+async function nativeResponse(native,state,stale){
+ if(native.readError)throw Error('native state unavailable');
+ if(native.readWait)await native.readWait;
+ return new Response(JSON.stringify(state),{headers:stale?{'x-aisis-cache':'stale'}:{}});
+}
 async function load(current='on',appId='com.netflix.ninja',responseStatus=200,stale=false,native={}){
  const calls=[],reads=[],state={state:current,attributes:native.attributes??{app_id:appId}};
  const fetch=async(url,options={})=>{
   const pathname=new URL(url).pathname;
   if(options.method==='POST'){calls.push({path:pathname,body:JSON.parse(options.body)});if(native.requestError)throw Error('uncertain request timeout');return new Response('[]',{status:responseStatus})}
-  if(pathname==='/api/states/'+(native.entity??'media_player.televizor')){reads.push(native.entity??'media_player.televizor');if(native.readError)throw Error('native state unavailable');return new Response(JSON.stringify(state),{headers:stale?{'x-aisis-cache':'stale'}:{}})}
+  if(pathname==='/api/states/'+(native.entity??'media_player.televizor')){reads.push(native.entity??'media_player.televizor');return nativeResponse(native,state,stale)}
   if(pathname==='/api/states/sensor.living_room_fireplace'){
    reads.push('sensor.living_room_fireplace');
+   if(native.proofErrorAfter && reads.filter(id=>id==='sensor.living_room_fireplace').length>native.proofErrorAfter)throw Error('readiness unavailable');
    return readinessResponse(native,calls);
   }
   if(pathname==='/api/states')return new Response('[]');
@@ -160,4 +166,19 @@ test('actual matcher validates definite error codes independently of failed nati
   const result=await api.match('включи камин на проекторе');
   assert.equal(api.calls.length,1);assert.match(result.text,wanted);
  }
+});
+
+test('actual matcher reports a definite host failure even when native state is stalled',async()=>{
+ let release;
+ const readWait=new Promise(resolve=>{release=resolve});
+ const api=await load('playing',undefined,200,false,{entity:'media_player.home',readWait,proofState:'error',proof:{error:'sources_unavailable'}});
+ try{
+  const result=await api.match('включи камин на проекторе');
+  assert.equal(api.calls.length,1);assert.match(result.text,/Не удалось запустить/);
+ }finally{release(undefined)}
+});
+test('actual matcher retains an accepted starting receipt through later readiness failures',async()=>{
+ const api=await load('idle',undefined,200,false,{entity:'media_player.home',proofState:'starting',proofErrorAfter:1,proof:{error:null}});
+ const result=await api.match('включи камин на проекторе');
+ assert.equal(api.calls.length,1);assert.match(result.text,/Запускаю камин/);
 });

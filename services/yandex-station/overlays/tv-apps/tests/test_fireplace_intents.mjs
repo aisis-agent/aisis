@@ -185,3 +185,32 @@ test('a rejected native read cannot erase a definitive same-request controller r
  });
  assert.equal(result.status,'failed');assert.equal(writes,1);
 });
+
+test('a definite controller failure is available without waiting for a stalled native read',async(t)=>{
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:2000000000000});
+ let requestId,writes=0,result,release;
+ const nativeRead=new Promise(resolve=>{release=resolve});
+ const task=api.executeFireplaceIntent(parse('включи камин'),{
+  callScript:async(_entity,variables)=>{writes++;requestId=variables.request_id},
+  readNative:async()=>await nativeRead,
+  readReadiness:async()=>({...ready(requestId,{error:'sources_unavailable'}),state:'error'})
+ }).then(value=>{result=value});
+ await flush();
+ try{assert.equal(result?.status,'failed');assert.equal(writes,1)}
+ finally{release(undefined);t.mock.timers.tick(4000);await flush();await task}
+});
+test('missing or rejected later readiness keeps the same request accepted as starting',async()=>{
+ for(const missing of [undefined,null,'rejected']){
+  let requestId,reads=0,writes=0;
+  const result=await api.executeFireplaceIntent(parse('включи камин'),{
+   callScript:async(_entity,variables)=>{writes++;requestId=variables.request_id},
+   readNative:async()=>undefined,
+   readReadiness:async()=>{
+    if(++reads===1)return {...ready(requestId,{error:null}),state:'starting'};
+    if(missing==='rejected')throw Error('readiness unavailable');
+    return missing;
+   },sleep:async()=>{}
+  });
+  assert.equal(result.status,'starting',String(missing));assert.equal(writes,1);
+ }
+});
