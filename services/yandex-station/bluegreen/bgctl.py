@@ -4,7 +4,9 @@
 State lives outside the code directory (AISIS_BG_STATE, default
 ~/.local/share/aisis/bluegreen-state):
 
-  state.env                 PROD_ACTIVE, PROD_IMG_BLUE/GREEN, STAGE_* (compose env file)
+  state.env                 PROD_ACTIVE, PROD_IMG_BLUE/GREEN, *_ARTIFACT_* (compose env file)
+  artifacts/<identity>/     immutable source files and remote integrity proof
+  source-artifacts.compose.json  generated read-only mounts, used by every compose invocation
   <env>/switch/nginx.conf   static switch config (generated)
   <env>/switch/active.conf  upstreams: active color is primary, the other `backup`
 
@@ -29,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import smoke  # noqa: E402
+import source_artifacts  # noqa: E402
 
 CODE_DIR = Path(__file__).resolve().parent
 HOME = Path.home()
@@ -241,7 +244,9 @@ def wait_healthy(env: str, color: str, seconds: float) -> bool:
 # ── compose ──────────────────────────────────────────────────────────────
 
 def compose_cmd(env: str | None, *args: str) -> list[str]:
-    cmd = ["docker", "compose", "-p", COMPOSE_PROJECT, "-f", str(COMPOSE_FILE)]
+    artifacts = STATE_DIR / "source-artifacts.compose.json"
+    _atomic_write(artifacts, json.dumps(source_artifacts.compose_overlay(load_state()), indent=2) + "\n")
+    cmd = ["docker", "compose", "-p", COMPOSE_PROJECT, "-f", str(COMPOSE_FILE), "-f", str(artifacts)]
     if RUNTIME_ENV.exists():
         cmd += ["--env-file", str(RUNTIME_ENV)]
     cmd += ["--env-file", str(STATE_FILE)]
@@ -262,6 +267,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     for env in ENVS:
         state.setdefault(f"{env.upper()}_ACTIVE", "blue")
         for color in COLORS:
+            if args.force:
+                state.pop(f"{env.upper()}_ARTIFACT_{color.upper()}", None)
             state[f"{env.upper()}_IMG_{color.upper()}"] = args.image if args.force else state.get(
                 f"{env.upper()}_IMG_{color.upper()}", args.image)
     save_state(state)
@@ -283,6 +290,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             "colors": {
                 color: {
                     "image": state.get(f"{env.upper()}_IMG_{color.upper()}"),
+                    "artifact": state.get(f"{env.upper()}_ARTIFACT_{color.upper()}"),
                     "running": container_running(container(env, color)),
                     **health(env, color),
                 }
@@ -311,9 +319,26 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 
 def cmd_set_image(args: argparse.Namespace) -> int:
+    artifact = getattr(args, "artifact", "")
+    if artifact:
+        directory = Path(artifact)
+        if directory.parent != (STATE_DIR / "artifacts").resolve() or directory != directory.resolve():
+            raise ValueError("import source artifacts into persistent blue/green state first")
+        source_artifacts.validate_artifact(directory, args.image)
     state = load_state()
     state[f"{args.env.upper()}_IMG_{args.color.upper()}"] = args.image
+    state[f"{args.env.upper()}_ARTIFACT_{args.color.upper()}"] = artifact
     save_state(state)
+    return 0
+
+
+def cmd_import_artifact(args: argparse.Namespace) -> int:
+    print(source_artifacts.import_artifact(Path(args.source), STATE_DIR / "artifacts"))
+    return 0
+
+
+def cmd_artifact_image(args: argparse.Namespace) -> int:
+    print(source_artifacts.validate_artifact(Path(args.artifact))["image_id"])
     return 0
 
 
@@ -379,7 +404,16 @@ def main() -> int:
     p.add_argument("env", choices=list(ENVS))
     p.add_argument("color", choices=COLORS)
     p.add_argument("image")
+    p.add_argument("--artifact", default="", help="persistent verified source artifact; omitted clears this color's mounts")
     p.set_defaults(func=cmd_set_image)
+
+    p = sub.add_parser("import-artifact", help="copy the remote two-file artifact into immutable local state")
+    p.add_argument("source")
+    p.set_defaults(func=cmd_import_artifact)
+
+    p = sub.add_parser("artifact-image", help="print an artifact's required existing image identity")
+    p.add_argument("artifact")
+    p.set_defaults(func=cmd_artifact_image)
 
     p = sub.add_parser("get", help="print active|standby|IMG_BLUE|IMG_GREEN for an env")
     p.add_argument("env", choices=list(ENVS))
@@ -409,7 +443,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         return args.func(args)
-    except (RuntimeError, subprocess.SubprocessError) as exc:
+    except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
         print(f"bgctl: {exc}", file=sys.stderr)
         return 2
 

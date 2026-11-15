@@ -2,7 +2,6 @@
 import argparse
 import contextlib
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -119,13 +118,25 @@ class PersistentArtifacts(unittest.TestCase):
         with self.assertRaises((ValueError, RuntimeError)):
             bgctl.compose_cmd('prod', 'up', '-d')
 
-    def test_changed_archive_and_unexpected_tar_members_cannot_be_imported(self):
+    def test_changed_archive_cannot_be_imported(self):
         with (self.input / 'fireplace-artifact.tar').open('ab') as stream:
             stream.write(b'changed')
         command = getattr(bgctl, 'cmd_import_artifact', None)
         self.assertTrue(callable(command))
         with self.assertRaises((ValueError, RuntimeError)):
             command(argparse.Namespace(source=str(self.input)))
+        self.assertFalse(list(self.state.glob('artifacts/*')))
+
+    def test_unexpected_archive_members_are_rejected_even_with_an_updated_archive_digest(self):
+        archive = self.input / 'fireplace-artifact.tar'
+        with tarfile.open(archive, 'a') as bundle:
+            member = tarfile.TarInfo('backend/unrelated.ts')
+            member.size = 1
+            bundle.addfile(member, io.BytesIO(b'x'))
+        self.proof['artifact_sha256'] = hashlib.sha256(archive.read_bytes()).hexdigest()
+        (self.input / 'proof.json').write_text(json.dumps(self.proof))
+        with self.assertRaises((ValueError, RuntimeError)):
+            bgctl.cmd_import_artifact(argparse.Namespace(source=str(self.input)))
         self.assertFalse(list(self.state.glob('artifacts/*')))
 
 
@@ -184,6 +195,7 @@ elif cmd=='smoke' and args[1:] == ['prod','blue'] and os.environ.get('FAIL_IDLE'
     def test_failed_idle_checks_restore_image_and_artifact_without_flip(self):
         run, calls, state = self.run_deploy(fail_idle=True)
         self.assertNotEqual(run.returncode, 0)
+        self.assertIn(['bg', 'smoke', 'prod', 'blue'], calls, run.stderr)
         self.assertFalse(any(item[:3] == ['bg', 'flip', 'prod'] for item in calls))
         self.assertEqual(state['images']['blue'], 'previous-blue')
         self.assertEqual(state['artifacts']['blue'], '/previous/artifact')

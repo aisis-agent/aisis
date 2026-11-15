@@ -345,7 +345,7 @@ def managed_command(bundle: Path, source_id: str) -> list[str]:
     wrapper = Path.home() / ".local/bin/runpod-run"
     # No custom pod name and no retained pod. Native wrapper identity is this
     # input's independent Git common directory; changed input creates a new pod.
-    return [str(wrapper), "--sync-dir", str(bundle),
+    return [str(wrapper), "--cpu", "cpu3c-4", "--sync-dir", str(bundle),
             "--remote-reason", "Required AISIS adversarial corpus gate must run on RunPod",
             "--timeout", "900", "--bootstrap",
             "python3 corpus_runpod.py --bootstrap " + source_id,

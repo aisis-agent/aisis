@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Blue/green deploy for the voice stack. See README.md.
 #
-#   deploy.sh deploy [--overlay SRC_DIR [--base IMAGE] | --context DIR] [--tag TAG] [--no-speaker-wait]
+#   deploy.sh deploy [--artifact REMOTE_OUTPUT | --overlay SRC_DIR [--base IMAGE] | --context DIR] [--tag TAG] [--no-speaker-wait]
 #   deploy.sh rollback
 #   deploy.sh stage-up [IMAGE]      rebuild the stage stack (private DB copy) on IMAGE
 #   deploy.sh stage-check           corpus + API + uniproxy handshake on both stage colors and the stage switch
@@ -13,6 +13,12 @@
 # A deploy never touches the active color or the switch until the new image has
 # passed the stage checks and the idle prod color has passed its own checks.
 set -euo pipefail
+umask 077
+deploy_log=$(mktemp /tmp/aisis-bluegreen-deploy.XXXXXX.log)
+exec 2> >(tee -a "$deploy_log" >&2)
+printf '%s startup log=%s\n' "$(date -u +%FT%TZ)" "$deploy_log" >&2
+completion_log() { printf '%s completion exit=%s log=%s\n' "$(date -u +%FT%TZ)" "$1" "$deploy_log" >&2; }
+trap 'status=$?; completion_log "$status"' EXIT
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 state_dir=${AISIS_BG_STATE:-$HOME/.local/share/aisis/bluegreen-state}
@@ -27,7 +33,7 @@ die() { log "ABORT: $*"; exit 1; }
 upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 
 # Tells failover.py not to act while a deploy deliberately restarts things.
-maintenance_on() { mkdir -p "$state_dir"; touch "$state_dir/maintenance"; trap 'rm -f "$state_dir/maintenance"' EXIT; }
+maintenance_on() { mkdir -p "$state_dir"; touch "$state_dir/maintenance"; trap 'status=$?; rm -f "$state_dir/maintenance"; completion_log "$status"' EXIT; }
 maintenance_touch() { touch "$state_dir/maintenance"; }
 
 ensure_state() {
@@ -70,13 +76,17 @@ stage_db_reset() {
 }
 
 stage_up() {
-  local img=${1:-} color
+  local img=${1:-} artifact=${2:-} color
   ensure_state
-  [[ -n $img ]] || img=$(bg get prod "IMG_$(upper "$(bg get prod active)")")
+  if [[ -z $img ]]; then
+    color=$(upper "$(bg get prod active)")
+    img=$(bg get prod "IMG_$color")
+    artifact=$(bg get prod "ARTIFACT_$color")
+  fi
   log "stage: image $img"
   bg compose stage rm -sf quasar-stage-blue quasar-stage-green >/dev/null 2>&1 || true
   stage_db_reset
-  for color in blue green; do bg set-image stage "$color" "$img"; done
+  for color in blue green; do bg set-image stage "$color" "$img" --artifact "$artifact"; done
   bg render stage
   bg compose stage up -d --force-recreate >/dev/null 2>&1 || die "stage compose up failed"
   for color in blue green; do
@@ -110,11 +120,12 @@ prune_old_images() {
 }
 
 cmd_deploy() {
-  local mode=context src="" base="" tag img active idle idle_up before
+  local mode=context src="" base="" artifact="" tag img active idle idle_up before
   tag=$(date +%Y%m%d-%H%M%S)
   local wait_speaker=1
   while (($#)); do
     case $1 in
+      --artifact) mode=artifact; src=$2; shift 2 ;;
       --overlay) mode=overlay; src=$2; shift 2 ;;
       --context) mode=context; src=$2; shift 2 ;;
       --base) base=$2; shift 2 ;;
@@ -123,31 +134,38 @@ cmd_deploy() {
       *) die "unknown option $1" ;;
     esac
   done
-  [[ -n $src ]] || die "give --overlay SRC_DIR or --context DIR"
+  [[ -n $src ]] || die "give --artifact REMOTE_OUTPUT, --overlay SRC_DIR or --context DIR"
   maintenance_on
   ensure_state
   active=$(bg get prod active)
   idle=$([[ $active == blue ]] && echo green || echo blue)
-  [[ -n $base ]] || base=$(bg get prod "IMG_$(upper "$active")")
-
-  log "[1/6] build ($mode, base $base)"
-  img=$(build_image "$mode" "$src" "$base" "$tag")
+  if [[ $mode == artifact ]]; then
+    log "[1/6] import verified remote source artifact"
+    artifact=$(bg import-artifact "$src")
+    img=$(bg artifact-image "$artifact")
+    [[ -z $base || $base == "$img" ]] || die "artifact belongs to a different image"
+  else
+    [[ -n $base ]] || base=$(bg get prod "IMG_$(upper "$active")")
+    log "[1/6] build ($mode, base $base)"
+    img=$(build_image "$mode" "$src" "$base" "$tag")
+  fi
   log "image: $img"
 
   log "[2/6] stage: new image, private DB copy, no speaker, HA dry-run"
-  stage_up "$img"
+  stage_up "$img" "$artifact"
   maintenance_touch
   stage_check || die "stage checks failed on $img; prod untouched"
 
   log "[3/6] prod idle color: $idle"
-  local prev_img
+  local prev_img prev_artifact
   prev_img=$(bg get prod "IMG_$(upper "$idle")")
-  bg set-image prod "$idle" "$img"
+  prev_artifact=$(bg get prod "ARTIFACT_$(upper "$idle")")
+  bg set-image prod "$idle" "$img" --artifact "$artifact"
   bg compose prod up -d --no-deps --force-recreate "quasar-prod-$idle" >/dev/null 2>&1 \
-    || { bg set-image prod "$idle" "$prev_img"; die "could not start prod $idle"; }
+    || { bg set-image prod "$idle" "$prev_img" --artifact "$prev_artifact"; die "could not start prod $idle"; }
   if ! bg wait prod "$idle" 90 || ! corpus_check "aisis-quasar-prod-$idle" || ! bg smoke prod "$idle"; then
     log "idle $idle failed its checks; restoring previous image on it"
-    bg set-image prod "$idle" "$prev_img"
+    bg set-image prod "$idle" "$prev_img" --artifact "$prev_artifact"
     bg compose prod up -d --no-deps --force-recreate "quasar-prod-$idle" >/dev/null 2>&1 || true
     die "prod $idle failed pre-flip checks; $active still serving"
   fi
