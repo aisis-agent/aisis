@@ -93,6 +93,35 @@ class SkillsRunnerTests(unittest.TestCase):
         with mock.patch.object(voice_skills, "WEATHER_TIMEOUT_S", 0.2):
             self.assertEqual(asyncio.run(skills.answer("какая погода")), voice_skills.WEATHER_FAILED)
 
+    def test_timeout_survives_a_process_group_that_is_already_gone(self):
+        real_killpg = os.killpg
+
+        def killpg_then_vanish(pgid, sig):
+            real_killpg(pgid, sig)
+            raise ProcessLookupError
+
+        skills = self.skills("sleep 30")
+        with mock.patch.object(voice_skills, "WEATHER_TIMEOUT_S", 0.2), \
+                mock.patch.object(voice_skills.os, "killpg", side_effect=killpg_then_vanish):
+            self.assertEqual(asyncio.run(skills.answer("какая погода")), voice_skills.WEATHER_FAILED)
+
+    def test_cli_gets_a_minimal_environment_without_secrets(self):
+        env = {"PATH": "/usr/bin:/bin", "HOME": self.tmp.name, "LANG": "C.UTF-8",
+               "WEATHER_LAT": "1.5", "AISIS_WEATHER_COMMAND": '["%s"]' % self.fake_weather("env")}
+        secrets = {"ANTHROPIC_API_KEY": "sk-x", "HA_TOKEN": "t1", "HA_URL": "http://ha", "AISIS_CLAUDE_KEY": "k",
+                   "MA_TOKEN": "t2", "GITHUB_TOKEN": "t3"}
+        skills = voice_skills.Skills({**env, **secrets})
+        reply = asyncio.run(skills.answer("какая погода"))
+        child = dict(line.split("=", 1) for line in reply.splitlines() if "=" in line)
+        for name in ("ANTHROPIC_API_KEY", "HA_TOKEN", "HA_URL", "AISIS_CLAUDE_KEY", "MA_TOKEN", "GITHUB_TOKEN",
+                     "AISIS_WEATHER_COMMAND"):
+            self.assertNotIn(name, child)
+        self.assertEqual(child["HOME"], self.tmp.name)
+        self.assertEqual(child["LANG"], "C.UTF-8")
+        self.assertEqual(child["WEATHER_LAT"], "1.5")
+        self.assertEqual(child["WEATHER_HA_URL"], "http://127.0.0.1:8795")
+        self.assertEqual(child["WEATHER_HA_TOKEN"], "via-ha-cli")
+
     def test_missing_cli_is_an_honest_sentence(self):
         skills = voice_skills.Skills({"PATH": "/nonexistent"})
         with mock.patch.object(voice_skills.shutil, "which", return_value=None):
