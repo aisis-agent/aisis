@@ -1,0 +1,149 @@
+{"id": "F01", "text": "Привет", "label": "fast", "tag": "greeting"}
+{"id": "F02", "text": "Привет, как дела?", "label": "fast", "tag": "greeting"}
+{"id": "F03", "text": "Доброе утро", "label": "fast", "tag": "greeting"}
+{"id": "F04", "text": "Добрый вечер", "label": "fast", "tag": "greeting"}
+{"id": "F05", "text": "Здравствуй", "label": "fast", "tag": "greeting"}
+{"id": "F06", "text": "Пока", "label": "fast", "tag": "farewell"}
+{"id": "F07", "text": "Спокойной ночи", "label": "fast", "tag": "farewell"}
+{"id": "F08", "text": "До завтра", "label": "fast", "tag": "farewell"}
+{"id": "F09", "text": "Спасибо", "label": "fast", "tag": "thanks"}
+{"id": "F10", "text": "Большое спасибо", "label": "fast", "tag": "thanks"}
+{"id": "F11", "text": "Ты молодец", "label": "fast", "tag": "praise"}
+{"id": "F12", "text": "Умница", "label": "fast", "tag": "praise"}
+{"id": "F13", "text": "Отлично", "label": "fast", "tag": "praise"}
+{"id": "F14", "text": "Супер, класс", "label": "fast", "tag": "praise"}
+{"id": "F15", "text": "Ты классная", "label": "fast", "tag": "praise"}
+{"id": "F16", "text": "Да", "label": "fast", "tag": "ack"}
+{"id": "F17", "text": "Нет", "label": "fast", "tag": "ack"}
+{"id": "F18", "text": "Ага", "label": "fast", "tag": "ack"}
+{"id": "F19", "text": "Ладно", "label": "fast", "tag": "ack"}
+{"id": "F20", "text": "Хорошо, понял", "label": "fast", "tag": "ack"}
+{"id": "F21", "text": "Ну окей", "label": "fast", "tag": "ack"}
+{"id": "F22", "text": "Не надо", "label": "fast", "tag": "ack"}
+{"id": "F23", "text": "Отмена", "label": "fast", "tag": "ack"}
+{"id": "F24", "text": "Как ты?", "label": "fast", "tag": "persona"}
+{"id": "F25", "text": "Как жизнь?", "label": "fast", "tag": "persona"}
+{"id": "F26", "text": "Ты здесь?", "label": "fast", "tag": "persona"}
+{"id": "F27", "text": "Ты меня слышишь?", "label": "fast", "tag": "persona"}
+{"id": "F28", "text": "Ты спишь?", "label": "fast", "tag": "persona"}
+{"id": "F29", "text": "Как тебя зовут?", "label": "fast", "tag": "persona"}
+{"id": "F30", "text": "Кто ты?", "label": "fast", "tag": "persona"}
+{"id": "F31", "text": "Что ты делаешь?", "label": "fast", "tag": "persona"}
+{"id": "F32", "text": "Расскажи шутку", "label": "fast", "tag": "joke"}
+{"id": "F33", "text": "Расскажи анекдот", "label": "fast", "tag": "joke"}
+{"id": "F34", "text": "Мне скучно", "label": "fast", "tag": "mood"}
+{"id": "F35", "text": "Мне грустно", "label": "fast", "tag": "mood"}
+{"id": "F36", "text": "Я устал", "label": "fast", "tag": "mood"}
+{"id": "F37", "text": "Давай поболтаем", "label": "fast", "tag": "mood"}
+{"id": "F38", "text": "Скажи что-нибудь приятное", "label": "fast", "tag": "mood"}
+{"id": "F39", "text": "Сколько будет пять миль в километрах?", "label": "deterministic", "tag": "conversion"}
+{"id": "F40", "text": "Переведи десять фунтов в килограммы", "label": "deterministic", "tag": "conversion"}
+{"id": "F41", "text": "Переведи три дюйма в сантиметры", "label": "deterministic", "tag": "conversion"}
+{"id": "F42", "text": "Сколько будет семьдесят градусов по Фаренгейту в Цельсиях?", "label": "deterministic", "tag": "conversion"}
+{"id": "R01", "text": "Лиса в клюкике ряду", "label": "reprompt", "tag": "noise"}
+{"id": "R02", "text": "Голи с портом на", "label": "reprompt", "tag": "noise"}
+{"id": "R03", "text": "Рекупалка поставьте", "label": "reprompt", "tag": "noise"}
+{"id": "R04", "text": "Толиса в эфире на нагреве", "label": "reprompt", "tag": "noise"}
+{"id": "R05", "text": "Я лисен", "label": "reprompt", "tag": "noise"}
+{"id": "R06", "text": "Распущу", "label": "reprompt", "tag": "noise"}
+{"id": "R07", "text": "Включи", "label": "reprompt", "tag": "incomplete"}
+{"id": "R08", "text": "Выключи", "label": "reprompt", "tag": "incomplete"}
+{"id": "R09", "text": "А чтобы ты", "label": "reprompt", "tag": "incomplete"}
+{"id": "R10", "text": "Ну и", "label": "reprompt", "tag": "incomplete"}
+{"id": "R11", "text": "Так", "label": "reprompt", "tag": "incomplete"}
+{"id": "R12", "text": "Э", "label": "reprompt", "tag": "incomplete"}
+{"id": "R13", "text": "Мм", "label": "reprompt", "tag": "incomplete"}
+{"id": "R14", "text": "Поставь на", "label": "reprompt", "tag": "incomplete"}
+{"id": "R15", "text": "Покажи мне эту", "label": "reprompt", "tag": "incomplete"}
+{"id": "R16", "text": "Громкость", "label": "reprompt", "tag": "incomplete"}
+{"id": "R17", "text": "Пятнадцать", "label": "reprompt", "tag": "incomplete"}
+{"id": "R18", "text": "Урок из", "label": "reprompt", "tag": "incomplete"}
+{"id": "R19", "text": "Что первая встреча", "label": "reprompt", "tag": "noise"}
+{"id": "R20", "text": "Алиса", "label": "reprompt", "tag": "wake_only"}
+{"id": "E01", "text": "Какая погода завтра в Белграде?", "label": "escalate", "tag": "fact"}
+{"id": "E02", "text": "Что нового в мире сегодня?", "label": "escalate", "tag": "fact"}
+{"id": "E03", "text": "Какие сегодня новости?", "label": "escalate", "tag": "fact"}
+{"id": "E04", "text": "Сколько стоит биткоин?", "label": "escalate", "tag": "fact"}
+{"id": "E05", "text": "Какой сейчас курс доллара?", "label": "escalate", "tag": "fact"}
+{"id": "E06", "text": "Курс евро к динару", "label": "escalate", "tag": "fact"}
+{"id": "E07", "text": "Кто сейчас президент Франции?", "label": "escalate", "tag": "fact"}
+{"id": "E08", "text": "Кто выиграл вчера в футболе?", "label": "escalate", "tag": "fact"}
+{"id": "E09", "text": "Когда начнётся чемпионат мира?", "label": "escalate", "tag": "fact"}
+{"id": "E10", "text": "Что такое фотосинтез?", "label": "escalate", "tag": "fact"}
+{"id": "E11", "text": "Расскажи про фотосинтез", "label": "escalate", "tag": "fact"}
+{"id": "E12", "text": "Сколько людей живёт в Сербии?", "label": "escalate", "tag": "fact"}
+{"id": "E13", "text": "Какая столица Австралии?", "label": "escalate", "tag": "fact"}
+{"id": "E14", "text": "Кто написал Войну и мир?", "label": "escalate", "tag": "fact"}
+{"id": "E15", "text": "В каком году началась вторая мировая война?", "label": "escalate", "tag": "fact"}
+{"id": "E16", "text": "Сколько километров от Белграда до Москвы?", "label": "escalate", "tag": "fact"}
+{"id": "E17", "text": "Который час?", "label": "escalate", "tag": "fact"}
+{"id": "E18", "text": "Какое сегодня число?", "label": "escalate", "tag": "fact"}
+{"id": "E19", "text": "Какой сегодня день недели?", "label": "escalate", "tag": "fact"}
+{"id": "E20", "text": "Когда восход солнца завтра?", "label": "escalate", "tag": "fact"}
+{"id": "E21", "text": "Сколько калорий в банане?", "label": "escalate", "tag": "fact"}
+{"id": "E22", "text": "Сколько стоит билет до Парижа?", "label": "escalate", "tag": "fact"}
+{"id": "E23", "text": "Работает ли сегодня аптека рядом?", "label": "escalate", "tag": "fact"}
+{"id": "E24", "text": "Как называется самая высокая гора в мире?", "label": "escalate", "tag": "fact"}
+{"id": "E25", "text": "Кто такой Илон Маск?", "label": "escalate", "tag": "fact"}
+{"id": "E26", "text": "Что случилось с курсом рубля?", "label": "escalate", "tag": "fact"}
+{"id": "E27", "text": "Какой счёт в матче Реал Барселона?", "label": "escalate", "tag": "fact"}
+{"id": "E28", "text": "Сколько сейчас градусов на улице?", "label": "escalate", "tag": "fact"}
+{"id": "E29", "text": "Будет ли завтра дождь?", "label": "escalate", "tag": "fact"}
+{"id": "E30", "text": "Что идёт в кино сегодня вечером?", "label": "escalate", "tag": "fact"}
+{"id": "E31", "text": "Когда выйдет новый айфон?", "label": "escalate", "tag": "fact"}
+{"id": "E32", "text": "Какая сейчас пробка до аэропорта?", "label": "escalate", "tag": "fact"}
+{"id": "E33", "text": "Кто победил на выборах?", "label": "escalate", "tag": "fact"}
+{"id": "E34", "text": "Сколько весит Эйфелева башня?", "label": "escalate", "tag": "fact"}
+{"id": "E35", "text": "Какой рейс в Москву сегодня?", "label": "escalate", "tag": "fact"}
+{"id": "E36", "text": "Как мне помириться с женой после ссоры?", "label": "escalate", "tag": "complex"}
+{"id": "E37", "text": "Объясни, как работает блокчейн", "label": "escalate", "tag": "complex"}
+{"id": "E38", "text": "Помоги составить письмо начальнику об отпуске", "label": "escalate", "tag": "complex"}
+{"id": "E39", "text": "Придумай план тренировок на неделю", "label": "escalate", "tag": "complex"}
+{"id": "E40", "text": "Посоветуй, какой ноутбук купить", "label": "escalate", "tag": "complex"}
+{"id": "E41", "text": "Напиши стихотворение про осень на восемь строк", "label": "escalate", "tag": "complex"}
+{"id": "E42", "text": "Сравни плюсы и минусы электромобиля и бензинового", "label": "escalate", "tag": "complex"}
+{"id": "E43", "text": "Почему небо голубое?", "label": "escalate", "tag": "complex"}
+{"id": "E44", "text": "Как приготовить борщ по шагам?", "label": "escalate", "tag": "complex"}
+{"id": "E45", "text": "Что делать, если болит голова третий день?", "label": "escalate", "tag": "complex"}
+{"id": "E46", "text": "Можно ли принимать ибупрофен с алкоголем?", "label": "escalate", "tag": "complex"}
+{"id": "E47", "text": "Мне плохо, вызови скорую", "label": "escalate", "tag": "complex"}
+{"id": "E48", "text": "Позвони в полицию", "label": "escalate", "tag": "complex"}
+{"id": "E49", "text": "Как вести себя на собеседовании?", "label": "escalate", "tag": "complex"}
+{"id": "E50", "text": "Реши уравнение икс в квадрате минус пять икс плюс шесть равно нулю", "label": "escalate", "tag": "complex"}
+{"id": "E51", "text": "Составь список покупок на неделю для семьи из четырёх человек", "label": "escalate", "tag": "complex"}
+{"id": "E52", "text": "Переведи на английский фразу я хочу заказать столик на двоих", "label": "escalate", "tag": "complex"}
+{"id": "E53", "text": "Объясни разницу между налогом на прибыль и НДС", "label": "escalate", "tag": "complex"}
+{"id": "E54", "text": "Что лучше, ипотека или аренда?", "label": "escalate", "tag": "complex"}
+{"id": "E55", "text": "Напомни завтра в девять позвонить маме", "label": "escalate", "tag": "complex"}
+{"id": "E56", "text": "Запомни, что ключи лежат в верхнем ящике", "label": "escalate", "tag": "complex"}
+{"id": "E57", "text": "Что я спрашивал у тебя вчера?", "label": "escalate", "tag": "complex"}
+{"id": "E58", "text": "Включи свет и расскажи, что сегодня в новостях", "label": "escalate", "tag": "complex"}
+{"id": "E59", "text": "Что ты думаешь о войне?", "label": "escalate", "tag": "complex"}
+{"id": "E60", "text": "Расскажи про Путина", "label": "escalate", "tag": "complex"}
+{"id": "E61", "text": "Привет, какая завтра погода?", "label": "escalate", "tag": "trap"}
+{"id": "E62", "text": "Спасибо, а сколько стоит биткоин?", "label": "escalate", "tag": "trap"}
+{"id": "E63", "text": "Как дела у Дурова?", "label": "escalate", "tag": "trap"}
+{"id": "E64", "text": "Ты знаешь, кто сейчас президент США?", "label": "escalate", "tag": "trap"}
+{"id": "E65", "text": "Да, и ещё скажи курс доллара", "label": "escalate", "tag": "trap"}
+{"id": "E66", "text": "Ну окей, а что в новостях?", "label": "escalate", "tag": "trap"}
+{"id": "E67", "text": "Ты слышишь, сколько сейчас времени?", "label": "escalate", "tag": "trap"}
+{"id": "E68", "text": "Как тебя зовут и какая сегодня дата?", "label": "escalate", "tag": "trap"}
+{"id": "E69", "text": "Мне грустно, расскажи, что случилось в мире", "label": "escalate", "tag": "trap"}
+{"id": "E70", "text": "Как дела в Белграде с погодой?", "label": "escalate", "tag": "trap"}
+{"id": "E71", "text": "Спокойной ночи, во сколько завтра встаёт солнце?", "label": "escalate", "tag": "trap"}
+{"id": "E72", "text": "А почему так?", "label": "escalate", "tag": "followup", "prev": "escalate"}
+{"id": "R21", "text": "Таймер на", "label": "reprompt", "tag": "incomplete"}
+{"id": "R22", "text": "Сделай пожалуйста это", "label": "reprompt", "tag": "incomplete"}
+{"id": "R23", "text": "В гост", "label": "reprompt", "tag": "incomplete"}
+{"id": "R24", "text": "Котор", "label": "reprompt", "tag": "incomplete"}
+{"id": "R25", "text": "Непер гором", "label": "reprompt", "tag": "noise"}
+{"id": "R26", "text": "Люру ски", "label": "reprompt", "tag": "noise"}
+{"id": "R27", "text": "Грмкос", "label": "reprompt", "tag": "incomplete"}
+{"id": "R28", "text": "Свере кума", "label": "reprompt", "tag": "noise"}
+{"id": "R29", "text": "Постав", "label": "reprompt", "tag": "incomplete"}
+{"id": "R30", "text": "Брачо", "label": "reprompt", "tag": "wake_only"}
+{"id": "E73", "text": "Спланируй поездку на выходные с ребёнком", "label": "escalate", "tag": "complex"}
+{"id": "E74", "text": "Прочитай мой договор аренды и найди риски", "label": "escalate", "tag": "complex"}
+{"id": "E75", "text": "Помоги настроить домашнюю сеть без двойного NAT", "label": "escalate", "tag": "complex"}
+{"id": "E76", "text": "Как безопасно восстановить удалённые файлы?", "label": "escalate", "tag": "complex"}
+{"id": "E77", "text": "Объясни ребёнку дроби на нескольких примерах", "label": "escalate", "tag": "complex"}
