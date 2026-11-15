@@ -246,7 +246,9 @@ def wait_healthy(env: str, color: str, seconds: float) -> bool:
 
 def compose_cmd(env: str | None, *args: str) -> list[str]:
     artifacts = STATE_DIR / f"source-artifacts.{env or 'all'}.compose.json"
-    _atomic_write(artifacts, json.dumps(source_artifacts.compose_overlay(load_state(), env), indent=2) + "\n")
+    teardown = bool(args) and args[0] in ("down", "rm", "stop")
+    overlay = {"services": {}} if teardown else source_artifacts.compose_overlay(load_state(), env)
+    _atomic_write(artifacts, json.dumps(overlay, indent=2) + "\n")
     cmd = ["docker", "compose", "-p", COMPOSE_PROJECT, "-f", str(COMPOSE_FILE), "-f", str(artifacts)]
     if RUNTIME_ENV.exists():
         cmd += ["--env-file", str(RUNTIME_ENV)]
@@ -256,10 +258,21 @@ def compose_cmd(env: str | None, *args: str) -> list[str]:
     return cmd + list(args)
 
 
+def docker_failure(operation: str, result: subprocess.CompletedProcess) -> RuntimeError:
+    # Report recognized categories only; daemon stderr can include private paths or values.
+    categories = ("no such image", "no such container", "no such object",
+                  "cannot connect to the docker daemon", "permission denied",
+                  "connection refused", "context deadline exceeded")
+    stderr = (result.stderr or "")[:4096].lower()
+    category = next((value for value in categories if value in stderr), "unclassified Docker error")
+    return RuntimeError(f"Docker {operation} failed (exit={result.returncode}; {category})")
+
+
 def identity_query(*arguments: str) -> str:
     result = _docker(*arguments, timeout=15)
     if result.returncode != 0:
-        raise RuntimeError("Docker runtime identity query failed")
+        operation = "image inspect" if arguments[0] == "image" else arguments[0]
+        raise docker_failure(operation, result)
     return result.stdout.strip()
 
 
@@ -294,7 +307,7 @@ def remove_inactive(env: str, color: str, expected_id: str) -> None:
         raise RuntimeError("active color changed; cleanup refused")
     result = _docker("rm", "-f", expected_id, timeout=30)
     if result.returncode != 0:
-        raise RuntimeError("failed inactive container could not be removed")
+        raise docker_failure("remove inactive container", result)
 
 
 def run_compose(env: str | None, *args: str, check: bool = True) -> int:

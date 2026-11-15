@@ -130,13 +130,16 @@ restore_idle() {
 }
 
 recover_idle() {
-  local idle=$1 active=$2 previous_image=$3 previous_artifact=$4 reason=$5 failed_id
+  local idle=$1 active=$2 previous_image=$3 previous_artifact=$4 original_id=$5 reason=$6 failed_id
   log "$reason; restoring the previous idle image and artifact"
   if restore_idle "$idle" "$active" "$previous_image" "$previous_artifact"; then
     die "$reason; previous idle runtime restored and verified; $active still serving"
   fi
-  log "restoration failed; removing only the still-inactive captured container"
+  log "restoration failed; checking whether the original idle container was replaced"
   failed_id=$(bg container-id prod "$idle") || die "restoration failed and failed container identity is unavailable; cleanup refused"
+  if [[ $failed_id == "$original_id" ]]; then
+    die "$reason; restoration failed; original idle container preserved; $active still serving"
+  fi
   bg remove-inactive prod "$idle" "$failed_id" || die "restoration failed and safe inactive cleanup failed"
   die "$reason; restoration failed; failed idle container removed; $active still serving"
 }
@@ -182,14 +185,15 @@ cmd_deploy() {
   stage_check || die "stage checks failed on $img; prod untouched"
 
   log "[3/6] prod idle color: $idle"
-  local prev_img prev_artifact
+  local prev_img prev_artifact original_id
   prev_img=$(bg get prod "IMG_$(upper "$idle")")
   prev_artifact=$(bg get prod "ARTIFACT_$(upper "$idle")")
+  original_id=$(bg container-id prod "$idle") || die "cannot establish the original idle container identity; prod untouched"
   bg set-image prod "$idle" "$img" --artifact "$artifact"
   bg compose prod up -d --no-deps --force-recreate "quasar-prod-$idle" \
-    || recover_idle "$idle" "$active" "$prev_img" "$prev_artifact" "could not start prod $idle"
+    || recover_idle "$idle" "$active" "$prev_img" "$prev_artifact" "$original_id" "could not start prod $idle"
   if ! bg wait prod "$idle" 90 || ! bg verify-runtime prod "$idle" || ! corpus_check "aisis-quasar-prod-$idle" || ! bg smoke prod "$idle"; then
-    recover_idle "$idle" "$active" "$prev_img" "$prev_artifact" "prod $idle failed pre-flip checks"
+    recover_idle "$idle" "$active" "$prev_img" "$prev_artifact" "$original_id" "prod $idle failed pre-flip checks"
   fi
   maintenance_touch
 

@@ -182,10 +182,10 @@ export async function executeFireplaceIntent (
   return await executeObserved(FIREPLACE.scriptEntity, {
     callScript: async entityId => await actions.callScript(entityId, { request_id: requestId }),
     readNative: async () => {
-      const [native, proof] = await Promise.all([
-        actions.readNative().catch(() => undefined),
-        actions.readReadiness().catch(() => undefined)
-      ])
+      const proof = await actions.readReadiness().catch(() => undefined)
+      if (proof === null || typeof proof !== 'object' || Array.isArray(proof)) return undefined
+      const needsNative = currentFireplaceRequest(proof.attributes, requestId, launchStarted) && fireplaceReady(proof)
+      const native = needsNative ? await actions.readNative().catch(() => undefined) : undefined
       return { native, proof }
     },
     sleep: actions.sleep
