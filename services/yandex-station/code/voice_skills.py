@@ -144,6 +144,27 @@ def _configured_weather_command(env: dict[str, str]) -> list[str] | None:
     return argv
 
 
+# What the weather-cli child may inherit. The adapter's own environment carries API keys and tokens that a
+# forecast lookup must never see, so the child gets an allowlist: process basics, XDG dirs, and WEATHER_* settings.
+_WEATHER_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "XDG_CONFIG_HOME", "XDG_CACHE_HOME")
+_WEATHER_ENV_PREFIX = "WEATHER_"
+
+
+def _weather_child_env(env: dict[str, str]) -> dict[str, str]:
+    child = {key: value for key, value in env.items() if key in _WEATHER_ENV_KEYS or key.startswith(_WEATHER_ENV_PREFIX)}
+    child.setdefault("HOME", str(Path.home()))
+    child["PATH"] = os.pathsep.join((child.get("PATH", os.defpath), str(Path.home() / ".local" / "bin")))
+    return child
+
+
+def _kill_group(pid: int) -> None:
+    """SIGKILL the child's process group; a group that already exited is not an error."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 class Skills:
     """Weather and nameless-music answers; `answer(text)` returns the sentence to speak or None to leave it to the brain."""
 
@@ -169,8 +190,7 @@ class Skills:
         return [found] if found else None
 
     async def weather(self, mode: str) -> str:
-        env = dict(self.env)
-        env["PATH"] = os.pathsep.join((env.get("PATH", os.defpath), str(Path.home() / ".local" / "bin")))
+        env = _weather_child_env(self.env)
         command = self.weather_command(env["PATH"])
         if command is None:
             LOG.warning("weather_failed reason=weather_cli_not_found")
@@ -187,12 +207,12 @@ class Skills:
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), WEATHER_TIMEOUT_S)
         except asyncio.TimeoutError:
-            os.killpg(proc.pid, signal.SIGKILL)
+            _kill_group(proc.pid)
             await proc.wait()
             LOG.warning("weather_failed reason=timeout mode=%s", mode)
             return WEATHER_FAILED
         except asyncio.CancelledError:
-            os.killpg(proc.pid, signal.SIGKILL)
+            _kill_group(proc.pid)
             await proc.wait()
             raise
         reply = stdout.decode("utf-8", "replace").strip()
