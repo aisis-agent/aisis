@@ -55,6 +55,9 @@ def validate_artifact(directory: Path, image: str | None = None) -> dict:
         path = directory / name
         if path.is_symlink() or not path.is_file() or digest(path) != proof['overlay_sha256'][path.name]:
             raise ValueError('installed source artifact changed')
+    for name in (*FILES, 'artifact.json', 'backend', '.'):
+        if (directory / name).stat().st_mode & 0o222:
+            raise ValueError('installed source artifact is writable')
     return proof
 
 
@@ -106,17 +109,17 @@ def import_artifact(source: Path, store: Path) -> Path:
     try:
         extract_sources(archive, temporary, proof)
         (temporary / 'artifact.json').write_text(json.dumps(proof, sort_keys=True, indent=2) + '\n')
-        validate_artifact(temporary.resolve(), proof['image_id'])
         make_read_only(temporary)
+        validate_artifact(temporary.resolve(), proof['image_id'])
         os.rename(temporary, destination)
         return destination
     finally:
         remove_temporary(temporary)
 
 
-def compose_overlay(state: dict[str, str]) -> dict:
+def compose_overlay(state: dict[str, str], profile: str | None = None) -> dict:
     services = {}
-    for environment in ('prod', 'stage'):
+    for environment in (profile,) if profile else ('prod', 'stage'):
         for color in ('blue', 'green'):
             prefix = environment.upper()
             path = state.get(f'{prefix}_ARTIFACT_{color.upper()}', '')
@@ -130,3 +133,29 @@ def compose_overlay(state: dict[str, str]) -> dict:
                 for name in FILES
             ]}
     return {'services': services}
+
+
+def selected_source_mounts(mounts: list) -> dict:
+    targets = {'/src/' + name for name in FILES}
+    actual = {}
+    for item in mounts:
+        target = item.get('Destination')
+        if target in ('/src', '/src/backend'):
+            raise RuntimeError('unexpected parent source mount')
+        if target not in targets:
+            continue
+        if target in actual:
+            raise RuntimeError('duplicate source mount')
+        actual[target] = item
+    return actual
+
+
+def verify_mounts(mounts: list, directory: Path | None) -> None:
+    actual = selected_source_mounts(mounts)
+    expected = {'/src/' + name: str(directory / name) for name in FILES} if directory else {}
+    if set(actual) != set(expected):
+        raise RuntimeError('runtime source mounts differ from selected artifact')
+    for target, source in expected.items():
+        item = actual[target]
+        if item.get('Type') != 'bind' or item.get('Source') != source or item.get('RW') is not False:
+            raise RuntimeError('runtime source mount is not the selected read-only file')

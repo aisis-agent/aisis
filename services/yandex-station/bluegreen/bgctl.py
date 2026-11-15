@@ -6,7 +6,7 @@ State lives outside the code directory (AISIS_BG_STATE, default
 
   state.env                 PROD_ACTIVE, PROD_IMG_BLUE/GREEN, *_ARTIFACT_* (compose env file)
   artifacts/<identity>/     immutable source files and remote integrity proof
-  source-artifacts.compose.json  generated read-only mounts, used by every compose invocation
+  source-artifacts.<env>.compose.json  generated read-only mounts, used by every compose invocation
   <env>/switch/nginx.conf   static switch config (generated)
   <env>/switch/active.conf  upstreams: active color is primary, the other `backup`
 
@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -244,8 +245,8 @@ def wait_healthy(env: str, color: str, seconds: float) -> bool:
 # ── compose ──────────────────────────────────────────────────────────────
 
 def compose_cmd(env: str | None, *args: str) -> list[str]:
-    artifacts = STATE_DIR / "source-artifacts.compose.json"
-    _atomic_write(artifacts, json.dumps(source_artifacts.compose_overlay(load_state()), indent=2) + "\n")
+    artifacts = STATE_DIR / f"source-artifacts.{env or 'all'}.compose.json"
+    _atomic_write(artifacts, json.dumps(source_artifacts.compose_overlay(load_state(), env), indent=2) + "\n")
     cmd = ["docker", "compose", "-p", COMPOSE_PROJECT, "-f", str(COMPOSE_FILE), "-f", str(artifacts)]
     if RUNTIME_ENV.exists():
         cmd += ["--env-file", str(RUNTIME_ENV)]
@@ -253,6 +254,47 @@ def compose_cmd(env: str | None, *args: str) -> list[str]:
     if env:
         cmd += ["--profile", env]
     return cmd + list(args)
+
+
+def identity_query(*arguments: str) -> str:
+    result = _docker(*arguments, timeout=15)
+    if result.returncode != 0:
+        raise RuntimeError("Docker runtime identity query failed")
+    return result.stdout.strip()
+
+
+def container_id(env: str, color: str) -> str:
+    value = identity_query("inspect", "-f", "{{.Id}}", container(env, color))
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise RuntimeError("invalid container identity")
+    return value
+
+
+def verify_runtime(env: str, color: str) -> None:
+    state = load_state()
+    image = state.get(f"{env.upper()}_IMG_{color.upper()}", "")
+    expected = identity_query("image", "inspect", "-f", "{{.Id}}", image)
+    actual = identity_query("inspect", "-f", "{{.Image}}", container(env, color))
+    if not expected or actual != expected:
+        raise RuntimeError("runtime image differs from selected image")
+    artifact = state.get(f"{env.upper()}_ARTIFACT_{color.upper()}", "")
+    directory = Path(artifact) if artifact else None
+    if directory is not None:
+        source_artifacts.validate_artifact(directory, image)
+    mounts = json.loads(identity_query("inspect", "-f", "{{json .Mounts}}", container(env, color)))
+    source_artifacts.verify_mounts(mounts, directory)
+
+
+def remove_inactive(env: str, color: str, expected_id: str) -> None:
+    if color == active_color(env):
+        raise RuntimeError("refusing to remove the active color")
+    if container_id(env, color) != expected_id:
+        raise RuntimeError("inactive container changed; cleanup refused")
+    if color == active_color(env):
+        raise RuntimeError("active color changed; cleanup refused")
+    result = _docker("rm", "-f", expected_id, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError("failed inactive container could not be removed")
 
 
 def run_compose(env: str | None, *args: str, check: bool = True) -> int:
@@ -361,6 +403,21 @@ def cmd_wait(args: argparse.Namespace) -> int:
     return 0 if wait_healthy(args.env, args.color, args.seconds) else 1
 
 
+def cmd_verify_runtime(args: argparse.Namespace) -> int:
+    verify_runtime(args.env, args.color)
+    return 0
+
+
+def cmd_container_id(args: argparse.Namespace) -> int:
+    print(container_id(args.env, args.color))
+    return 0
+
+
+def cmd_remove_inactive(args: argparse.Namespace) -> int:
+    remove_inactive(args.env, args.color, args.container_id)
+    return 0
+
+
 def cmd_compose(args: argparse.Namespace) -> int:
     return run_compose(args.env, *args.rest, check=False)
 
@@ -429,6 +486,15 @@ def main() -> int:
     p.add_argument("color", choices=COLORS)
     p.add_argument("seconds", type=float)
     p.set_defaults(func=cmd_wait)
+
+    for name, function in (("verify-runtime", cmd_verify_runtime), ("container-id", cmd_container_id),
+                           ("remove-inactive", cmd_remove_inactive)):
+        p = sub.add_parser(name)
+        p.add_argument("env", choices=list(ENVS))
+        p.add_argument("color", choices=COLORS)
+        if name == "remove-inactive":
+            p.add_argument("container_id")
+        p.set_defaults(func=function)
 
     p = sub.add_parser("compose", help="docker compose with the project, env files and profile applied")
     p.add_argument("env", choices=list(ENVS))

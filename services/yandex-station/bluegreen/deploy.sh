@@ -15,7 +15,7 @@
 set -euo pipefail
 umask 077
 deploy_log=$(mktemp /tmp/aisis-bluegreen-deploy.XXXXXX.log)
-exec 2> >(tee -a "$deploy_log" >&2)
+exec > >(tee -a "$deploy_log") 2>&1
 printf '%s startup log=%s\n' "$(date -u +%FT%TZ)" "$deploy_log" >&2
 completion_log() { printf '%s completion exit=%s log=%s\n' "$(date -u +%FT%TZ)" "$1" "$deploy_log" >&2; }
 trap 'status=$?; completion_log "$status"' EXIT
@@ -84,13 +84,14 @@ stage_up() {
     artifact=$(bg get prod "ARTIFACT_$color")
   fi
   log "stage: image $img"
-  bg compose stage rm -sf quasar-stage-blue quasar-stage-green >/dev/null 2>&1 || true
+  bg compose stage rm -sf quasar-stage-blue quasar-stage-green || log "stage removal failed; attempting a checked recreation"
   stage_db_reset
   for color in blue green; do bg set-image stage "$color" "$img" --artifact "$artifact"; done
   bg render stage
-  bg compose stage up -d --force-recreate >/dev/null 2>&1 || die "stage compose up failed"
+  bg compose stage up -d --force-recreate || die "stage compose up failed"
   for color in blue green; do
     bg wait stage "$color" 90 || die "stage $color did not become healthy (docker logs aisis-quasar-stage-$color)"
+    bg verify-runtime stage "$color" || die "stage $color runtime differs from the selected image and artifact"
   done
 }
 
@@ -119,8 +120,29 @@ prune_old_images() {
   done
 }
 
+restore_idle() {
+  local idle=$1 active=$2 previous_image=$3 previous_artifact=$4
+  [[ $(bg get prod active) == "$active" ]] || { log "active color changed; restoration refused"; return 1; }
+  bg set-image prod "$idle" "$previous_image" --artifact "$previous_artifact" || return 1
+  bg compose prod up -d --no-deps --force-recreate "quasar-prod-$idle" || return 1
+  bg wait prod "$idle" 90 || return 1
+  bg verify-runtime prod "$idle" || return 1
+}
+
+recover_idle() {
+  local idle=$1 active=$2 previous_image=$3 previous_artifact=$4 reason=$5 failed_id
+  log "$reason; restoring the previous idle image and artifact"
+  if restore_idle "$idle" "$active" "$previous_image" "$previous_artifact"; then
+    die "$reason; previous idle runtime restored and verified; $active still serving"
+  fi
+  log "restoration failed; removing only the still-inactive captured container"
+  failed_id=$(bg container-id prod "$idle") || die "restoration failed and failed container identity is unavailable; cleanup refused"
+  bg remove-inactive prod "$idle" "$failed_id" || die "restoration failed and safe inactive cleanup failed"
+  die "$reason; restoration failed; failed idle container removed; $active still serving"
+}
+
 cmd_deploy() {
-  local mode=context src="" base="" artifact="" tag img active idle idle_up before
+  local mode=context src="" base="" artifact="" tag img active idle before
   tag=$(date +%Y%m%d-%H%M%S)
   local wait_speaker=1
   while (($#)); do
@@ -135,10 +157,13 @@ cmd_deploy() {
     esac
   done
   [[ -n $src ]] || die "give --artifact REMOTE_OUTPUT, --overlay SRC_DIR or --context DIR"
-  maintenance_on
   ensure_state
   active=$(bg get prod active)
   idle=$([[ $active == blue ]] && echo green || echo blue)
+  if [[ $mode == overlay && -z $base && -n $(bg get prod "ARTIFACT_$(upper "$active")") ]]; then
+    die "active source artifact requires an explicit base or --artifact; implicit inheritance is not supported"
+  fi
+  maintenance_on
   if [[ $mode == artifact ]]; then
     log "[1/6] import verified remote source artifact"
     artifact=$(bg import-artifact "$src")
@@ -161,13 +186,10 @@ cmd_deploy() {
   prev_img=$(bg get prod "IMG_$(upper "$idle")")
   prev_artifact=$(bg get prod "ARTIFACT_$(upper "$idle")")
   bg set-image prod "$idle" "$img" --artifact "$artifact"
-  bg compose prod up -d --no-deps --force-recreate "quasar-prod-$idle" >/dev/null 2>&1 \
-    || { bg set-image prod "$idle" "$prev_img" --artifact "$prev_artifact"; die "could not start prod $idle"; }
-  if ! bg wait prod "$idle" 90 || ! corpus_check "aisis-quasar-prod-$idle" || ! bg smoke prod "$idle"; then
-    log "idle $idle failed its checks; restoring previous image on it"
-    bg set-image prod "$idle" "$prev_img" --artifact "$prev_artifact"
-    bg compose prod up -d --no-deps --force-recreate "quasar-prod-$idle" >/dev/null 2>&1 || true
-    die "prod $idle failed pre-flip checks; $active still serving"
+  bg compose prod up -d --no-deps --force-recreate "quasar-prod-$idle" \
+    || recover_idle "$idle" "$active" "$prev_img" "$prev_artifact" "could not start prod $idle"
+  if ! bg wait prod "$idle" 90 || ! bg verify-runtime prod "$idle" || ! corpus_check "aisis-quasar-prod-$idle" || ! bg smoke prod "$idle"; then
+    recover_idle "$idle" "$active" "$prev_img" "$prev_artifact" "prod $idle failed pre-flip checks"
   fi
   maintenance_touch
 

@@ -64,6 +64,9 @@ const APPS: Record<TvAppIntent['app'], TvAppIntent> = {
   }
 }
 const ACTIVE_STATES = new Set(['on', 'idle', 'playing', 'paused', 'buffering'])
+const DEFINITIVE_FIREPLACE_ERRORS = new Set([
+  'selection_unreadable', 'no_distinct_source', 'sources_unavailable', 'invalid_target', 'stopped'
+])
 const FIREPLACE: FireplaceIntent = {
   scriptEntity: 'script.living_room_fireplace', label: 'камин'
 }
@@ -166,7 +169,7 @@ function fireplaceOutcome (
   if (proof === null || typeof proof !== 'object' || Array.isArray(proof)) return 'pending'
   if (!currentFireplaceRequest(proof.attributes, requestId, launchStarted)) return 'pending'
   if (proof.state === 'starting') return 'starting'
-  if (proof.state === 'error' && typeof proof.attributes?.error === 'string' && proof.attributes.error !== '') return 'failed'
+  if (proof.state === 'error' && typeof proof.attributes?.error === 'string' && DEFINITIVE_FIREPLACE_ERRORS.has(proof.attributes.error)) return 'failed'
   if (!fireplaceReady(proof)) return 'pending'
   return native?.state === 'playing' && native.attributes?.media_title === proof.attributes?.title ? 'confirmed' : 'pending'
 }
@@ -179,7 +182,10 @@ export async function executeFireplaceIntent (
   return await executeObserved(FIREPLACE.scriptEntity, {
     callScript: async entityId => await actions.callScript(entityId, { request_id: requestId }),
     readNative: async () => {
-      const [native, proof] = await Promise.all([actions.readNative(), actions.readReadiness()])
+      const [native, proof] = await Promise.all([
+        actions.readNative().catch(() => undefined),
+        actions.readReadiness().catch(() => undefined)
+      ])
       return { native, proof }
     },
     sleep: actions.sleep

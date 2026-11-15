@@ -37,9 +37,10 @@ jobs:
           npm install --ignore-scripts --no-save --no-audit --no-fund --package-lock=false typescript@5.9.3
           ./node_modules/.bin/tsc --strict --target ES2022 --module esnext --outDir "$RUNNER_TEMP/aisis-fireplace-compiled" src/backend/tv-app-intents.ts
           node --test tests/test_tv_app_intents.mjs tests/test_fireplace_intents.mjs
-          mkdir -p "$RUNNER_TEMP/aisis-fireplace-overlay"
-          cp src/backend/tv-app-intents.ts ha-intents.patch prepare_overlay.py "$RUNNER_TEMP/aisis-fireplace-overlay/"
-          sha256sum "$RUNNER_TEMP/aisis-fireplace-overlay/"*
+          mkdir -p "$RUNNER_TEMP/aisis-fireplace-overlay/src/backend"
+          cp src/backend/tv-app-intents.ts "$RUNNER_TEMP/aisis-fireplace-overlay/src/backend/"
+          cp ha-intents.patch prepare_overlay.py "$RUNNER_TEMP/aisis-fireplace-overlay/"
+          sha256sum "$RUNNER_TEMP/aisis-fireplace-overlay/"*.* "$RUNNER_TEMP/aisis-fireplace-overlay/src/backend/tv-app-intents.ts"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: success()
         with:
