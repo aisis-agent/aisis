@@ -29,7 +29,7 @@ speaker_wait=${AISIS_SPEAKER_WAIT_S:-90}
 
 bg() {
   case ${1:-} in
-    init|compose|set-image|render|import-artifact|flip|remove-inactive|recover-selection) maintenance_check ;;
+    init|compose|set-image|render|import-artifact|flip|rollback-candidate|remove-inactive|recover-selection) maintenance_check ;;
   esac
   python3 "$here/bgctl.py" "$@"
 }
@@ -45,11 +45,17 @@ candidate_id=""
 candidate_original_id=""
 candidate_previous_image=""
 candidate_previous_artifact=""
+candidate_post_switch=0
 quarantine_candidate() {
-  local preserve=()
-  [[ $candidate_id == "$candidate_original_id" ]] && preserve=(--preserve)
-  python3 "$here/bgctl.py" quarantine-inactive prod "$candidate_idle" "$candidate_id" "$maintenance_owner" \
-    "$candidate_previous_image" --previous-artifact "$candidate_previous_artifact" "${preserve[@]}"
+  if [[ $candidate_post_switch == 1 ]]; then
+    python3 "$here/bgctl.py" reject-candidate prod "$candidate_idle" "$candidate_id" "$maintenance_owner" \
+      "$candidate_previous_image" --previous-artifact "$candidate_previous_artifact"
+  else
+    local preserve=()
+    [[ $candidate_id == "$candidate_original_id" ]] && preserve=(--preserve)
+    python3 "$here/bgctl.py" quarantine-inactive prod "$candidate_idle" "$candidate_id" "$maintenance_owner" \
+      "$candidate_previous_image" --previous-artifact "$candidate_previous_artifact" "${preserve[@]}"
+  fi
 }
 maintenance_cleanup() {
   local status=$?
@@ -61,7 +67,7 @@ maintenance_cleanup() {
   fi
   if [[ -n $candidate_id ]]; then
     if quarantine_candidate; then
-      log "aborted candidate quarantined; owned inactive replacement removed or original preserved"
+      log "aborted candidate quarantined; captured inactive replacement removed or active/original container preserved"
     else
       log "candidate cleanup refused or failed; changed ownership, active color and container are preserved"
       ((status == 0)) && status=1
@@ -216,6 +222,24 @@ recover_idle() {
   die "$reason; restoration failed; failed idle selection quarantined; $active still serving"
 }
 
+recover_post_switch() {
+  local previous_active=$1 reason=$2
+  log "$reason; rejecting the candidate before guarded rollback"
+  if ! quarantine_candidate; then
+    die "$reason; rollback unconfirmed; candidate ownership changed or rejection failed"
+  fi
+  # A subshell retains the lease guard's failure without skipping this truthful
+  # recovery result when maintenance_check exits after a lost or expired lease.
+  if ! (trap - EXIT; bg rollback-candidate prod "$candidate_idle" "$candidate_id" "$previous_active" "$maintenance_owner" >&2); then
+    die "$reason; rollback unconfirmed; current active container preserved and rejected candidate remains quarantined"
+  fi
+  [[ $(bg get prod active) == "$previous_active" ]] || die "$reason; rollback unconfirmed; active color changed"
+  quarantine_candidate || die "$reason; reverse switch applied but rejected candidate cleanup failed"
+  candidate_id=""
+  bg smoke prod switch >/dev/null || die "$reason; reverse switch applied but switch verification failed"
+  die "$reason; rollback confirmed to $previous_active; rejected candidate quarantined"
+}
+
 cmd_deploy() {
   local mode=context src="" base="" artifact="" tag img active idle before
   tag=$(date +%Y%m%d-%H%M%S)
@@ -283,23 +307,27 @@ cmd_deploy() {
   before=$(bg devices prod || true)
   log "[4/6] flip $active -> $idle (connected before: ${before:-none})"
   require_active "$active"
+  candidate_post_switch=1
   bg flip prod "$idle" >&2
-  candidate_id=""
 
   log "[5/6] verify through the switch"
   if ! bg smoke prod switch >/dev/null; then
-    bg flip prod "$active" >&2 || true
-    die "post-flip smoke failed; rolled back to $active"
+    recover_post_switch "$active" "post-flip smoke failed"
   fi
   if [[ $wait_speaker == 1 && -n $before ]]; then
     local waited=0
     until [[ -n $(bg devices prod || true) ]]; do
-      ((waited++ >= speaker_wait)) && { bg flip prod "$active" >&2 || true; die "speaker did not reconnect to $idle within ${speaker_wait}s; rolled back to $active"; }
+      if ((waited++ >= speaker_wait)); then
+        recover_post_switch "$active" "speaker did not reconnect to $idle within ${speaker_wait}s"
+      fi
       sleep 1
     done
     log "speaker reconnected on $idle after ~${waited}s"
   fi
 
+  require_active "$idle"
+  [[ $(bg container-id prod "$idle") == "$candidate_id" ]] || die "accepted candidate container changed; completion refused"
+  candidate_id=""
   log "[6/6] done: $idle is active on $img; $active stays warm for rollback (image $(bg get prod "IMG_$(upper "$active")"))"
   prune_old_images || true
 }

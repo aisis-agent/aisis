@@ -198,6 +198,17 @@ def flip(env: str, color: str | None = None) -> tuple[str, str, float]:
         return flip_locked(env, color)
 
 
+def rollback_candidate(env: str, candidate: str, expected_id: str,
+                       previous: str, owner: str) -> tuple[str, str, float]:
+    """Reverse only this owner's still-active captured candidate."""
+    with maintenance_lease.locked(STATE_DIR):
+        maintenance_lease.check_locked(STATE_DIR, owner)
+        if previous == candidate or active_color(env) != candidate or container_id(env, candidate) != expected_id:
+            raise RuntimeError("candidate active identity changed; reverse switch refused")
+        maintenance_lease.check_locked(STATE_DIR, owner)
+        return flip_locked(env, previous)
+
+
 def flip_locked(env: str, color: str | None) -> tuple[str, str, float]:
     started = time.monotonic()
     old = active_color(env)
@@ -347,13 +358,29 @@ def quarantine_candidate(env: str, color: str, expected_id: str, owner: str,
         maintenance_lease.owner_locked(STATE_DIR, owner)
         if color == active_color(env) or container_id(env, color) != expected_id:
             raise RuntimeError("candidate ownership or inactive identity changed; quarantine refused")
-        state = load_state()
-        prefix, suffix = env.upper(), color.upper()
-        state[f"{prefix}_QUARANTINE_{suffix}"] = "failed-deployment"
-        state[f"{prefix}_RECOVERY_IMG_{suffix}"] = previous_image
-        state[f"{prefix}_RECOVERY_ARTIFACT_{suffix}"] = previous_artifact
-        save_state(state)
+        record_quarantine(env, color, previous_image, previous_artifact)
         if not preserve:
+            remove_inactive(env, color, expected_id)
+
+
+def record_quarantine(env: str, color: str, previous_image: str, previous_artifact: str) -> None:
+    state = load_state()
+    prefix, suffix = env.upper(), color.upper()
+    state[f"{prefix}_QUARANTINE_{suffix}"] = "failed-deployment"
+    state[f"{prefix}_RECOVERY_IMG_{suffix}"] = previous_image
+    state[f"{prefix}_RECOVERY_ARTIFACT_{suffix}"] = previous_artifact
+    save_state(state)
+
+
+def reject_candidate(env: str, color: str, expected_id: str, owner: str,
+                     previous_image: str, previous_artifact: str) -> None:
+    """Block a failed post-switch candidate, preserving it while still active."""
+    with maintenance_lease.locked(STATE_DIR):
+        maintenance_lease.owner_locked(STATE_DIR, owner)
+        if container_id(env, color) != expected_id:
+            raise RuntimeError("candidate container changed; rejection refused")
+        record_quarantine(env, color, previous_image, previous_artifact)
+        if color != active_color(env):
             remove_inactive(env, color, expected_id)
 
 
@@ -383,6 +410,18 @@ def recover_selection(env: str, color: str, owner: str) -> None:
 def cmd_quarantine(args: argparse.Namespace) -> int:
     quarantine_candidate(args.env, args.color, args.container_id, args.owner,
                          args.previous_image, args.previous_artifact, preserve=args.preserve)
+    return 0
+
+
+def cmd_reject_candidate(args: argparse.Namespace) -> int:
+    reject_candidate(args.env, args.color, args.container_id, args.owner,
+                     args.previous_image, args.previous_artifact)
+    return 0
+
+
+def cmd_rollback_candidate(args: argparse.Namespace) -> int:
+    old, new, elapsed = rollback_candidate(args.env, args.color, args.container_id, args.previous, args.owner)
+    print(json.dumps({"old": old, "new": new, "elapsed_s": elapsed}))
     return 0
 
 
@@ -619,6 +658,23 @@ def main() -> int:
     p.add_argument("--previous-artifact", default="")
     p.add_argument("--preserve", action="store_true", help="block recreation while preserving the original container")
     p.set_defaults(func=cmd_quarantine)
+
+    p = sub.add_parser("reject-candidate", help="owner-scoped post-switch rejection; never remove an active container")
+    p.add_argument("env", choices=list(ENVS))
+    p.add_argument("color", choices=COLORS)
+    p.add_argument("container_id")
+    p.add_argument("owner")
+    p.add_argument("previous_image")
+    p.add_argument("--previous-artifact", default="")
+    p.set_defaults(func=cmd_reject_candidate)
+
+    p = sub.add_parser("rollback-candidate", help="reverse only the captured active candidate under a fresh owned lease")
+    p.add_argument("env", choices=list(ENVS))
+    p.add_argument("color", choices=COLORS)
+    p.add_argument("container_id")
+    p.add_argument("previous", choices=COLORS)
+    p.add_argument("owner")
+    p.set_defaults(func=cmd_rollback_candidate)
 
     p = sub.add_parser("recover-selection", help="validate and restore the recorded previous inactive selection")
     p.add_argument("env", choices=list(ENVS))

@@ -48,6 +48,8 @@ Restoration failure after replacement is explicit. Cleanup records a persistent 
 
 Explicit `bgctl.py recover-selection ENV COLOR OWNER` requires a fresh lease, an inactive color, the recorded previous image and a fully valid read-only artifact. It verifies that the image exists, restores that recorded selection and clears quarantine only after those checks pass. Normal recreation and runtime verification can then restore the previous color. Invalid previous bytes keep the quarantine in place; they are never treated as accepted merely to remove the block.
 
+The candidate identity remains owned until switch smoke and speaker reconnection succeed. A failed post-switch candidate is quarantined before a guarded reverse switch. While it is still active, rejection preserves its running container; after confirmed reversal, cleanup removes only the captured inactive candidate. A refused or expired-lease reverse switch is reported as unconfirmed. A replacement owner or container prevents both rejection and reversal. The quarantine still prevents those rejected bytes from becoming a later automatically promoted standby.
+
 `deploy.sh rollback` selects the warm previous color with its own image and mounts.
 
 ## Installation and logs
