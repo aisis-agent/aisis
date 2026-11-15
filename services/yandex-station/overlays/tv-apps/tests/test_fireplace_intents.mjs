@@ -129,7 +129,7 @@ test('a stalled readiness read cannot exceed the existing four-second voice budg
 });
 
 test('same-request starting, failure and uncertain open have distinct outcomes',async()=>{
- for(const [state,error,wanted] of [['starting',null,'starting'],['error','source_unavailable','failed'],['unknown','open_unconfirmed','pending']]){
+ for(const [state,error,wanted] of [['starting',null,'starting'],['error','sources_unavailable','failed'],['unknown','open_unconfirmed','pending']]){
   let requestId,writes=0;
   const result=await api.executeFireplaceIntent(parse('включи камин'),{
    callScript:async(_entity,variables)=>{writes++;requestId=variables?.request_id},
@@ -145,7 +145,7 @@ test('starting or failure from a different command cannot describe this launch',
   const result=await api.executeFireplaceIntent(parse('включи камин'),{
    callScript:async()=>{},
    readNative:async()=>({state:'playing',attributes:{media_title:title}}),
-   readReadiness:async()=>({...ready('b153f6bc-f3e7-4e17-a138-ff15a8bcaf98',{error:state==='error'?'source_unavailable':null}),state}),
+   readReadiness:async()=>({...ready('b153f6bc-f3e7-4e17-a138-ff15a8bcaf98',{error:state==='error'?'sources_unavailable':null}),state}),
    sleep:async()=>{}
   });
   assert.equal(result.status,'pending');
@@ -162,4 +162,26 @@ test('null and nonobject readiness remain pending after exactly one accepted lau
   });
   assert.equal(result.status,'pending',JSON.stringify(proof));assert.equal(writes,1);
  }
+});
+
+test('only recognized definitive controller errors can report failure',async()=>{
+ for(const error of ['selection_unreadable','no_distinct_source','sources_unavailable','invalid_target','stopped',' ','future_error','cancelled','open_unconfirmed',null,17]){
+  let requestId;
+  const result=await api.executeFireplaceIntent(parse('включи камин'),{
+   callScript:async(_entity,variables)=>{requestId=variables.request_id},
+   readNative:async()=>undefined,
+   readReadiness:async()=>({...ready(requestId,{error}),state:'error'}),sleep:async()=>{}
+  });
+  const definite=['selection_unreadable','no_distinct_source','sources_unavailable','invalid_target','stopped'].includes(error);
+  assert.equal(result.status,definite?'failed':'pending',String(error));
+ }
+});
+test('a rejected native read cannot erase a definitive same-request controller result',async()=>{
+ let requestId,writes=0;
+ const result=await api.executeFireplaceIntent(parse('включи камин'),{
+  callScript:async(_entity,variables)=>{writes++;requestId=variables.request_id},
+  readNative:async()=>{throw Error('Kodi state unavailable')},
+  readReadiness:async()=>({...ready(requestId,{error:'sources_unavailable'}),state:'error'}),sleep:async()=>{}
+ });
+ assert.equal(result.status,'failed');assert.equal(writes,1);
 });

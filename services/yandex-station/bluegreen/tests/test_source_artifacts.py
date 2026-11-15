@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -139,49 +140,102 @@ class PersistentArtifacts(unittest.TestCase):
             bgctl.cmd_import_artifact(argparse.Namespace(source=str(self.input)))
         self.assertFalse(list(self.state.glob('artifacts/*')))
 
+    def test_reused_artifacts_reject_writable_files_or_directories(self):
+        destination = self.imported()
+        for relative in ['backend/ha-intents.ts', 'artifact.json', 'backend', '.']:
+            path = destination / relative
+            original = path.stat().st_mode & 0o777
+            path.chmod(original | 0o200)
+            with self.subTest(path=relative), self.assertRaises((ValueError, RuntimeError)):
+                bgctl.cmd_import_artifact(argparse.Namespace(source=str(self.input)))
+            path.chmod(original)
+
+    def test_missing_stage_artifact_does_not_block_prod_only_recreation(self):
+        destination = self.imported()
+        self.select(destination)
+        state = bgctl.load_state()
+        state.update({'STAGE_IMG_BLUE': IMAGE, 'STAGE_ARTIFACT_BLUE': str(self.root / 'deleted-stage-artifact')})
+        bgctl.save_state(state)
+        command = bgctl.compose_cmd('prod', 'up', '-d', 'quasar-prod-blue')
+        files = [Path(command[index + 1]) for index, value in enumerate(command) if value == '-f']
+        self.assertEqual(set(json.loads(files[-1].read_text())['services']), {'quasar-prod-blue'})
+
+    def test_runtime_identity_checks_actual_image_and_readonly_mounts(self):
+        directory = self.imported()
+        self.select(directory)
+        verify = getattr(bgctl, 'verify_runtime', None)
+        self.assertTrue(callable(verify))
+        mounts = [{'Type': 'bind', 'Source': str(directory / name), 'Destination': '/src/' + name, 'RW': False} for name in FILES]
+        observed = {'image': IMAGE, 'mounts': mounts}
+        def docker(*args, **_kwargs):
+            output = IMAGE if args[0] == 'image' else observed['image']
+            if any('.Mounts' in value for value in args):
+                output = json.dumps(observed['mounts'])
+            return subprocess.CompletedProcess(args, 0, output, '')
+        with patch.object(bgctl, '_docker', side_effect=docker):
+            verify('prod', 'blue')
+            observed['image'] = 'wrong-image'
+            with self.assertRaises(RuntimeError):
+                verify('prod', 'blue')
+            observed['image'] = IMAGE
+            observed['mounts'] = [{**item, 'RW': True} for item in mounts]
+            with self.assertRaises(RuntimeError):
+                verify('prod', 'blue')
+            observed['mounts'] = []
+            with self.assertRaises(RuntimeError):
+                verify('prod', 'blue')
+
+    def test_cleanup_rechecks_inactive_color_and_removes_only_the_captured_container_id(self):
+        remove = getattr(bgctl, 'remove_inactive', None)
+        self.assertTrue(callable(remove))
+        expected = 'a' * 64
+        def docker(*args, **_kwargs):
+            return subprocess.CompletedProcess(args, 0, expected, '')
+        with patch.object(bgctl, '_docker', side_effect=docker) as calls:
+            remove('prod', 'blue', expected)
+            self.assertTrue(any(call.args == ('rm', '-f', expected) for call in calls.call_args_list))
+        with patch.object(bgctl, '_docker', return_value=subprocess.CompletedProcess([], 0, 'b' * 64, '')) as calls:
+            with self.assertRaises(RuntimeError):
+                remove('prod', 'blue', expected)
+            self.assertFalse(any(call.args[:1] == ('rm',) for call in calls.call_args_list))
+        with patch.object(bgctl, 'active_color', side_effect=['green', 'blue']), patch.object(bgctl, '_docker', side_effect=docker) as calls:
+            with self.assertRaises(RuntimeError):
+                remove('prod', 'blue', expected)
+            self.assertFalse(any(call.args[:1] == ('rm',) for call in calls.call_args_list))
+
 
 class ArtifactDeploy(unittest.TestCase):
-    def run_deploy(self, fail_idle=False):
+    def run_deploy(self, *, fail_idle=False, fail_first=False, fail_restore=False, overlay=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for name in ('deploy.sh',):
-                shutil.copy2(HERE / name, root / name)
+            shutil.copy2(HERE / 'deploy.sh', root / 'deploy.sh')
+            for source, destination in [('fake_bgctl.py', 'bgctl.py'), ('fake_docker.py', 'docker'), ('fake_corpus.py', 'corpus_runpod.py')]:
+                shutil.copy2(HERE / 'tests/fixtures' / source, root / destination)
+            (root / 'docker').chmod(0o755)
             state = root / 'state'
             state.mkdir()
             (state / 'state.env').write_text('PROD_ACTIVE=green\n')
-            (root / 'state.json').write_text(json.dumps({'active': 'green', 'images': {'blue': 'previous-blue', 'green': 'rollback-image'}, 'artifacts': {'blue': '/previous/artifact', 'green': ''}}))
-            helper = '''import json,os,pathlib,sys
-root=pathlib.Path(__file__).parent
-args=sys.argv[1:]
-with (root/'calls.jsonl').open('a') as log:log.write(json.dumps(['bg',*args])+'\\n')
-state=json.loads((root/'state.json').read_text()); cmd=args[0]
-if cmd=='get':
- key=args[2]
- if key=='active':print(state['active'])
- elif key.startswith('IMG_'):print(state['images'][key[4:].lower()])
- elif key.startswith('ARTIFACT_'):print(state['artifacts'][key[9:].lower()])
-elif cmd=='import-artifact':print('/installed/new-artifact')
-elif cmd=='artifact-image':print('sha256:'+64*'1')
-elif cmd=='set-image' and args[1]=='prod':
- state['images'][args[2]]=args[3];state['artifacts'][args[2]]=args[5] if len(args)>5 else ''
-elif cmd=='flip':state['active']=args[2]
-elif cmd=='smoke' and args[1:] == ['prod','blue'] and os.environ.get('FAIL_IDLE')=='1':sys.exit(1)
-(root/'state.json').write_text(json.dumps(state))
-'''
-            (root / 'bgctl.py').write_text(helper)
-            (root / 'corpus_runpod.py').write_text("import json,pathlib,sys\np=pathlib.Path(__file__).parent/'calls.jsonl'\nwith p.open('a') as log:log.write(json.dumps(['corpus',*sys.argv[1:]])+'\\n')\n")
-            docker = root / 'docker'
-            docker.write_text("#!/usr/bin/env python3\nimport json,pathlib,sys\np=pathlib.Path(__file__).parent/'calls.jsonl'\nwith p.open('a') as log:log.write(json.dumps(['docker',*sys.argv[1:]])+'\\n')\n")
-            docker.chmod(0o755)
+            previous = {'image': 'previous-blue', 'artifact': '/previous/artifact'}
+            (root / 'state.json').write_text(json.dumps({'active': 'green', 'images': {'blue': 'previous-blue', 'green': 'rollback-image'},
+                'artifacts': {'blue': '/previous/artifact', 'green': '/active/source-artifact' if overlay else ''},
+                'actual': previous, 'recreate_attempts': 0}))
             environment = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'],
-                           'AISIS_BG_STATE': str(state), 'FAIL_IDLE': str(int(fail_idle))}
-            run = subprocess.run(['bash', str(root / 'deploy.sh'), 'deploy', '--artifact', str(root / 'remote-output')],
-                                 env=environment, text=True, capture_output=True, timeout=20)
-            calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()] if (root / 'calls.jsonl').exists() else []
-            return run, calls, json.loads((root / 'state.json').read_text())
+                'AISIS_BG_STATE': str(state), 'FAIL_IDLE': str(int(fail_idle)),
+                'FAIL_FIRST_RECREATE': str(int(fail_first)), 'FAIL_RESTORE': str(int(fail_restore))}
+            source = root / 'remote-output'
+            source.mkdir()
+            arguments = ['bash', str(root / 'deploy.sh'), 'deploy', '--overlay' if overlay else '--artifact', str(source)]
+            run = subprocess.run(arguments, env=environment, text=True, capture_output=True, timeout=20)
+            calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
+            match = re.search(r'startup log=(/tmp/aisis-bluegreen-deploy\.[^\s]+)', run.stdout + run.stderr)
+            self.assertIsNotNone(match)
+            logfile = Path(match[1])
+            logged = logfile.read_text()
+            logfile.unlink()
+            return run, calls, json.loads((root / 'state.json').read_text()), logged
 
     def test_artifact_deploy_keeps_all_stage_and_idle_gates_without_local_build(self):
-        run, calls, state = self.run_deploy()
+        run, calls, state, _log = self.run_deploy()
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertFalse(any(item[:2] == ['docker', 'build'] for item in calls))
         flip = calls.index(['bg', 'flip', 'prod', 'blue'])
@@ -190,16 +244,46 @@ elif cmd=='smoke' and args[1:] == ['prod','blue'] and os.environ.get('FAIL_IDLE'
             self.assertTrue(any(item[:3] == check for item in calls[:flip]), color)
         self.assertEqual(state['active'], 'blue')
         self.assertEqual(state['images']['green'], 'rollback-image')
-        self.assertEqual(state['artifacts']['blue'], '/installed/new-artifact')
+        self.assertEqual(state['actual']['artifact'], '/installed/new-artifact')
 
-    def test_failed_idle_checks_restore_image_and_artifact_without_flip(self):
-        run, calls, state = self.run_deploy(fail_idle=True)
+    def test_failed_idle_checks_restore_actual_container_and_artifact_without_flip(self):
+        run, calls, state, _log = self.run_deploy(fail_idle=True)
         self.assertNotEqual(run.returncode, 0)
         self.assertIn(['bg', 'smoke', 'prod', 'blue'], calls, run.stderr)
-        self.assertFalse(any(item[:3] == ['bg', 'flip', 'prod'] for item in calls))
-        self.assertEqual(state['images']['blue'], 'previous-blue')
-        self.assertEqual(state['artifacts']['blue'], '/previous/artifact')
+        self.assertNotIn(['bg', 'flip', 'prod', 'blue'], calls)
+        self.assertEqual(state['actual'], {'image': 'previous-blue', 'artifact': '/previous/artifact'})
+        self.assertIn(['bg', 'verify-runtime', 'prod', 'blue'], calls)
         self.assertEqual(state['active'], 'green')
+
+    def test_partial_first_recreation_is_recreated_back_to_the_previous_runtime(self):
+        run, calls, state, logged = self.run_deploy(fail_first=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(state['actual'], {'image': 'previous-blue', 'artifact': '/previous/artifact'})
+        self.assertGreaterEqual(state['recreate_attempts'], 2)
+        self.assertIn(['bg', 'verify-runtime', 'prod', 'blue'], calls)
+        self.assertNotIn(['bg', 'flip', 'prod', 'blue'], calls)
+        self.assertIn('candidate recreation failed after replacement', logged)
+
+    def test_failed_restoration_is_explicit_and_cannot_leave_an_unapproved_warm_color(self):
+        run, calls, state, logged = self.run_deploy(fail_first=True, fail_restore=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIsNone(state['actual'])
+        self.assertIn(['bg', 'remove-inactive', 'prod', 'blue', 'fixture-idle-container'], calls)
+        self.assertIn('restoration failed', logged.lower())
+        self.assertEqual(state['active'], 'green')
+
+    def test_implicit_overlay_refuses_before_changing_an_active_source_artifact(self):
+        run, calls, state, logged = self.run_deploy(overlay=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn('active source artifact', logged.lower())
+        self.assertFalse(any(item[0] == 'docker' or item[1] in {'compose', 'set-image', 'flip'} for item in calls))
+        self.assertEqual(state['active'], 'green')
+
+    def test_automatic_log_captures_stdout_and_stderr(self):
+        run, _calls, _state, logged = self.run_deploy()
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn('fixture corpus stdout is retained', logged)
+        self.assertIn('completion exit=0', logged)
 
 
 if __name__ == '__main__':

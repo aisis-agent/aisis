@@ -34,7 +34,7 @@ async function load(current='on',appId='com.netflix.ninja',responseStatus=200,st
  const fetch=async(url,options={})=>{
   const pathname=new URL(url).pathname;
   if(options.method==='POST'){calls.push({path:pathname,body:JSON.parse(options.body)});if(native.requestError)throw Error('uncertain request timeout');return new Response('[]',{status:responseStatus})}
-  if(pathname==='/api/states/'+(native.entity??'media_player.televizor')){reads.push(native.entity??'media_player.televizor');return new Response(JSON.stringify(state),{headers:stale?{'x-aisis-cache':'stale'}:{}})}
+  if(pathname==='/api/states/'+(native.entity??'media_player.televizor')){reads.push(native.entity??'media_player.televizor');if(native.readError)throw Error('native state unavailable');return new Response(JSON.stringify(state),{headers:stale?{'x-aisis-cache':'stale'}:{}})}
   if(pathname==='/api/states/sensor.living_room_fireplace'){
    reads.push('sensor.living_room_fireplace');
    return readinessResponse(native,calls);
@@ -138,7 +138,7 @@ test('an uncertain fireplace transport result never replays or announces definit
 });
 
 test('the actual matcher distinguishes this request starting, failing and awaiting proof',async()=>{
- for(const [state,error,phrase] of [['starting',null,/Запускаю камин/],['error','source_unavailable',/Не удалось запустить камин/],['unknown','open_unconfirmed',/пока не подтвержд/]]){
+ for(const [state,error,phrase] of [['starting',null,/Запускаю камин/],['error','sources_unavailable',/Не удалось запустить камин/],['unknown','open_unconfirmed',/пока не подтвержд/]]){
   const api=await load('playing',undefined,200,false,{entity:'media_player.home',attributes:{media_title:'Previous video'},proofState:state,proof:{error,observed_at:null,owned:false,progressing:false}});
   const result=await api.match('включи камин на проекторе');
   assert.equal(api.calls.length,1);assert.equal(result.kind,'reply');assert.match(result.text,phrase);
@@ -151,5 +151,13 @@ test('actual matcher treats null and nonobject state responses as unconfirmed af
   const result=await api.match('включи камин на проекторе');
   assert.equal(api.calls.length,1);assert.equal(result.kind,'reply');
   assert.match(result.text,/пока не подтвержд/);assert.doesNotMatch(result.text,/Не удалось/);
+ }
+});
+
+test('actual matcher validates definite error codes independently of failed native reads',async()=>{
+ for(const [error,readError,wanted] of [['sources_unavailable',true,/Не удалось запустить/],[' ',false,/пока не подтвержд/],['future_error',false,/пока не подтвержд/],['cancelled',false,/пока не подтвержд/]]){
+  const api=await load('playing',undefined,200,false,{entity:'media_player.home',readError,proofState:'error',proof:{error}});
+  const result=await api.match('включи камин на проекторе');
+  assert.equal(api.calls.length,1);assert.match(result.text,wanted);
  }
 });
