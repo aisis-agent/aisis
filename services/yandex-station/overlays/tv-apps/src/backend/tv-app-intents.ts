@@ -163,7 +163,8 @@ function fireplaceOutcome (
   observation: FireplaceObservation, requestId: string, launchStarted: number
 ): LaunchStatus {
   const { native, proof } = observation
-  if (proof === undefined || !currentFireplaceRequest(proof.attributes, requestId, launchStarted)) return 'pending'
+  if (proof === null || typeof proof !== 'object' || Array.isArray(proof)) return 'pending'
+  if (!currentFireplaceRequest(proof.attributes, requestId, launchStarted)) return 'pending'
   if (proof.state === 'starting') return 'starting'
   if (proof.state === 'error' && typeof proof.attributes?.error === 'string' && proof.attributes.error !== '') return 'failed'
   if (!fireplaceReady(proof)) return 'pending'
