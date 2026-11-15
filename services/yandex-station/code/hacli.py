@@ -45,6 +45,11 @@ REFRESH_S = 30.0
 # real recovery and queued service calls replay promptly.
 DOWN_POLL_S = 3.0
 HA_TIMEOUT_S = 5.0
+# A proxied client call must answer inside the caller's own timeout: the quasar container's haFetch aborts at 3 s
+# (FETCH_TIMEOUT_MS in ha-intents.ts). A client that gave up before the 202/queue answer reports the command as failed
+# while this daemon queues it and replays it once HA is back (2026-11-15 21:33: the speaker said «Не удалось выполнить
+# команду умного дома», the owner confirmed the command ran). Background probing keeps the longer HA_TIMEOUT_S.
+CLIENT_TIMEOUT_S = 2.0
 # Recovery time of a Home Assistant restart: median of the last OUTAGE_WINDOW
 # down->up durations. Seeded with the 38 outages the ha-ble-vhci service logged
 # ("Home Assistant is back after N s", journal 2026-10-23..11-07: median 62 s,
@@ -79,7 +84,7 @@ def load_config() -> tuple[str, str | None]:
 HA_URL, HA_TOKEN = load_config()
 
 
-def ha_request(path: str, body: dict | None = None) -> tuple[int, bytes, dict]:
+def ha_request(path: str, body: dict | None = None, timeout: float = HA_TIMEOUT_S) -> tuple[int, bytes, dict]:
     req = urllib.request.Request(HA_URL + path, method='GET' if body is None else 'POST')
     if HA_TOKEN:
         req.add_header('Authorization', f'Bearer {HA_TOKEN}')
@@ -89,7 +94,7 @@ def ha_request(path: str, body: dict | None = None) -> tuple[int, bytes, dict]:
     else:
         data = None
     try:
-        with urllib.request.urlopen(req, data, timeout=HA_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, data, timeout=timeout) as resp:
             return resp.status, resp.read(), dict(resp.headers)
     except urllib.error.HTTPError as e:
         return e.code, e.read(), dict(e.headers)
@@ -231,7 +236,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, body)
             return
         if path == '/api/states' or path.startswith('/api/states/'):
-            status, raw, _ = ha_request(path)
+            status, raw, _ = ha_request(path, timeout=CLIENT_TIMEOUT_S)
             if status == 200:
                 self._send(200, raw, {'X-Aisis-Cache': 'live'})
                 return
@@ -251,7 +256,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b'{"error": "not in cache"}', {'X-Aisis-Cache': 'stale'})
             return
         # Other GETs: straight proxy.
-        status, raw, headers = ha_request(path)
+        status, raw, headers = ha_request(path, timeout=CLIENT_TIMEOUT_S)
         if status:
             self._send(status, raw)
         else:
@@ -265,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             body = None
         if path == '/api/template':
-            status, raw, _ = ha_request(path, body)
+            status, raw, _ = ha_request(path, body, CLIENT_TIMEOUT_S)
             if status == 200:
                 self._send(200, raw, {'X-Aisis-Cache': 'live'})
                 return
@@ -276,7 +281,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(503, b'{"error": "ha down, no cache"}')
             return
         if path.startswith('/api/services/'):
-            status, raw, _ = ha_request(path, body)
+            status, raw, _ = ha_request(path, body, CLIENT_TIMEOUT_S)
             if status:
                 self._send(status, raw)
                 return
@@ -289,7 +294,7 @@ class Handler(BaseHTTPRequestHandler):
                 'queued': True, 'position': queued, 'recovery_eta_s': eta,
             }).encode(), {'X-Aisis-Queue': '1', 'X-Aisis-Eta': str(eta)})
             return
-        status, raw, _ = ha_request(path, body)
+        status, raw, _ = ha_request(path, body, CLIENT_TIMEOUT_S)
         if status:
             self._send(status, raw)
         else:
