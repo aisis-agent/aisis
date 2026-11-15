@@ -8,9 +8,13 @@ The layer invokes exactly one `script.turn_on` call for `script.living_room_netf
 
 ## Projector fireplace
 
-The complete commands «открой», «включи» or «запусти камин», optionally «на проекторе», invoke only `script.living_room_fireplace`. Other targets, heating requests, questions, negation, songs and caller-provided URLs do not match. The HA script owns projector/Kodi power, the fixed local video and repeat management. AISIS does not launch the TV.
+The complete commands «открой», «включи» or «запусти камин», optionally «на проекторе», invoke only `script.living_room_fireplace`. Other targets, heating requests, questions, negation, songs and caller-provided URLs do not match. The HA script owns projector/Kodi power, video selection and repeat management. AISIS does not launch the TV.
 
-The video marker is `fireplace-fastily-1080p.webm`. Kodi HA `media_content_id` can contain a library unique ID rather than a file path, so it is not used as file identity. The supported title representations are that filename, its extensionless stem and its full local path under `/home/ultra/KodiLibrary/Ambience/`. Deployment acceptance checks the actual `Player.GetItem.file` separately. AISIS also requires `sensor.living_room_fireplace` to report playing, owned=true, file_matches=true and repeat=one. Its observed_at must come from a successful Kodi RPC observation after this launch began, with at most two seconds of future clock skew. Missing, stale, foreign, malformed or nonlooping evidence remains pending; no launch is replayed.
+Every fireplace command generates a new UUID and sends it as `script.turn_on` variables `{request_id}`. The authenticated host controller carries that identifier through startup, any bounded YouTube/local fallback, and playback observation. AISIS requires the same request ID on `sensor.living_room_fireplace`, a valid `launch_started_at` no earlier than this voice command (allowing two seconds of host clock skew), and a nonempty source ID with source kind `youtube` or `local`. A newly observed previous video can never confirm a different request.
+
+Playback is confirmed only when the sensor is playing, owned=true, file_matches=true, progressing=true and repeat=one, with no error and an `observed_at` at or after the launch timestamp and no more than two seconds in the future. The native Kodi entity `media_player.home` must also be playing and its title must equal the controller's actual nonempty title. The title is selected dynamically; no fixed filename or title list remains. Kodi HA `media_content_id` can be a library unique ID, so the host controller verifies actual file identity and time advancement separately. Signed playback URLs do not enter this voice contract.
+
+A same-request `starting` receipt produces «Запускаю камин на проекторе». A same-request `error` receipt with an explicit safe error code reports failure. `unknown`, absent, stale, mismatched, malformed or nonprogressing evidence produces an unconfirmed response. An uncertain HTTP response is observed without a second launch request; it is not reported as a definitive failure. The existing four-second reply budget remains absolute, and a later host completion does not turn the earlier pending response into a success claim.
 
 ## Source provenance
 
@@ -18,7 +22,7 @@ The baseline was read from the actual active `aisis-quasar-prod-blue` image, not
 
 - Image: `sha256:b05533500fe7e99c90cb47137ac3a5af99aaa71034fc3ccb01dbaa69e72661f9`
 - `/src/backend/ha-intents.ts`: `d27745ec7670384fe960b409f3ccdfed4f1043773a31a8c9b38671041c85cebc`
-- Reviewed patched matcher: `245c920baafb0709493e30547c147ebc50d475513595c10c4663708478a3cca9`
+- Patched matcher for this request contract: `e0cd5dd5e35410d7db7ed968a3777b997aef7f0d3e054c1395383e66ef4543b1`
 
 `prepare_overlay.py --baseline FILE --output-dir NEW_DIRECTORY` checks that baseline, applies the exact small patch with no fuzz, checks the result and copies the new helper. It emits a source manifest and private automatic execution log. It does not deploy or launch devices.
 
@@ -26,7 +30,9 @@ The existing blue/green stage, corpus, dialog, idle-color readiness and switch c
 
 ## Targeted tests
 
-On the managed RunPod runner, use Node26 and TypeScript5.9.3 for the actual-matcher contract harness:
+The native `Fireplace voice overlay` Actions workflow uses the deployed Node25.9.0 runtime and TypeScript5.9.3 to compile the helper and run its pure parser, request, lifecycle and deadline regressions. The original CI checks remain unchanged. The captured production matcher is an external, SHA-verified input; it is not duplicated into the repository or exempted from lint limits.
+
+On the managed RunPod runner, use the captured production matcher and TypeScript5.9.3 for the actual-matcher contract harness:
 
 `AISIS_ACTIVE_MATCHER_SOURCE=/path/to/captured-or-patched-ha-intents.ts node --experimental-vm-modules --test tests/*.mjs`
 

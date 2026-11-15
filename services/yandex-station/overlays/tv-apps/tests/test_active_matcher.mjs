@@ -132,3 +132,11 @@ test('an uncertain fireplace transport result never replays or announces definit
  assert.equal(api.calls.length,1);assert.equal(result.kind,'reply');
  assert.match(result.text,/пока не подтвержд/);assert.doesNotMatch(result.text,/Не удалось выполнить/);
 });
+
+test('the actual matcher distinguishes this request starting, failing and awaiting proof',async()=>{
+ for(const [state,error,phrase] of [['starting',null,/Запускаю камин/],['error','source_unavailable',/Не удалось запустить камин/],['unknown','open_unconfirmed',/пока не подтвержд/]]){
+  const api=await load('playing',undefined,200,false,{entity:'media_player.home',attributes:{media_title:'Previous video'},proofState:state,proof:{error,observed_at:null,owned:false,progressing:false}});
+  const result=await api.match('включи камин на проекторе');
+  assert.equal(api.calls.length,1);assert.equal(result.kind,'reply');assert.match(result.text,phrase);
+ }
+});
