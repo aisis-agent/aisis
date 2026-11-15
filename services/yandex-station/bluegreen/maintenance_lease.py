@@ -45,11 +45,16 @@ def read_owner(marker: Path) -> dict:
     return value
 
 
-def check_locked(state: Path, owner: str) -> None:
-    marker = state / 'maintenance'
-    value = read_owner(marker)
+def owner_locked(state: Path, owner: str) -> dict:
+    value = read_owner(state / 'maintenance')
     if re.fullmatch(r'[0-9a-f]{32}', owner) is None or value.get('owner') != owner:
         raise RuntimeError('maintenance lease belongs to another owner')
+    return value
+
+
+def check_locked(state: Path, owner: str) -> None:
+    marker = state / 'maintenance'
+    value = owner_locked(state, owner)
     created, deadline = value.get('created_monotonic'), value.get('deadline_monotonic')
     if any(type(item) not in (int, float) or not math.isfinite(item) for item in (created, deadline)):
         raise RuntimeError('maintenance lease has invalid timing')
@@ -57,6 +62,15 @@ def check_locked(state: Path, owner: str) -> None:
         raise RuntimeError('maintenance lease reached its absolute deadline')
     if not fresh(marker):
         raise RuntimeError('maintenance lease expired; renewal is refused')
+
+
+def authorize_locked(state: Path, owner: str = '') -> None:
+    """Normal mutation: an owned lease must still be valid; watchdogs wait for expiry."""
+    marker = state / 'maintenance'
+    if owner:
+        check_locked(state, owner)
+    elif marker.exists() and fresh(marker):
+        raise RuntimeError('maintenance is owned by a deployment')
 
 
 def acquire(state: Path, parent: int) -> str:

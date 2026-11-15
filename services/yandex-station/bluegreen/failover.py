@@ -172,10 +172,14 @@ class Watchdog:
         return True
 
     def restart_container(self, name: str, key: str) -> None:
+        if bgctl.quarantined_container(name):
+            return
         if not self._cooldown_ok(key):
             return
 
         def work() -> None:
+            if bgctl.quarantined_container(name):
+                return
             started = time.monotonic()
             bgctl._docker("unpause", name, timeout=10)
             result = bgctl._docker("restart", "-t", "3", name, timeout=90)
@@ -254,7 +258,7 @@ class Watchdog:
 
         if self.failed(t_active) and not quiet:
             self._handle_active_failure(active, standby, t_active, t_standby, standby_h["ok"])
-        elif self.failed(t_standby) and not quiet:
+        elif self.failed(t_standby) and not quiet and not bgctl.quarantined(env, standby):
             self.open_incident(f"quasar-{standby}", t_standby,
                                f"standby {standby} не отвечает ({t_standby.detail}), перезапускаю; active {active} жив")
             self.restart_container(bgctl.container(env, standby), f"quasar-{standby}")
@@ -262,6 +266,9 @@ class Watchdog:
             self.open_incident("switch", t_switch, f"switch не отвечает ({t_switch.detail}), перезапускаю")
             self.restart_container(bgctl.ENVS[env]["switch_container"], "switch")
 
+        self.handle_components(jobs, results, quiet)
+
+    def handle_components(self, jobs: dict, results: dict, quiet: bool) -> None:
         if not self.components:
             return
         for comp in COMPONENTS:

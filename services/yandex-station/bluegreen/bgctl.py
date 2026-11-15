@@ -192,11 +192,19 @@ def reload_switch(env: str) -> tuple[bool, str]:
 
 
 def flip(env: str, color: str | None = None) -> tuple[str, str, float]:
-    """Make `color` (default: the other one) primary. Returns (old, new, seconds)."""
+    """Serialize promotion with lease acquisition and candidate quarantine."""
+    with maintenance_lease.locked(STATE_DIR):
+        maintenance_lease.authorize_locked(STATE_DIR, os.environ.get("AISIS_MAINTENANCE_OWNER", ""))
+        return flip_locked(env, color)
+
+
+def flip_locked(env: str, color: str | None) -> tuple[str, str, float]:
     started = time.monotonic()
     old = active_color(env)
     new = color or other(old)
     state = load_state()
+    if state.get(f"{env.upper()}_QUARANTINE_{new.upper()}"):
+        raise RuntimeError("quarantined color cannot be promoted")
     state[f"{env.upper()}_ACTIVE"] = new
     save_state(state)
     render(env)
@@ -246,10 +254,20 @@ def wait_healthy(env: str, color: str, seconds: float) -> bool:
 
 # ── compose ──────────────────────────────────────────────────────────────
 
+def require_unquarantined_profile(env: str | None, state: dict) -> None:
+    for profile in (env,) if env else ENVS:
+        for color in COLORS:
+            if state.get(f"{profile.upper()}_QUARANTINE_{color.upper()}"):
+                raise ValueError("quarantined color requires explicit validated recovery before Compose")
+
+
 def compose_cmd(env: str | None, *args: str) -> list[str]:
     artifacts = STATE_DIR / f"source-artifacts.{env or 'all'}.compose.json"
     teardown = bool(args) and args[0] in ("down", "rm", "stop")
-    overlay = {"services": {}} if teardown else source_artifacts.compose_overlay(load_state(), env)
+    state = load_state()
+    if not teardown:
+        require_unquarantined_profile(env, state)
+    overlay = {"services": {}} if teardown else source_artifacts.compose_overlay(state, env)
     _atomic_write(artifacts, json.dumps(overlay, indent=2) + "\n")
     cmd = ["docker", "compose", "-p", COMPOSE_PROJECT, "-f", str(COMPOSE_FILE), "-f", str(artifacts)]
     if RUNTIME_ENV.exists():
@@ -312,6 +330,67 @@ def remove_inactive(env: str, color: str, expected_id: str) -> None:
         raise docker_failure("remove inactive container", result)
 
 
+def quarantined(env: str, color: str) -> bool:
+    return bool(load_state().get(f"{env.upper()}_QUARANTINE_{color.upper()}"))
+
+
+def quarantined_container(name: str) -> bool:
+    return any(name == container(env, color) and quarantined(env, color)
+               for env in ENVS for color in COLORS)
+
+
+def quarantine_candidate(env: str, color: str, expected_id: str, owner: str,
+                         previous_image: str, previous_artifact: str, *, preserve: bool = False) -> None:
+    # Cleanup alone may use an expired lease. It never renews it, and the same
+    # lock prevents another deployment acquiring ownership during this decision.
+    with maintenance_lease.locked(STATE_DIR):
+        maintenance_lease.owner_locked(STATE_DIR, owner)
+        if color == active_color(env) or container_id(env, color) != expected_id:
+            raise RuntimeError("candidate ownership or inactive identity changed; quarantine refused")
+        state = load_state()
+        prefix, suffix = env.upper(), color.upper()
+        state[f"{prefix}_QUARANTINE_{suffix}"] = "failed-deployment"
+        state[f"{prefix}_RECOVERY_IMG_{suffix}"] = previous_image
+        state[f"{prefix}_RECOVERY_ARTIFACT_{suffix}"] = previous_artifact
+        save_state(state)
+        if not preserve:
+            remove_inactive(env, color, expected_id)
+
+
+def recover_selection(env: str, color: str, owner: str) -> None:
+    with maintenance_lease.locked(STATE_DIR):
+        maintenance_lease.check_locked(STATE_DIR, owner)
+        if color == active_color(env):
+            raise RuntimeError("recovery may change only the inactive color")
+        state = load_state()
+        prefix, suffix = env.upper(), color.upper()
+        if not state.get(f"{prefix}_QUARANTINE_{suffix}"):
+            raise ValueError("color is not quarantined")
+        image = state.get(f"{prefix}_RECOVERY_IMG_{suffix}", "")
+        artifact = state.get(f"{prefix}_RECOVERY_ARTIFACT_{suffix}", "")
+        if not image:
+            raise ValueError("recorded previous selection is missing")
+        validate_selection(image, artifact)
+        identity_query("image", "inspect", "-f", "{{.Id}}", image)
+        maintenance_lease.check_locked(STATE_DIR, owner)
+        state[f"{prefix}_IMG_{suffix}"] = image
+        state[f"{prefix}_ARTIFACT_{suffix}"] = artifact
+        for key in ("QUARANTINE", "RECOVERY_IMG", "RECOVERY_ARTIFACT"):
+            state.pop(f"{prefix}_{key}_{suffix}", None)
+        save_state(state)
+
+
+def cmd_quarantine(args: argparse.Namespace) -> int:
+    quarantine_candidate(args.env, args.color, args.container_id, args.owner,
+                         args.previous_image, args.previous_artifact, preserve=args.preserve)
+    return 0
+
+
+def cmd_recover_selection(args: argparse.Namespace) -> int:
+    recover_selection(args.env, args.color, args.owner)
+    return 0
+
+
 def run_compose(env: str | None, *args: str, check: bool = True) -> int:
     child_env = {**os.environ, "BG_STATE": str(STATE_DIR)}
     return subprocess.run(compose_cmd(env, *args), env=child_env, check=check).returncode
@@ -348,6 +427,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 color: {
                     "image": state.get(f"{env.upper()}_IMG_{color.upper()}"),
                     "artifact": state.get(f"{env.upper()}_ARTIFACT_{color.upper()}"),
+                    "quarantined": bool(state.get(f"{env.upper()}_QUARANTINE_{color.upper()}")),
                     "running": container_running(container(env, color)),
                     **health(env, color),
                 }
@@ -375,14 +455,20 @@ def cmd_render(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_set_image(args: argparse.Namespace) -> int:
-    artifact = getattr(args, "artifact", "")
+def validate_selection(image: str, artifact: str) -> None:
     if artifact:
         directory = Path(artifact)
         if directory.parent != (STATE_DIR / "artifacts").resolve() or directory != directory.resolve():
             raise ValueError("import source artifacts into persistent blue/green state first")
-        source_artifacts.validate_artifact(directory, args.image)
+        source_artifacts.validate_artifact(directory, image)
+
+
+def cmd_set_image(args: argparse.Namespace) -> int:
+    artifact = getattr(args, "artifact", "")
     state = load_state()
+    if state.get(f"{args.env.upper()}_QUARANTINE_{args.color.upper()}"):
+        raise ValueError("quarantined selection requires recover-selection")
+    validate_selection(args.image, artifact)
     state[f"{args.env.upper()}_IMG_{args.color.upper()}"] = args.image
     state[f"{args.env.upper()}_ARTIFACT_{args.color.upper()}"] = artifact
     save_state(state)
@@ -523,6 +609,22 @@ def main() -> int:
         if name == "remove-inactive":
             p.add_argument("container_id")
         p.set_defaults(func=function)
+
+    p = sub.add_parser("quarantine-inactive", help="owner-scoped abort, never an expired-lease renewal")
+    p.add_argument("env", choices=list(ENVS))
+    p.add_argument("color", choices=COLORS)
+    p.add_argument("container_id")
+    p.add_argument("owner")
+    p.add_argument("previous_image")
+    p.add_argument("--previous-artifact", default="")
+    p.add_argument("--preserve", action="store_true", help="block recreation while preserving the original container")
+    p.set_defaults(func=cmd_quarantine)
+
+    p = sub.add_parser("recover-selection", help="validate and restore the recorded previous inactive selection")
+    p.add_argument("env", choices=list(ENVS))
+    p.add_argument("color", choices=COLORS)
+    p.add_argument("owner")
+    p.set_defaults(func=cmd_recover_selection)
 
     p = sub.add_parser("compose", help="docker compose with the project, env files and profile applied")
     p.add_argument("env", choices=list(ENVS))

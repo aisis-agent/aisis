@@ -199,6 +199,70 @@ class PersistentArtifacts(unittest.TestCase):
         bgctl.compose_cmd('prod', 'down')
         bgctl.compose_cmd('stage', 'config')
 
+    def test_expired_owner_can_quarantine_only_its_captured_inactive_container(self):
+        directory = self.imported()
+        owner = bgctl.maintenance_lease.acquire(self.state, os.getpid())
+        marker = self.state / 'maintenance'
+        lease = json.loads(marker.read_text())
+        lease['deadline_monotonic'] = 0
+        marker.write_text(json.dumps(lease))
+        expected_id = 'a' * 64
+        with patch.object(bgctl, 'container_id', return_value=expected_id), \
+                patch.object(bgctl, '_docker', return_value=subprocess.CompletedProcess([], 0, '', '')) as docker:
+            bgctl.quarantine_candidate('prod', 'blue', expected_id, owner, IMAGE, str(directory))
+            self.assertTrue(any(call.args == ('rm', '-f', expected_id) for call in docker.call_args_list))
+        self.assertTrue(bgctl.quarantined('prod', 'blue'))
+        self.assertEqual(json.loads(marker.read_text())['deadline_monotonic'], 0)
+        bgctl.maintenance_lease.release(self.state, owner)
+        recovery_owner = bgctl.maintenance_lease.acquire(self.state, os.getpid())
+        source = directory / FILES[0]
+        source.chmod(0o644)
+        with self.assertRaises(ValueError):
+            bgctl.recover_selection('prod', 'blue', recovery_owner)
+        self.assertTrue(bgctl.quarantined('prod', 'blue'))
+        source.chmod(0o444)
+        with patch.object(bgctl, 'identity_query', return_value=IMAGE):
+            bgctl.recover_selection('prod', 'blue', recovery_owner)
+        self.assertFalse(bgctl.quarantined('prod', 'blue'))
+        self.assertEqual(bgctl.load_state()['PROD_ARTIFACT_BLUE'], str(directory))
+
+    def test_abort_never_changes_state_for_a_new_owner_active_color_or_container(self):
+        owner = bgctl.maintenance_lease.acquire(self.state, os.getpid())
+        marker = self.state / 'maintenance'
+        original = json.loads(marker.read_text())
+        before = bgctl.load_state()
+        expected_id = 'a' * 64
+        for change in ('owner', 'active', 'container'):
+            with self.subTest(change=change):
+                lease = {**original, 'owner': 'f' * 32} if change == 'owner' else original
+                marker.write_text(json.dumps(lease))
+                active = 'blue' if change == 'active' else 'green'
+                actual = 'b' * 64 if change == 'container' else expected_id
+                with patch.object(bgctl, 'active_color', return_value=active), \
+                        patch.object(bgctl, 'container_id', return_value=actual), \
+                        patch.object(bgctl, '_docker') as docker:
+                    with self.assertRaises(RuntimeError):
+                        bgctl.quarantine_candidate('prod', 'blue', expected_id, owner, IMAGE, '')
+                    docker.assert_not_called()
+                self.assertEqual(bgctl.load_state(), before)
+
+    def test_watchdog_keeps_expiry_and_other_color_recovery_while_skipping_quarantine(self):
+        import failover
+        state = bgctl.load_state()
+        state['PROD_QUARANTINE_BLUE'] = 'failed-deployment'
+        bgctl.save_state(state)
+        marker = self.state / 'maintenance'
+        marker.touch()
+        os.utime(marker, (0, 0))
+        watchdog = failover.Watchdog('prod', 1.5, 3, 6, 1.0, False, False, self.state)
+        self.assertFalse(watchdog.maintenance())
+        watchdog.trackers['quasar-green'] = failover.Tracker()
+        with patch.object(failover.threading, 'Thread') as thread:
+            watchdog.restart_container(bgctl.container('prod', 'blue'), 'quasar-blue')
+            thread.assert_not_called()
+            watchdog.restart_container(bgctl.container('prod', 'green'), 'quasar-green')
+            thread.assert_called_once()
+
     def test_runtime_identity_checks_actual_image_and_readonly_mounts(self):
         directory = self.imported()
         self.select(directory)
@@ -312,7 +376,7 @@ class ArtifactDeploy(unittest.TestCase):
         run, calls, state, logged = self.run_deploy(fail_first=True, fail_restore=True)
         self.assertNotEqual(run.returncode, 0)
         self.assertIsNone(state['actual'])
-        self.assertIn(['bg', 'remove-inactive', 'prod', 'blue', 'fixture-container-1'], calls)
+        self.assertTrue(any(item[:5] == ['bg', 'quarantine-inactive', 'prod', 'blue', 'fixture-container-1'] for item in calls))
         self.assertIn('restoration failed', logged.lower())
         self.assertEqual(state['active'], 'green')
 

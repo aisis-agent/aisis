@@ -102,6 +102,19 @@ def remove_inactive():
     STATE['actual_id'] = None
 
 
+def quarantine():
+    require(len(ARGS) in (8, 9) and ARGS[1:3] == ['prod', idle_color()] and ARGS[6] == '--previous-artifact')
+    require(len(ARGS) == 8 or ARGS[8] == '--preserve')
+    marker = Path(os.environ['AISIS_BG_STATE']) / 'maintenance'
+    lease = json.loads(marker.read_text())
+    require(lease['owner'] == ARGS[4] and STATE['active'] != ARGS[2] and STATE['actual_id'] == ARGS[3])
+    STATE['quarantine'] = True
+    STATE['recovery'] = {'image': ARGS[5], 'artifact': ARGS[7]}
+    if len(ARGS) == 8:
+        STATE['actual'] = None
+        STATE['actual_id'] = None
+
+
 def lifecycle():
     if ARGS[0] == 'wait':
         require(len(ARGS) == 4 and ARGS[1] in ('prod', 'stage') and ARGS[2] in ('blue', 'green') and ARGS[3] == '90')
@@ -124,7 +137,7 @@ def artifact():
 
 HANDLERS = {'get': get_value, 'compose': compose, 'set-image': set_image,
             'verify-runtime': observation, 'smoke': observation, 'container-id': observation,
-            'remove-inactive': remove_inactive, 'wait': lifecycle, 'flip': lifecycle,
+            'remove-inactive': remove_inactive, 'quarantine-inactive': quarantine, 'wait': lifecycle, 'flip': lifecycle,
             'render': lifecycle, 'devices': lifecycle, 'import-artifact': artifact, 'artifact-image': artifact}
 status = 2
 try:
