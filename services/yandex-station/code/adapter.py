@@ -195,7 +195,7 @@ class Adapter:
     def _persona_block(self) -> str:
         """Base persona plus the owner's tone preset and global prompt (user_prompt.py); AISIS_USER_PROMPT=0 turns the owner part off."""
         if self.env.get("AISIS_USER_PROMPT", "1") == "0":
-            return self.persona
+            return "\n\n".join(part for part in (self.persona, user_prompt.CAPABILITIES) if part)
         return user_prompt.assemble(self.persona)
 
     async def start(self, _app):
