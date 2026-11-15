@@ -246,6 +246,70 @@ class PersistentArtifacts(unittest.TestCase):
                     docker.assert_not_called()
                 self.assertEqual(bgctl.load_state(), before)
 
+    def test_post_switch_rejection_blocks_future_promotion_without_removing_an_active_container(self):
+        reject = getattr(bgctl, 'reject_candidate', None)
+        self.assertTrue(callable(reject), 'post-switch failure requires persistent rejection that preserves the active runtime')
+        owner = bgctl.maintenance_lease.acquire(self.state, os.getpid())
+        marker = self.state / 'maintenance'
+        lease = json.loads(marker.read_text())
+        lease['deadline_monotonic'] = 0
+        marker.write_text(json.dumps(lease))
+        expected_id = 'a' * 64
+        with patch.object(bgctl, 'container_id', return_value=expected_id), patch.object(bgctl, '_docker') as docker:
+            reject('prod', 'green', expected_id, owner, 'previous-green', '')
+            docker.assert_not_called()
+        self.assertTrue(bgctl.quarantined('prod', 'green'))
+        self.assertEqual(json.loads(marker.read_text())['deadline_monotonic'], 0)
+        with self.assertRaises(ValueError):
+            bgctl.compose_cmd('prod', 'config')
+
+    def test_guarded_reverse_switch_rechecks_owner_active_color_and_container_before_reload(self):
+        rollback = getattr(bgctl, 'rollback_candidate', None)
+        self.assertTrue(callable(rollback), 'rollback must check the captured candidate under the maintenance lock')
+        owner = bgctl.maintenance_lease.acquire(self.state, os.getpid())
+        marker = self.state / 'maintenance'
+        original = json.loads(marker.read_text())
+        expected_id = 'a' * 64
+        for change in ('owner', 'expired', 'active', 'container'):
+            with self.subTest(change=change):
+                lease = dict(original)
+                if change == 'owner':
+                    lease['owner'] = 'f' * 32
+                if change == 'expired':
+                    lease['deadline_monotonic'] = 0
+                marker.write_text(json.dumps(lease))
+                active = 'blue' if change == 'active' else 'green'
+                actual = 'b' * 64 if change == 'container' else expected_id
+                with patch.object(bgctl, 'active_color', return_value=active), \
+                        patch.object(bgctl, 'container_id', return_value=actual), \
+                        patch.object(bgctl, 'flip_locked') as flip:
+                    with self.assertRaises(RuntimeError):
+                        rollback('prod', 'green', expected_id, 'blue', owner)
+                    flip.assert_not_called()
+        marker.write_text(json.dumps(original))
+        with patch.object(bgctl, 'container_id', return_value=expected_id), \
+                patch.object(bgctl, 'flip_locked', return_value=('green', 'blue', 0.1)) as flip:
+            self.assertEqual(rollback('prod', 'green', expected_id, 'blue', owner), ('green', 'blue', 0.1))
+            flip.assert_called_once_with('prod', 'blue')
+
+    def test_post_switch_rejection_refuses_new_ownership_or_a_replacement_container(self):
+        reject = getattr(bgctl, 'reject_candidate', None)
+        self.assertTrue(callable(reject))
+        owner = bgctl.maintenance_lease.acquire(self.state, os.getpid())
+        marker = self.state / 'maintenance'
+        original = json.loads(marker.read_text())
+        before = bgctl.load_state()
+        expected_id = 'a' * 64
+        for change in ('owner', 'container'):
+            with self.subTest(change=change):
+                marker.write_text(json.dumps({**original, 'owner': 'f' * 32} if change == 'owner' else original))
+                actual = 'b' * 64 if change == 'container' else expected_id
+                with patch.object(bgctl, 'container_id', return_value=actual), patch.object(bgctl, '_docker') as docker:
+                    with self.assertRaises(RuntimeError):
+                        reject('prod', 'green', expected_id, owner, 'previous-green', '')
+                    docker.assert_not_called()
+                self.assertEqual(bgctl.load_state(), before)
+
     def test_watchdog_keeps_expiry_and_other_color_recovery_while_skipping_quarantine(self):
         import failover
         state = bgctl.load_state()
@@ -308,7 +372,7 @@ class PersistentArtifacts(unittest.TestCase):
 
 
 class ArtifactDeploy(unittest.TestCase):
-    def run_deploy(self, *, fail_idle=False, fail_first=False, fail_restore=False, fail_before=False, fail_selection=False, require_maintenance=False, change_active=False, lease_loss='', overlay=False, active='green'):
+    def run_deploy(self, *, fail_idle=False, fail_first=False, fail_restore=False, fail_before=False, fail_selection=False, require_maintenance=False, change_active=False, lease_loss='', overlay=False, active='green', post_failure='', post_change='', rollback_refused=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             shutil.copy2(HERE / 'deploy.sh', root / 'deploy.sh')
@@ -329,7 +393,10 @@ class ArtifactDeploy(unittest.TestCase):
                 'FAIL_FIRST_RECREATE': str(int(fail_first)), 'FAIL_RESTORE': str(int(fail_restore)),
                 'FAIL_BEFORE_RECREATE': str(int(fail_before)), 'FAIL_RESTORE_SELECTION': str(int(fail_selection)),
                 'REQUIRE_MAINTENANCE': str(int(require_maintenance)), 'CHANGE_ACTIVE_AFTER_STAGE': str(int(change_active)),
-                'AISIS_TEST_HELPERS_DIR': str(HERE), 'LEASE_LOSS_DURING_IDLE': lease_loss}
+                'AISIS_TEST_HELPERS_DIR': str(HERE), 'LEASE_LOSS_DURING_IDLE': lease_loss,
+                'FAIL_SWITCH': str(int(post_failure == 'smoke')), 'FAIL_SPEAKER': str(int(post_failure == 'speaker')),
+                'POST_FLIP_CHANGE': post_change, 'REFUSE_ROLLBACK': str(int(rollback_refused)),
+                'AISIS_SPEAKER_WAIT_S': '0'}
             source = root / 'remote-output'
             source.mkdir()
             arguments = ['bash', str(root / 'deploy.sh'), 'deploy', '--overlay' if overlay else '--artifact', str(source)]
@@ -442,6 +509,46 @@ class ArtifactDeploy(unittest.TestCase):
                     self.assertEqual(state['actual_id'], 'another-owners-container')
                 if change == 'active':
                     self.assertEqual(state['active'], 'blue')
+
+    def test_post_switch_failures_confirm_rollback_and_quarantine_the_rejected_standby(self):
+        for failure in ('smoke', 'speaker'):
+            with self.subTest(failure=failure):
+                run, _calls, state, logged = self.run_deploy(post_failure=failure)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertEqual(state['active'], 'green', logged)
+                self.assertIsNone(state['actual'], 'a rejected standby must not remain available for later promotion')
+                self.assertTrue(state.get('quarantine'))
+                self.assertIn('rollback confirmed', logged.lower())
+
+    def test_refused_reverse_switch_is_not_reported_as_a_completed_rollback(self):
+        run, _calls, state, logged = self.run_deploy(post_failure='smoke', rollback_refused=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(state['active'], 'blue')
+        self.assertIsNotNone(state['actual'], 'the active container must not be removed')
+        self.assertTrue(state.get('quarantine'), 'rejected active bytes must not become a future unblocked standby')
+        self.assertNotIn('rolled back to', logged.lower())
+        self.assertNotIn('rollback confirmed', logged.lower())
+        self.assertIn('rollback unconfirmed', logged.lower())
+
+    def test_expired_post_switch_lease_rejects_candidate_without_stopping_the_active_container(self):
+        run, _calls, state, logged = self.run_deploy(post_failure='smoke', post_change='expire')
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(state['active'], 'blue')
+        self.assertIsNotNone(state['actual'])
+        self.assertTrue(state.get('quarantine'))
+        self.assertIn('rollback unconfirmed', logged.lower())
+
+    def test_post_switch_abort_preserves_a_new_owner_or_replacement_container(self):
+        for change in ('owner', 'container'):
+            with self.subTest(change=change):
+                run, _calls, state, logged = self.run_deploy(post_failure='smoke', post_change=change)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertEqual(state['active'], 'blue')
+                self.assertIsNotNone(state['actual'])
+                self.assertFalse(state.get('quarantine'))
+                self.assertNotIn('rollback confirmed', logged.lower())
+                if change == 'container':
+                    self.assertEqual(state['actual_id'], 'another-owners-container')
 
     def test_automatic_log_captures_stdout_and_stderr(self):
         run, _calls, _state, logged = self.run_deploy()
