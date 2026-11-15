@@ -23,6 +23,8 @@ def idle_color():
 def get_value():
     require(len(ARGS) == 3 and ARGS[1] == 'prod')
     key = ARGS[2]
+    if key == 'active' and os.environ.get('REQUIRE_MAINTENANCE') == '1':
+        require((Path(os.environ['AISIS_BG_STATE']) / 'maintenance').is_file())
     values = {'active': STATE['active']}
     for color in ('blue', 'green'):
         values['IMG_' + color.upper()] = STATE['images'][color]
@@ -63,6 +65,8 @@ def set_image():
     require(len(ARGS) == 6 and ARGS[1] in ('stage', 'prod') and ARGS[2] in ('blue', 'green') and ARGS[4] == '--artifact')
     if ARGS[1] == 'prod':
         require(ARGS[2] == idle_color())
+        if os.environ.get('FAIL_RESTORE_SELECTION') == '1' and ARGS[3].startswith('previous-'):
+            return 1
         STATE['images'][ARGS[2]] = ARGS[3]
         STATE['artifacts'][ARGS[2]] = ARGS[5]
 

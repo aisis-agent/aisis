@@ -228,7 +228,7 @@ class PersistentArtifacts(unittest.TestCase):
 
 
 class ArtifactDeploy(unittest.TestCase):
-    def run_deploy(self, *, fail_idle=False, fail_first=False, fail_restore=False, fail_before=False, overlay=False, active='green'):
+    def run_deploy(self, *, fail_idle=False, fail_first=False, fail_restore=False, fail_before=False, fail_selection=False, require_maintenance=False, change_active=False, overlay=False, active='green'):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             shutil.copy2(HERE / 'deploy.sh', root / 'deploy.sh')
@@ -247,7 +247,9 @@ class ArtifactDeploy(unittest.TestCase):
             environment = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'],
                 'AISIS_BG_STATE': str(state), 'FAIL_IDLE': str(int(fail_idle)),
                 'FAIL_FIRST_RECREATE': str(int(fail_first)), 'FAIL_RESTORE': str(int(fail_restore)),
-                'FAIL_BEFORE_RECREATE': str(int(fail_before))}
+                'FAIL_BEFORE_RECREATE': str(int(fail_before)), 'FAIL_RESTORE_SELECTION': str(int(fail_selection)),
+                'REQUIRE_MAINTENANCE': str(int(require_maintenance)), 'CHANGE_ACTIVE_AFTER_STAGE': str(int(change_active)),
+                'AISIS_TEST_HELPERS_DIR': str(HERE)}
             source = root / 'remote-output'
             source.mkdir()
             arguments = ['bash', str(root / 'deploy.sh'), 'deploy', '--overlay' if overlay else '--artifact', str(source)]
@@ -321,6 +323,24 @@ class ArtifactDeploy(unittest.TestCase):
         self.assertIn('active source artifact', logged.lower())
         self.assertFalse(any(item[0] == 'docker' or item[1] in {'compose', 'set-image', 'flip'} for item in calls))
         self.assertEqual(state['active'], 'green')
+
+    def test_maintenance_is_acquired_before_reading_the_active_color(self):
+        run, _calls, _state, logged = self.run_deploy(require_maintenance=True)
+        self.assertEqual(run.returncode, 0, logged)
+
+    def test_changed_active_color_is_rechecked_before_any_prod_replacement(self):
+        run, calls, state, logged = self.run_deploy(change_active=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertFalse(any(item[:3] == ['bg', 'set-image', 'prod'] for item in calls))
+        self.assertEqual(state['actual']['image'], 'previous-blue')
+        self.assertIn('active color changed', logged)
+
+    def test_failed_selection_restore_is_reported_before_cleanup(self):
+        run, _calls, state, logged = self.run_deploy(fail_first=True, fail_selection=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIsNone(state['actual'])
+        self.assertIn('previous idle selection is not restored', logged)
+        self.assertNotEqual(state['images']['blue'], 'previous-blue')
 
     def test_automatic_log_captures_stdout_and_stderr(self):
         run, _calls, _state, logged = self.run_deploy()
