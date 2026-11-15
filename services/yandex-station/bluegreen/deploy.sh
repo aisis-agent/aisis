@@ -27,14 +27,50 @@ corpus_dir=${AISIS_CORPUS_DIR:-$HOME/.local/share/aisis/corpus}
 postgres_container=${AISIS_POSTGRES_CONTAINER:-aisis-yandex-postgres-1}
 speaker_wait=${AISIS_SPEAKER_WAIT_S:-90}
 
-bg() { python3 "$here/bgctl.py" "$@"; }
+bg() {
+  case ${1:-} in
+    init|compose|set-image|render|import-artifact|flip|remove-inactive) maintenance_check ;;
+  esac
+  python3 "$here/bgctl.py" "$@"
+}
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die() { log "ABORT: $*"; exit 1; }
 upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 
-# Tells failover.py not to act while a deploy deliberately restarts things.
-maintenance_on() { mkdir -p "$state_dir"; touch "$state_dir/maintenance"; trap 'status=$?; rm -f "$state_dir/maintenance"; completion_log "$status"' EXIT; }
-maintenance_touch() { touch "$state_dir/maintenance"; }
+# Keep the watchdog's crash-recovery expiry while bounded remote checks run.
+maintenance_owner=""
+maintenance_pid=""
+maintenance_cleanup() {
+  local status=$?
+  trap - EXIT
+  set +e
+  if [[ -n $maintenance_pid ]] && jobs -pr | grep -qx "$maintenance_pid"; then
+    kill "$maintenance_pid"
+    wait "$maintenance_pid" 2>/dev/null
+  fi
+  if ! python3 "$here/bgctl.py" maintenance-release "$maintenance_owner"; then
+    log "maintenance lease was not released by this owner"
+    ((status == 0)) && status=1
+  fi
+  completion_log "$status"
+  exit "$status"
+}
+maintenance_on() {
+  maintenance_owner=$(python3 "$here/bgctl.py" maintenance-acquire "$$") || die "maintenance is owned or unavailable"
+  trap maintenance_cleanup EXIT
+  python3 "$here/bgctl.py" maintenance-keepalive "$maintenance_owner" "$$" &
+  maintenance_pid=$!
+  log "maintenance lease acquired; heartbeat is bounded and watchdog expiry remains enabled"
+}
+maintenance_check() {
+  [[ -n $maintenance_owner && -n $maintenance_pid ]] || die "maintenance lease is required"
+  kill -0 "$maintenance_pid" 2>/dev/null || die "maintenance heartbeat stopped"
+  python3 "$here/bgctl.py" maintenance-check "$maintenance_owner" || die "maintenance lease expired or changed"
+}
+require_active() {
+  maintenance_check
+  [[ $(bg get prod active) == "$1" ]] || die "active color changed; deployment mutation refused"
+}
 
 ensure_state() {
   [[ -f "$state_dir/state.env" ]] && return 0
@@ -44,16 +80,18 @@ ensure_state() {
   bg init "$img"
 }
 
-# The same complete corpus/dialog gate runs on the frozen candidate through RunPod.
-# API/handshake health checks and the subsequent flip/rollback flow stay below.
+# Every backend runs the same complete corpus/dialog gate against a fresh export.
 corpus_check() {
   local c=$1
+  maintenance_check
   docker exec "$c" mkdir -p /src/backend/corpus || return 1
+  maintenance_check
   docker cp "$corpus_dir/." "$c:/src/backend/corpus/" || return 1
-  python3 "$here/corpus_runpod.py" --container "$c" --corpus-dir "$corpus_dir"
+  python3 "$here/corpus_runpod.py" --container "$c" --corpus-dir "$corpus_dir" --backend "${AISIS_CORPUS_BACKEND:-runpod}"
 }
 
 build_image() {
+  maintenance_check
   local mode=$1 src=$2 base=$3 tag=$4 img="aisis-quasar:bg-$4" ctx
   if [[ $mode == overlay ]]; then
     [[ -d $src ]] || die "overlay dir not found: $src"
@@ -69,9 +107,11 @@ build_image() {
 }
 
 stage_db_reset() {
+  maintenance_check
   log "stage: copying prod database into quasar_stage"
   docker exec "$postgres_container" psql -q -U quasar -d postgres -v ON_ERROR_STOP=1 \
     -c 'DROP DATABASE IF EXISTS quasar_stage WITH (FORCE)' -c 'CREATE DATABASE quasar_stage' >/dev/null
+  maintenance_check
   docker exec "$postgres_container" sh -c 'pg_dump -U quasar quasar | psql -q -U quasar -d quasar_stage -v ON_ERROR_STOP=1 >/dev/null'
 }
 
@@ -105,8 +145,8 @@ stage_check() {
 }
 
 cmd_stage_up() { maintenance_on; stage_up "${1:-}"; log "stage is up"; }
-cmd_stage_check() { stage_check && log "stage checks passed"; }
-cmd_stage_down() { bg compose stage down --remove-orphans; }
+cmd_stage_check() { maintenance_on; stage_check && log "stage checks passed"; }
+cmd_stage_down() { maintenance_on; bg compose stage down --remove-orphans; }
 
 # Drop old bg-* images after a successful flip: keep both prod colors' images
 # (active + rollback) and anything a container still references.
@@ -116,6 +156,7 @@ prune_old_images() {
   used=" $(docker ps -a --format '{{.Image}}' | sort -u | tr '\n' ' ') "
   for t in $(docker images aisis-quasar --format '{{.Repository}}:{{.Tag}}' | grep ':bg-'); do
     [[ $keep == *" $t "* || $used == *" $t "* ]] && continue
+    maintenance_check
     docker rmi "$t" >/dev/null 2>&1 && log "pruned old image $t"
   done
 }
@@ -123,7 +164,11 @@ prune_old_images() {
 restore_idle() {
   local idle=$1 active=$2 previous_image=$3 previous_artifact=$4
   [[ $(bg get prod active) == "$active" ]] || { log "active color changed; restoration refused"; return 1; }
-  bg set-image prod "$idle" "$previous_image" --artifact "$previous_artifact" || return 1
+  if ! bg set-image prod "$idle" "$previous_image" --artifact "$previous_artifact"; then
+    log "previous idle selection is not restored; state still selects the failed candidate"
+    log "restore the previous artifact before any normal recreation of this idle color"
+    return 1
+  fi
   bg compose prod up -d --no-deps --force-recreate "quasar-prod-$idle" || return 1
   bg wait prod "$idle" 90 || return 1
   bg verify-runtime prod "$idle" || return 1
@@ -160,13 +205,13 @@ cmd_deploy() {
     esac
   done
   [[ -n $src ]] || die "give --artifact REMOTE_OUTPUT, --overlay SRC_DIR or --context DIR"
+  maintenance_on
   ensure_state
   active=$(bg get prod active)
   idle=$([[ $active == blue ]] && echo green || echo blue)
   if [[ $mode == overlay && -z $base && -n $(bg get prod "ARTIFACT_$(upper "$active")") ]]; then
     die "active source artifact requires an explicit base or --artifact; implicit inheritance is not supported"
   fi
-  maintenance_on
   if [[ $mode == artifact ]]; then
     log "[1/6] import verified remote source artifact"
     artifact=$(bg import-artifact "$src")
@@ -181,24 +226,28 @@ cmd_deploy() {
 
   log "[2/6] stage: new image, private DB copy, no speaker, HA dry-run"
   stage_up "$img" "$artifact"
-  maintenance_touch
+  maintenance_check
   stage_check || die "stage checks failed on $img; prod untouched"
 
+  require_active "$active"
   log "[3/6] prod idle color: $idle"
   local prev_img prev_artifact original_id
   prev_img=$(bg get prod "IMG_$(upper "$idle")")
   prev_artifact=$(bg get prod "ARTIFACT_$(upper "$idle")")
   original_id=$(bg container-id prod "$idle") || die "cannot establish the original idle container identity; prod untouched"
+  require_active "$active"
   bg set-image prod "$idle" "$img" --artifact "$artifact"
+  require_active "$active"
   bg compose prod up -d --no-deps --force-recreate "quasar-prod-$idle" \
     || recover_idle "$idle" "$active" "$prev_img" "$prev_artifact" "$original_id" "could not start prod $idle"
   if ! bg wait prod "$idle" 90 || ! bg verify-runtime prod "$idle" || ! corpus_check "aisis-quasar-prod-$idle" || ! bg smoke prod "$idle"; then
     recover_idle "$idle" "$active" "$prev_img" "$prev_artifact" "$original_id" "prod $idle failed pre-flip checks"
   fi
-  maintenance_touch
+  maintenance_check
 
   before=$(bg devices prod || true)
   log "[4/6] flip $active -> $idle (connected before: ${before:-none})"
+  require_active "$active"
   bg flip prod "$idle" >&2
 
   log "[5/6] verify through the switch"
@@ -246,6 +295,7 @@ cmd_adopt() {
   done
   before=$(curl -s -m3 http://127.0.0.1:31116/devices | grep -c '"connected":true' || true)
   log "cutover: legacy container -> switch (speaker connected before: $before)"
+  maintenance_check
   docker update --restart=no "$legacy" >/dev/null
   docker stop -t 2 "$legacy" >/dev/null
   bg compose prod up -d switch-prod >/dev/null 2>&1 || {
@@ -279,8 +329,10 @@ cmd_unit() {
   cp -p "$target" "$backup"
   if [[ -n $newfile ]]; then
     python3 -m py_compile "$newfile" || die "$newfile does not compile"
+    maintenance_check
     install -m "$(stat -c %a "$target")" "$newfile" "$target"
   fi
+  maintenance_check
   systemctl --user restart "$unit"
   local i
   for i in $(seq 1 30); do
@@ -288,6 +340,7 @@ cmd_unit() {
     sleep 1
   done
   log "$name unhealthy after restart; restoring $backup"
+  maintenance_check
   install -m "$(stat -c %a "$backup")" "$backup" "$target"
   systemctl --user restart "$unit"
   die "$name rolled back to the previous file"

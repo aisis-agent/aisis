@@ -1,4 +1,5 @@
 """Native-CI fixture: validate commands and keep desired/actual state independent."""
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,12 @@ ROOT = Path(__file__).parent
 ARGS = sys.argv[1:]
 with (ROOT / 'calls.jsonl').open('a') as stream:
     stream.write(json.dumps(['bg', *ARGS]) + '\n')
+if ARGS and ARGS[0].startswith('maintenance-'):
+    path = Path(os.environ['AISIS_TEST_HELPERS_DIR']) / 'bgctl.py'
+    spec = importlib.util.spec_from_file_location('actual_maintenance_cli', path)
+    actual = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(actual)
+    raise SystemExit(actual.main())
 STATE = json.loads((ROOT / 'state.json').read_text())
 
 

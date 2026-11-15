@@ -183,6 +183,22 @@ class PersistentArtifacts(unittest.TestCase):
         self.assertIn('no such container', message.lower())
         self.assertNotIn('private-secret-canary', message)
 
+    def test_quarantine_blocks_normal_recreation_config_selection_and_promotion_but_allows_teardown(self):
+        state = bgctl.load_state()
+        state['PROD_QUARANTINE_BLUE'] = 'failed-deployment'
+        bgctl.save_state(state)
+        for arguments in [('config',), ('up', '-d', 'quasar-prod-blue')]:
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                bgctl.compose_cmd('prod', *arguments)
+        with self.assertRaises(ValueError):
+            bgctl.cmd_set_image(argparse.Namespace(env='prod', color='blue', image=IMAGE, artifact=''))
+        with patch.object(bgctl, 'reload_switch') as reload_switch:
+            with self.assertRaises(RuntimeError):
+                bgctl.flip('prod', 'blue')
+            reload_switch.assert_not_called()
+        bgctl.compose_cmd('prod', 'down')
+        bgctl.compose_cmd('stage', 'config')
+
     def test_runtime_identity_checks_actual_image_and_readonly_mounts(self):
         directory = self.imported()
         self.select(directory)
@@ -228,7 +244,7 @@ class PersistentArtifacts(unittest.TestCase):
 
 
 class ArtifactDeploy(unittest.TestCase):
-    def run_deploy(self, *, fail_idle=False, fail_first=False, fail_restore=False, fail_before=False, fail_selection=False, require_maintenance=False, change_active=False, overlay=False, active='green'):
+    def run_deploy(self, *, fail_idle=False, fail_first=False, fail_restore=False, fail_before=False, fail_selection=False, require_maintenance=False, change_active=False, lease_loss='', overlay=False, active='green'):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             shutil.copy2(HERE / 'deploy.sh', root / 'deploy.sh')
@@ -249,7 +265,7 @@ class ArtifactDeploy(unittest.TestCase):
                 'FAIL_FIRST_RECREATE': str(int(fail_first)), 'FAIL_RESTORE': str(int(fail_restore)),
                 'FAIL_BEFORE_RECREATE': str(int(fail_before)), 'FAIL_RESTORE_SELECTION': str(int(fail_selection)),
                 'REQUIRE_MAINTENANCE': str(int(require_maintenance)), 'CHANGE_ACTIVE_AFTER_STAGE': str(int(change_active)),
-                'AISIS_TEST_HELPERS_DIR': str(HERE)}
+                'AISIS_TEST_HELPERS_DIR': str(HERE), 'LEASE_LOSS_DURING_IDLE': lease_loss}
             source = root / 'remote-output'
             source.mkdir()
             arguments = ['bash', str(root / 'deploy.sh'), 'deploy', '--overlay' if overlay else '--artifact', str(source)]
@@ -341,6 +357,27 @@ class ArtifactDeploy(unittest.TestCase):
         self.assertIsNone(state['actual'])
         self.assertIn('previous idle selection is not restored', logged)
         self.assertNotEqual(state['images']['blue'], 'previous-blue')
+        self.assertTrue(state.get('quarantine'), 'normal recreation must remain blocked after failed recovery')
+
+    def test_expired_lease_during_idle_gate_quarantines_and_removes_its_candidate(self):
+        run, _calls, state, logged = self.run_deploy(lease_loss='expire')
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIsNone(state['actual'], logged)
+        self.assertTrue(state.get('quarantine'))
+        self.assertEqual(state['active'], 'green')
+
+    def test_lease_loss_preserves_a_replacement_owner_container_or_new_active_color(self):
+        for change in ('owner', 'container', 'active'):
+            with self.subTest(change=change):
+                run, calls, state, _log = self.run_deploy(lease_loss=change)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIsNotNone(state['actual'])
+                self.assertFalse(any(item[:2] == ['bg', 'remove-inactive'] for item in calls))
+                self.assertFalse(state.get('quarantine'))
+                if change == 'container':
+                    self.assertEqual(state['actual_id'], 'another-owners-container')
+                if change == 'active':
+                    self.assertEqual(state['active'], 'blue')
 
     def test_automatic_log_captures_stdout_and_stderr(self):
         run, _calls, _state, logged = self.run_deploy()

@@ -8,6 +8,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest.mock import Mock
 import zipfile
 
 HERE = Path(__file__).resolve().parents[1]
@@ -130,6 +131,44 @@ class PrivateCorpusCIContracts(unittest.TestCase):
                 self.read_archive(self.archive(variant))
         with self.assertRaises(ValueError):
             self.read_archive(self.archive(entries), digest='sha256:' + '0' * 64)
+
+    def test_dispatch_unknown_ack_never_launches_twice_and_credential_guard_stops_it(self):
+        client = Mock()
+        client.api.side_effect = self.api.GitHubFailure('lost acknowledgement')
+        self.api.dispatch_once(client, self.expected)
+        self.assertEqual(client.api.call_count, 1)
+        self.assertEqual(client.api.call_args.kwargs['payload']['inputs']['mode'], 'corpus')
+        client.reset_mock()
+        client.api.side_effect = self.api.CredentialUnavailable('locked')
+        with self.assertRaises(self.api.CredentialUnavailable):
+            self.api.dispatch_once(client, self.expected)
+        self.assertEqual(client.api.call_count, 1)
+
+    def test_input_bundle_cannot_include_an_uploaded_executor_or_private_extra_file(self):
+        import tarfile
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / 'input'
+            bundle.mkdir()
+            runtime = b'bounded fixture runtime'
+            source = {'archive_sha256': hashlib.sha256(runtime).hexdigest()}
+            (bundle / 'manifest.json').write_text(json.dumps(source))
+            (bundle / 'rootfs.tar.gz').write_bytes(runtime)
+            (bundle / 'corpus_runpod.py').write_text('not the trusted remote helper')
+            (bundle / 'secret.json').write_text('must remain local')
+            output = root / 'private-input.tar'
+            self.api.pack_input(bundle, source, output)
+            with tarfile.open(output, 'r:') as archive:
+                self.assertEqual({item.name for item in archive.getmembers()}, {'manifest.json', 'rootfs.tar.gz'})
+                self.assertTrue(all(item.isfile() for item in archive.getmembers()))
+
+    def test_cleanup_never_deletes_an_input_release_that_changed_ownership(self):
+        client = Mock(credentials_blocked=False)
+        client.api.return_value = {'tag_name': 'corpus-input-' + self.request, 'body': 'another owner'}
+        with self.assertRaises(ValueError):
+            self.api.delete_input(client, {'id': 123}, 'corpus-input-' + self.request, self.request)
+        self.assertEqual(client.api.call_count, 1)
+        self.assertNotEqual(client.api.call_args.kwargs.get('method'), 'DELETE')
 
 
 if __name__ == '__main__':

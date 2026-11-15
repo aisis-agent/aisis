@@ -16,7 +16,8 @@ failover.py additionally move the primary role, so a hung-but-listening color
 is replaced too. A flip is an `nginx -s reload`; `worker_shutdown_timeout`
 bounds how long old connections (the speaker's WebSocket) stay on the old color.
 
-Commands: init, status, health, wait, devices, flip, render, set-image, get, compose, smoke.
+Commands include state, health, compose, artifact verification, inactive cleanup,
+and owner-specific maintenance leases. Run --help for the complete CLI.
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import smoke  # noqa: E402
 import source_artifacts  # noqa: E402
+import maintenance_lease  # noqa: E402
 
 CODE_DIR = Path(__file__).resolve().parent
 HOME = Path.home()
@@ -443,6 +445,19 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     return 0 if result["ok"] else 1
 
 
+def cmd_maintenance(args: argparse.Namespace) -> int:
+    operation = args.command.removeprefix("maintenance-")
+    if operation == "acquire":
+        print(maintenance_lease.acquire(STATE_DIR, args.parent))
+    elif operation == "keepalive":
+        maintenance_lease.keepalive(STATE_DIR, args.owner, args.parent)
+    elif operation == "check":
+        maintenance_lease.check(STATE_DIR, args.owner)
+    elif operation == "release":
+        return 0 if maintenance_lease.release(STATE_DIR, args.owner) else 1
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -518,6 +533,14 @@ def main() -> int:
     p.add_argument("env", choices=list(ENVS))
     p.add_argument("target", choices=("switch", *COLORS))
     p.set_defaults(func=cmd_smoke)
+
+    for operation in ("acquire", "check", "release", "keepalive"):
+        p = sub.add_parser("maintenance-" + operation)
+        if operation != "acquire":
+            p.add_argument("owner")
+        if operation in ("acquire", "keepalive"):
+            p.add_argument("parent", type=int)
+        p.set_defaults(func=cmd_maintenance)
 
     args = parser.parse_args()
     try:

@@ -1,15 +1,55 @@
 # Blue/green source artifact deployment
 
-`deploy.sh deploy --artifact REMOTE_OUTPUT` deploys the two-file voice overlay prepared and tested by native CI or the managed RunPod runner. It uses the existing immutable image recorded in `proof.json`. This mode performs no local compilation or Docker image build.
+`deploy.sh deploy --artifact REMOTE_OUTPUT` deploys a two-file voice overlay over the existing immutable image recorded in `proof.json`. This mode performs no local compilation or Docker image build. Its runtime identity is the image ID together with the exact mounted source hashes.
 
-The input directory must contain `fireplace-artifact.tar` and `proof.json`. The archive contains only `backend/ha-intents.ts` and `backend/tv-app-intents.ts`; both file hashes, the archive hash, the source commit, the required existing image ID and the remote runtime input digest are recorded in the proof. Import rejects changed archives, extra entries, links and mismatched source bytes.
+The public fireplace workflow compiles the isolated helper, runs its contract tests and packages the overlay inputs. The separate managed candidate assembly runs the actual prepared matcher and the full corpus/dialog suites, then produces `fireplace-artifact.tar` and `proof.json`. These are distinct artifacts and checks. A candidate assembly result does not satisfy the later stage or idle production gates.
 
-The import copies the verified files into a read-only directory under `AISIS_BG_STATE/artifacts`. The downloaded input can then be removed. Image and artifact directory are stored separately for each stage and production color. Every normal `bgctl.py compose` creation or configuration call validates the stored bytes and read-only permissions and includes `source-artifacts.<environment>.compose.json`, which mounts the two files read-only over the matching image. A production-only recreation does not depend on an unused stage artifact. Teardown commands (`down`, `rm`, `stop`) omit artifact mounts and can clean up stage even if an unused artifact was removed. Normal recreation retains the selected artifact without a one-off `-f` argument. An image deployment without `--artifact` clears only the selected color's mounts. If the active color has a source artifact, an ordinary `--overlay` deployment must give an explicit base or use `--artifact`; implicit image inheritance fails before stage or production mutation because it cannot preserve the active mounted sources.
+## Artifact integrity and persistent mounts
 
-The artifact proof establishes integrity and remote test provenance. It does not establish production acceptance. Deployment still runs both stage corpus/dialog checks, stage API and handshake checks, the stage switch check, the idle production color's corpus/dialog and health checks, the switch checks after the flip, and the existing speaker reconnection check. Each corpus gate exports the actual container before and after its managed RunPod run, including effective mounted source bytes and runtime flags. The managed corpus job uses the supported `cpu3c-4` target and has no local fallback.
+The input directory must contain `fireplace-artifact.tar` and `proof.json`. The archive contains only `backend/ha-intents.ts` and `backend/tv-app-intents.ts`. The proof records both source hashes, the archive hash, source commit, required existing image ID and remote runtime input digest. Import rejects changed archives, extra entries, links and mismatched source bytes.
 
-Before corpus checks, deployment verifies each candidate container's actual image ID and exact read-only source mounts. If the idle color fails, including a Compose failure after partial replacement, deployment restores its previous image and artifact, recreates the idle container, waits for health and verifies its actual image and mounts. Before selecting the candidate, deployment records the original idle container ID; an unreadable identity stops the operation before changing production state. If both recreation and restoration fail before replacing that original container, it is preserved. Restoration failure after replacement is explicit: cleanup rechecks that the color is inactive and the replacement still has the captured identity, then removes that replacement by ID so the watchdog cannot restart an unapproved candidate. A changed color or container aborts cleanup. The active production color and its existing source files remain unchanged until the verified flip. `deploy.sh rollback` selects the warm previous color with its own recorded image and mounts.
+The proof is integrity metadata, not a signature or a production acceptance record. The reviewed remote run and its authoritative artifact identity must be checked when retrieving it. The source revision used for candidate assembly remains separate from any newer deployment-helper revision.
 
-The deployment scripts and helper must be installed together before using this mode: `deploy.sh`, `bgctl.py`, `source_artifacts.py`, `corpus_runpod.py` and the existing Compose/export/smoke dependencies. All normal automation that recreates a color must use this version of `bgctl.py`. An older copy cannot interpret artifact state. Do not remove an artifact directory while either color references it.
+Import copies the verified files into a read-only directory under `AISIS_BG_STATE/artifacts`. The downloaded input can then be removed. Each stage and production color stores its own image and artifact directory. Every normal `bgctl.py compose` creation or configuration call validates the stored bytes and read-only permissions and includes `source-artifacts.<environment>.compose.json`, which mounts both files read-only over the matching image.
 
-`deploy.sh` records a private timestamped log under `/tmp` and streams it to the terminal. Source artifact mode keeps production configuration and credentials on the local host; they are not part of the source archive or remote corpus runtime.
+A production-only recreation does not depend on an unused stage artifact. Teardown commands (`down`, `rm`, `stop`) omit artifact mounts and can clean up stage even if an unused artifact was removed. Normal recreation retains the selected artifact without a one-off `-f` argument.
+
+An image deployment without `--artifact` clears only the selected color's mounts. If the active color has a source artifact, an ordinary `--overlay` deployment must give an explicit base or use `--artifact`. Implicit image inheritance fails before stage or production mutation because it cannot preserve the active mounted sources.
+
+## Fresh runtime gates
+
+Deployment retains both stage corpus/dialog checks, stage API and handshake checks, the stage switch check, the idle production color's corpus/dialog and health checks, switch checks after the flip, and the speaker reconnection check.
+
+Each corpus gate exports the actual container before and after its remote run, including effective mounted source bytes and runtime flags. It verifies the same complete commands, full counts, logs and input digest. Neither backend can accept a precomputed candidate proof or a receipt for another runtime.
+
+The default backend uses the supported managed RunPod `cpu3c-4` target. The explicit alternative is:
+
+```sh
+AISIS_CORPUS_BACKEND=private-actions ./deploy.sh deploy --artifact REMOTE_OUTPUT
+```
+
+The private Actions backend is fixed in `private_corpus_ci.py` to one private repository, numeric repository identity, workflow ID, immutable release ref and reviewed commit. There is no arbitrary executor, workflow or result override. It uploads only a freshly prepared `manifest.json` and `rootfs.tar.gz`, inside the request's `private-input.tar`. The workflow executes its checked-in, hash-pinned corpus helper.
+
+Each request dispatches once. An uncertain acknowledgement is observed without redispatch. Completion requires a successful first attempt for that request and workflow, the exact corpus artifact name, the artifact's authoritative digest, matching repository/run/source/input identities, and the original receipt with full counts. The saved gate evidence includes the run URL, run and artifact IDs, workflow pin, input hashes and provenance. Input releases are removed only after their request ownership is rechecked. Credential-store guards remain in effect; an unavailable store stops the operation without a token fallback.
+
+Both backends have no local test fallback. Production configuration and credentials remain local and are excluded from the filtered remote runtime.
+
+## Maintenance and recovery
+
+Deployment acquires an exclusive maintenance owner before reading the active color. A direct child renews only that owner's marker, every 30 seconds, with an absolute two-hour limit. The watchdog's existing 900-second expiry remains enabled. Normal exit stops renewal and releases only the matching owner's marker. A killed parent stops renewal through reparent detection; the marker then expires normally. A stale or replaced owner cannot renew or remove its replacement.
+
+Mutating deployment commands check the lease, and production selection, recreation and flip recheck the active color. A changed active color stops the operation. The active production color remains unchanged until the verified flip.
+
+Before corpus checks, deployment verifies each candidate container's actual image ID and exact read-only source mounts. Before selecting the idle candidate, it records the original idle container ID; an unreadable identity stops the operation before changing production state.
+
+If the idle color fails, including a Compose failure after partial replacement, deployment restores its previous image and artifact, recreates the container, waits for health and verifies its actual image and mounts. If both recreation and restoration fail before replacing the original container, that original is preserved.
+
+Restoration failure after replacement is explicit. Cleanup rechecks that the color is inactive and the replacement still has the captured identity, then removes only that replacement by ID so the watchdog cannot restart it. A changed color or container aborts cleanup. If validation prevents restoring the previous selection, the log explicitly records that state still selects the failed candidate; the previous artifact must be restored before recreating that idle color. Validation is never bypassed to disguise a failed restoration.
+
+`deploy.sh rollback` selects the warm previous color with its own image and mounts.
+
+## Installation and logs
+
+Install the deployment helpers together: `deploy.sh`, `bgctl.py`, `source_artifacts.py`, `maintenance_lease.py`, `corpus_runpod.py`, `private_corpus_ci.py`, and the existing Compose/export/smoke dependencies. All normal automation that recreates a color must use this version of `bgctl.py`; an older copy cannot interpret artifact state. Do not remove an artifact directory while either color references it.
+
+`deploy.sh` and the corpus entry point stream safe progress and results to the terminal and automatically keep private execution logs under `/tmp`. Source artifact deployment keeps configuration and credentials out of the source archive and remote corpus inputs.

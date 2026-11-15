@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the existing AISIS corpus gate on a frozen image through RunPod only."""
+"""Run the unchanged full AISIS corpus gate on a fresh runtime in managed remote compute."""
 from __future__ import annotations
 import argparse
 from copy import deepcopy
@@ -19,6 +19,7 @@ import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 EXTERNAL_MOUNT = Path("/run/media/ultra/backups")
 EXTERNAL_WORK = EXTERNAL_MOUNT / "home-ultra/work"
 COMMANDS = (
@@ -370,13 +371,16 @@ def prepare_input_bundle(state: Path, snapshot: Path, source: dict) -> Path:
     return bundle
 
 
-def save_proof(state: Path, before: dict, receipt: dict, counts: dict, runner_exit: int) -> Path:
+def save_proof(state: Path, before: dict, receipt: dict, counts: dict, runner_exit: int,
+               authority: dict | None = None) -> Path:
     source_id = input_digest(before)
     evidence = state / "evidence"
     evidence.mkdir(exist_ok=True, mode=0o700)
     path = evidence / (source_id + "-" + str(time.time_ns()) + ".json")
     proof = {"input_digest": source_id, "image_id": before["image_id"], "counts": counts,
              "receipt": receipt, "runner_exit": runner_exit}
+    if authority is not None:
+        proof["native_ci"] = authority
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "w") as stream:
         json.dump(proof, stream, ensure_ascii=False, indent=2)
@@ -384,7 +388,25 @@ def save_proof(state: Path, before: dict, receipt: dict, counts: dict, runner_ex
     return path
 
 
-def local_gate(container: str, corpus_dir: Path, logger: logging.Logger) -> int:
+def execute_backend(backend: str, bundle: Path, before: dict, logger: logging.Logger) -> tuple:
+    if backend == "private-actions":
+        import private_corpus_ci
+        receipt, authority = private_corpus_ci.run(bundle, before, logger)
+        return receipt, 0, authority
+    if backend != "runpod":
+        raise ValueError("unsupported corpus backend")
+    command = managed_command(bundle, input_digest(before))
+    if not Path(command[0]).is_file():
+        raise ValueError("established runpod-run is unavailable; no local test fallback")
+    runner_exit, output = logged_command(command, logger, cwd=bundle)
+    receipts = [line[len(RECEIPT_PREFIX):] for line in output.splitlines()
+                if line.startswith(RECEIPT_PREFIX)]
+    if len(receipts) != 1:
+        raise ValueError("managed runner did not return exactly one execution receipt")
+    return json.loads(receipts[0]), runner_exit, None
+
+
+def local_gate(container: str, corpus_dir: Path, logger: logging.Logger, backend: str = "runpod") -> int:
     state = external_state_root()
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = Path(tempfile.mkdtemp(prefix="snapshot-", dir=state))
@@ -392,18 +414,10 @@ def local_gate(container: str, corpus_dir: Path, logger: logging.Logger) -> int:
         before = export_snapshot(container, corpus_dir, temporary / "before", logger)
         source_id = input_digest(before)
         bundle = prepare_input_bundle(state, temporary / "before", before)
-        command = managed_command(bundle, source_id)
-        if not Path(command[0]).is_file():
-            raise ValueError("established runpod-run is unavailable; no local test fallback")
-        runner_exit, output = logged_command(command, logger, cwd=bundle)
+        receipt, runner_exit, authority = execute_backend(backend, bundle, before, logger)
         after = export_snapshot(container, corpus_dir, temporary / "after", logger, manifest_only=True)
-        receipts = [line[len(RECEIPT_PREFIX):] for line in output.splitlines()
-                    if line.startswith(RECEIPT_PREFIX)]
-        if len(receipts) != 1:
-            raise ValueError("managed runner did not return exactly one execution receipt")
-        receipt = json.loads(receipts[0])
         counts = verify_receipt(before=before, after=after, receipt=receipt, runner_exit=runner_exit)
-        path = save_proof(state, before, receipt, counts, runner_exit)
+        path = save_proof(state, before, receipt, counts, runner_exit, authority)
         logger.info("gate_passed image=%s digest=%s counts=%s proof=%s",
                     before["image_id"], source_id, counts, path)
         return 0
@@ -431,7 +445,10 @@ def main() -> int:
         group.add_argument("--remote", action="store_true")
         group.add_argument("--bootstrap")
         parser.add_argument("--corpus-dir", type=Path)
+        parser.add_argument("--backend", choices=("runpod", "private-actions"), default="runpod")
         args = parser.parse_args()
+        if args.backend != "runpod" and not args.container:
+            raise ValueError("backend selection applies only to a fresh local container export")
         if args.bootstrap:
             bootstrap(Path.cwd(), args.bootstrap, logger)
             status = 0
@@ -440,7 +457,7 @@ def main() -> int:
         else:
             if args.corpus_dir is None:
                 raise ValueError("corpus directory is required")
-            status = local_gate(args.container, args.corpus_dir, logger)
+            status = local_gate(args.container, args.corpus_dir, logger, args.backend)
     except Exception as exc:
         logger.error("gate_failed type=%s reason=%s", type(exc).__name__, str(exc))
     finally:
