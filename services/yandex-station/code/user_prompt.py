@@ -4,7 +4,8 @@ The owner's choice lives in ~/.config/aisis/user-prompt.json: `preset` (tone),
 `profanity` (bool) and `text` (free text, up to MAX_CHARS). The file is read at turn
 time, so a dashboard change reaches the next brain turn without restarting anything.
 The tone and profanity fragments and the default text are plain Russian files in
-prompts/ beside this module: edit them to change what a preset means.
+the prompts directory (~/.local/share/aisis/prompts, AISIS_PROMPTS_DIR overrides): edit them to
+change what a preset means. They are runtime state, not repo content.
 
 The system only passes the owner's words through: assemble() puts them after the
 base persona and before memory, with control characters and square brackets removed
@@ -24,6 +25,19 @@ PRESETS = {"official": "Официально", "neutral": "Нейтрально"
 DEFAULT_PRESET = "harsh"
 DEFAULT_PROFANITY = True
 
+# What this speaker really does, so the brain never refuses with a made-up reason or sends the owner to a
+# «штатная команда колонки» that does not exist (the station is rooted: its cloud Alice is not reachable).
+# The fast layer and the adapter run these commands before the brain; the brain only ever sees a phrase that
+# none of them recognised.
+CAPABILITIES = (
+    "Колонка не подключена к Алисе и сервисам Яндекса: «штатной команды колонки», приложения Алиса и умного дома "
+    "Яндекса здесь нет, никогда не отправляй к ним. Свет, климат, телевизор и громкость, музыку («включи "
+    "<исполнитель>», «включи музыку», пауза, дальше) и погоду у дома колонка выполняет сама, до тебя. Если фраза "
+    "похожа на такую команду, но дошла до тебя, её не расслышали: переспроси коротко и не говори, что не умеешь, "
+    "не можешь или нет доступа. Ты сам ничего не включаешь и не проверяешь, поэтому не обещай действий и не "
+    "выдумывай данные (погоду, время, состояние устройств). На просьбу о действии, которого колонка не умеет "
+    "(звонок, сообщение, заказ), ответь «Это я пока не умею.», а на вопросы по знаниям отвечай как обычно.")
+
 OWNER_HEADER = ("Инструкции владельца (приоритетнее стиля по умолчанию; формат голосового ответа из установки выше "
                 "остаётся в силе):")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u2028\u2029]")
@@ -38,7 +52,7 @@ def settings_path() -> Path:
 
 
 def prompts_dir() -> Path:
-    return Path(os.environ.get("AISIS_PROMPTS_DIR", str(Path(__file__).resolve().parent / "prompts")))
+    return Path(os.environ.get("AISIS_PROMPTS_DIR", str(Path.home() / ".local" / "share" / "aisis" / "prompts")))
 
 
 def _fragment(name: str) -> str:
@@ -132,12 +146,12 @@ def reset() -> dict:
 
 
 def assemble(base_persona: str, settings: dict | None = None) -> str:
-    """The persona block: base persona, the fixed not-heard rule, tone preset, profanity switch, then the owner's text.
+    """The persona block: base persona, what the speaker can do, the fixed not-heard rule, tone preset, profanity switch, then the owner's text.
 
-    Empty only when there is nothing to say (no base persona and everything blank).
+    Never empty: the capabilities text is always part of it.
     """
     settings = load() if settings is None else settings
-    parts = [base_persona.strip(), _fragment("rule-not-heard.txt"), preset_fragment(settings["preset"]),
+    parts = [base_persona.strip(), CAPABILITIES, _fragment("rule-not-heard.txt"), preset_fragment(settings["preset"]),
              profanity_fragment(settings["profanity"])]
     owner = sanitize(settings["text"])[:MAX_CHARS]
     if owner:

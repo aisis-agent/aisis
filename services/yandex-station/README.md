@@ -48,6 +48,26 @@ support services: aisis-station-kit :18080 (eQuasar sync server, ~/lite-kit),
 | 31116 (LAN) | quasar LAN proxy | aisis-station-lan-proxy.service |
 | 10300 | Wyoming faster-whisper (tailnet) | wyoming-whisper.service |
 
+## Who answers what
+
+The station is rooted and its Yandex cloud is not reachable, so there is no stock Alice behind the
+speaker. A heard phrase is tried in this order; the first layer that recognises it answers:
+
+1. quasar fast intents (container): lights, climate, TV, volume, media keys, «включи <исполнитель>»
+   (adapter `/music/play` → Music Assistant → AirPlay on the speaker), current weather from the HA entity;
+2. adapter `voice_skills.py` (this directory): weather questions of every kind (`weather say --now|--tomorrow|--week|--umbrella|--dress`
+   from weather-cli, HA + Open-Meteo) and «включи музыку» with no name (`music_airplay.music_any`: leave what
+   plays (also a phone's AirPlay stream) alone, else queue 25 random tracks of the Music Assistant library;
+   «продолжи» stays the media key for what was stopped);
+3. the ChatGPT brain (pm). It has no tools: its persona block (`user_prompt.CAPABILITIES` plus the
+   fragments from `~/.local/share/aisis/prompts/`) tells it what the speaker does and forbids the made-up
+   «не могу, скажи штатной командой колонки».
+
+One-time setup on the host: `ln -s ~/xp/weather-cli/bin/weather ~/.local/bin/weather` (the adapter finds it
+on PATH or in `~/.local/bin` at call time; `AISIS_WEATHER_COMMAND='["/path/weather"]'` overrides). weather-cli
+reads Home Assistant through `aisis-ha-cli` (`WEATHER_HA_URL`, default `AISIS_HACLI_URL`); ha-cli forwards the
+query string, which `weather.get_forecasts?return_response` needs.
+
 ## Ops runbook
 
 - **Deploy units**: `scripts/install-systemd-units.sh` (repo root) copies every

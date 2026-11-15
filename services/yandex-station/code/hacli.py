@@ -31,6 +31,7 @@ import statistics
 import time
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -264,6 +265,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split('?')[0]
+        query = self.path[len(path):]  # `?return_response` selects a service call that answers with data
         length = int(self.headers.get('Content-Length') or 0)
         try:
             body = json.loads(self.rfile.read(length) or b'null')
@@ -281,11 +283,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(503, b'{"error": "ha down, no cache"}')
             return
         if path.startswith('/api/services/'):
-            status, raw, _ = ha_request(path, body, CLIENT_TIMEOUT_S)
+            status, raw, _ = ha_request(path + query, body, CLIENT_TIMEOUT_S)
             if status:
                 self._send(status, raw)
                 return
             report_down()
+            if 'return_response' in urllib.parse.parse_qs(query.lstrip('?'), keep_blank_values=True):  # the caller waits for the answer: queueing it would only hide the outage
+                self._send(503, b'{"error": "ha down"}')
+                return
             with _lock:
                 _queue.append((path, body))
                 queued = len(_queue)
@@ -294,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
                 'queued': True, 'position': queued, 'recovery_eta_s': eta,
             }).encode(), {'X-Aisis-Queue': '1', 'X-Aisis-Eta': str(eta)})
             return
-        status, raw, _ = ha_request(path, body, CLIENT_TIMEOUT_S)
+        status, raw, _ = ha_request(path + query, body, CLIENT_TIMEOUT_S)
         if status:
             self._send(status, raw)
         else:
