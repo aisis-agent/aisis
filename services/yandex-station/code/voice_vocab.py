@@ -19,14 +19,6 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
 
-# Command vocabulary, grouped as the owner uses it. Order is the priority when the Whisper prompt
-# has to be cut to its token budget.
-VERBS = ("включи", "выключи", "поставь", "запусти", "останови", "пауза", "продолжи", "стоп", "дальше", "назад",
-         "громче", "тише", "сделай", "добавь", "убавь", "отмени", "сколько осталось")
-TIMER_WORDS = ("таймер", "будильник", "разбуди", "напомни", "через", "минут", "секунд", "час", "полчаса")
-MUSIC_WORDS = ("музыку", "песню", "трек", "альбом", "плейлист", "радио", "рок", "джаз", "классику")
-HOME_WORDS = ("свет", "люстру", "ночник", "кондиционер", "чайник", "телевизор", "розетку", "яркость", "температуру")
-NUMBER_WORDS = ("пять", "десять", "пятнадцать", "двадцать", "тридцать", "сорок пять", "двадцать три")
 # Generic rooms: the live area list from HA replaces them when it is reachable.
 DEFAULT_AREAS = ("кухня", "гостиная", "спальня", "студия", "прихожая", "второй этаж")
 
@@ -109,29 +101,39 @@ def library_artists(limit: int = 40) -> list[str]:
     return [i["name"] for i in (items if isinstance(items, list) else items.get("items", [])) if isinstance(i.get("name"), str)]
 
 
+class CatalogUnavailable(RuntimeError):
+    """Home Assistant could not be read: a prompt built now would silently lack the live device and room names."""
+
+
 def fetch_catalog(hacli_url: str = "http://127.0.0.1:8795", artists: Callable[[], list[str]] | None = None,
-                  get: Callable[..., object] = fetch_json) -> Catalog:
-    """Live catalog; every source is optional (a failed one just leaves its part empty)."""
-    states: list[dict] = []
-    areas: list[str] = []
+                  get: Callable[..., object] = fetch_json, strict: bool = False) -> Catalog:
+    """Live catalog. Music artists are always optional. Home Assistant parts are optional too (a failed one just
+    leaves its part empty) unless `strict`: then a request that failed or answered with something other than a list
+    raises CatalogUnavailable, so a caller that installs the result for hours (the Whisper prompt) keeps what it had
+    instead of a degraded copy. A home without configured rooms (an empty list) is a valid answer."""
+    states: list[dict] | None = None
+    areas: list[str] | None = None
     names: list[str] = []
     try:
         loaded = get(hacli_url + "/api/states")
-        states = loaded if isinstance(loaded, list) else []
+        states = loaded if isinstance(loaded, list) else None
     except Exception:
         pass
     try:
         rendered = get(hacli_url + "/api/template", {"template": "{{ areas() | map('area_name') | list | tojson }}"})
         parsed = json.loads(rendered) if isinstance(rendered, str) else rendered
-        areas = parsed if isinstance(parsed, list) else []
+        areas = parsed if isinstance(parsed, list) else None
     except Exception:
         pass
+    unreachable = [what for what, got in (("device states", states), ("rooms", areas)) if got is None]
+    if strict and unreachable:
+        raise CatalogUnavailable("Home Assistant gave no " + " and no ".join(unreachable))
     if artists is not None:
         try:
             names = artists()
         except Exception:
             pass
-    return catalog_from(states, areas, names)
+    return catalog_from(states or [], areas or [], names)
 
 
 def _sentence(words: list[str]) -> str:
@@ -143,32 +145,41 @@ def estimate_tokens(text: str) -> int:
     return math.ceil(len(text) / 2.3)
 
 
+# What the prompt opens with: ordinary multi-word commands, so the recognizer stays on «включи» when the first syllable
+# was cut off. NEVER one-word imperatives («Громкость. Пауза. Дальше. Тише.»): on room noise Whisper continues the prompt in
+# its own style, and those came back as 15 of the 59 utterances sent to the adapter in 2026-11-09..15 (at night, with
+# nobody speaking, as «Какую громкость поставить?»). The wake word is not in it either: as a sentence of its own it comes back
+# as an utterance.
+EXAMPLE_COMMANDS = "Включи свет на кухне. Выключи люстру. Поставь таймер на десять минут. Разбуди меня в семь тридцать."
+CLIMATE_WORDS = "Кондиционер: обогрев, охлаждение, температура двадцать три градуса."
+# Prompt lists, in priority order: label, how many items at most. A long device list must not push the rooms out.
+PROMPT_LISTS = (("Комнаты", 7), ("Устройства", 6), ("Исполнители", 4))
+
+
 def whisper_prompt(catalog: Catalog, max_tokens: int = 150, count_tokens: Callable[[str], int] | None = None) -> str:
     """Prompt text for faster-whisper's `initial_prompt`.
 
-    Whisper treats the prompt as the text that came just before the audio, so it is written the way
-    a transcript of this speaker would read (capitalised imperatives, punctuation, spoken numbers)
-    rather than as a bare word list. It is also what keeps the recognizer on «включи» when the
-    first syllable was cut off. Only the first decoding window sees it, which is enough for the
-    short utterances of a speaker. Parts are added by priority until `max_tokens` is spent
-    (Whisper's hard limit is 224).
+    Whisper treats the prompt as the text that came just before the audio, so it is written the way a transcript of this
+    speaker would read (capitalised sentences, punctuation, spoken numbers) rather than as a bare word list. Only the first
+    decoding window sees it, which is enough for the short utterances of a speaker. Home vocabulary only: the example
+    commands, climate words, the HA room and device names and the library artists, in that priority, until `max_tokens`
+    is spent (Whisper's hard limit is 224). Nothing else (agent, work or chat text) can reach it: the only inputs are
+    the constants above and the `catalog`.
     """
     count = count_tokens or estimate_tokens
-    areas = [a.lower() for a in (catalog.areas or DEFAULT_AREAS)]
-    prompt = ("Включи свет на кухне. Выключи люстру. Громче. Тише. Громкость пять. Пауза. Дальше. Стоп. "
-              "Поставь таймер на десять минут. Разбуди меня в семь тридцать.")
-    # Lists in priority order, each filled with as many items as still fit: a long device list must not push the rooms out.
-    for label, items, cap in (("Устройства: ", catalog.entities, 7), ("Комнаты: ", areas, 4), ("Включи музыку: ", catalog.artists, 8)):
+    prompt = EXAMPLE_COMMANDS
+    if count(f"{prompt} {CLIMATE_WORDS}") <= max_tokens:
+        prompt += f" {CLIMATE_WORDS}"
+    lists = {"Комнаты": [a.lower() for a in (catalog.areas or DEFAULT_AREAS)], "Устройства": [e.lower() for e in catalog.entities],
+             "Исполнители": catalog.artists}
+    for label, cap in PROMPT_LISTS:
         taken: list[str] = []
-        for item in list(items)[:cap]:
-            if count(f"{prompt} {label}{_sentence(taken + [item])}.") > max_tokens:
+        for item in list(lists[label])[:cap]:
+            if count(f"{prompt} {label}: {_sentence(taken + [item])}.") > max_tokens:
                 break
             taken.append(item)
         if taken:
-            prompt += f" {label}{_sentence(taken)}."
-    climate = " Кондиционер, температура двадцать три градуса."
-    if count(prompt + climate) <= max_tokens:
-        prompt += climate
+            prompt += f" {label}: {_sentence(taken)}."
     return prompt
 
 
@@ -235,19 +246,26 @@ def corrector_catalog(catalog: Catalog) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> int:
     """`voice_vocab.py prompt|catalog [--static]`: what the recognizer and the corrector are given right now.
 
-    `prompt` is also what to pass to a stock wyoming-faster-whisper as `--initial-prompt` when no stt-cli recognizer
-    is in front of it (a static prompt: it cannot follow HA changes between restarts)."""
+    `prompt` is also what to pass to a stock wyoming-faster-whisper as `--initial-prompt` (a static prompt: it cannot
+    follow HA changes between restarts). The live prompt is built strictly: when Home Assistant cannot be read it
+    exits with status 3 and prints nothing, so the installer keeps the prompt it already has."""
     import argparse
+    import sys
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument("what", choices=("prompt", "catalog"))
     parser.add_argument("--static", action="store_true", help="verbs and generic rooms only, no live HA/Music Assistant lookup")
     args = parser.parse_args(argv)
-    catalog = Catalog() if args.static else fetch_catalog(artists=library_artists)
+    try:
+        catalog = Catalog() if args.static else fetch_catalog(artists=library_artists, strict=args.what == "prompt")
+    except CatalogUnavailable as exc:
+        print(f"voice_vocab: {exc}; no prompt built", file=sys.stderr)
+        return 3
     print(whisper_prompt(catalog) if args.what == "prompt" else corrector_catalog(catalog))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
