@@ -168,6 +168,8 @@ def describe_result(clip: dict, dialog: dict | None, window_end: float) -> str:
     reason = clip.get("reason") or ""
     if clip["status"] == "gate":
         return "🚫 отброшено как не-речь: %s" % (reason or "гейт")
+    if reason == "heard_elsewhere":
+        return "👥 ту же фразу услышала другая колонка, ответила она"
     if clip["status"] == "blacklist":
         return "🧹 отфильтровано как галлюцинация: %s" % (reason or "чёрный список")
     heard = _norm(clip.get("transcript") or "")

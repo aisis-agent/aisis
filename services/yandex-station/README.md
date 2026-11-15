@@ -78,6 +78,9 @@ support services: aisis-station-kit :18080 (eQuasar sync server, ~/lite-kit),
   and «Громкость. Пауза. Дальше.» in the prompt came back as 15 of 59 utterances
   (2026-11-09..15). When HA is unreachable the previous prompt stays (exit 3 from
   `voice_vocab.py prompt`, refresh keeps the env file).
+- **Several speakers**: the STT gateway answers one utterance once when two speakers hear it
+  (`utterance_arbiter.py`, policy in docs/specs/140 «Several speakers in earshot»): loudest
+  session wins, the rest get `rejected: heard_elsewhere`; `AISIS_STT_DEDUP=0` turns it off.
 - **Clip feed (recognition messages in Telegram)**: `aisis-clipfeed.service` posts
   every heard utterance through the `tg` CLI into the forum topic `tg_topic` of
   `~/.config/aisis/clip_feed.json` (a pin to a `tg_session` that has ended makes
