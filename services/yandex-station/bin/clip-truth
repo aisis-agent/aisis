@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# clip-truth <tg-msg-id> <text> | --clip <id> <text> | --last <text>: record the owner's verdict for a posted voice clip.
+# Resolves the checkout it lives in (symlink-safe), so it follows the repo instead of a copied path.
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+exec "${AISIS_VENV:-$HOME/.local/share/aisis/venv}/bin/python" "$here/../code/clipfeed.py" truth "$@"

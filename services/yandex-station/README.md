@@ -72,6 +72,15 @@ support services: aisis-station-kit :18080 (eQuasar sync server, ~/lite-kit),
   `~/.local/share/aisis/bluegreen-state/` suspends it during deploys.
 - **Whisper prompt**: `aisis-whisper-prompt.timer` regenerates the initial
   prompt from HA entities/artists every 6 h (code/refresh-whisper-prompt.sh).
+- **Clip feed (recognition messages in Telegram)**: `aisis-clipfeed.service` posts
+  every heard utterance through the `tg` CLI into the forum topic `tg_topic` of
+  `~/.config/aisis/clip_feed.json` (a pin to a `tg_session` that has ended makes
+  tg fall back to General without an error, so the topic id is the durable
+  address). Owner replies (`=`, `шум`, real text) reach the agent session bound
+  to that topic, which records them with `clip-truth` (`bin/clip-truth`;
+  `ln -sf ~/xp/aisis/services/yandex-station/bin/clip-truth ~/.local/bin/clip-truth`).
+  `clip-truth` re-pins the feed to its own session and topic; `clipfeed.py test`
+  posts one synthetic clip to prove the path.
 - Containers keep their historical names (`aisis-yandex-postgres-1`,
   `aisis-yandex-network-{tls-voice,dns-relay}-1`, compose project `aisis-yandex`
   for postgres) — do not recreate them just to rename.
