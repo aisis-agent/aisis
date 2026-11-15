@@ -59,6 +59,16 @@ Voice authority: a voice turn authorizes nothing sensitive (spec 020, Confirmati
 
 Training data must match inference input. The production stream is ch0 as delivered by the XVF with frozen tuning, with no host-side noise suppression or AGC: the WebRTC NS/AGC that the legacy Wyoming satellite applies is removed from the wake/ASR path, because it measurably cut stage-2 recall and raised false accepts. Every model in the chain is trained and evaluated on that stream; when host media AEC is enabled, its output becomes the production stream and all models are re-evaluated on it.
 
+## Several speakers in earshot
+
+Two speakers that hear one «Алиса, …» both open a speech session, and without arbitration the home acts twice or on the speaker the person did not mean. The voice stack's STT gateway arbitrates sessions (`utterance_arbiter.py`); it cannot tell speakers apart (a session is an anonymous stream), so the policy is about sessions, and is deliberately conservative: when in doubt the action goes through.
+
+- Two sessions are the same utterance only when their open intervals overlap (one speaker never has two sessions open, so repeating a command on one speaker is never a duplicate), they opened within 2 s of each other, and their transcripts say the same thing (same words after the wake word, a few misheard ones tolerated). Different commands given at the same moment in two rooms are both executed.
+- Exactly one same-utterance session answers: the loudest voice (the speaker nearest the person); levels within 3 dB tie, then the session that opened first, then the smaller id. The others receive an empty final with `rejected: heard_elsewhere`, which the quasar treats like a foreign voice: no brain call, no speech, the dialog is cancelled. The rejected clip stays in the archive and the clip feed with that reason.
+- A session with a transcript waits at most 1.2 s for an overlapping session that is still recognizing; a lone speaker never waits. A partner whose transcript arrives after the winner acted loses whatever its level.
+- Not arbitrated: speakers that do not talk to this stack (a cloud speaker in the same house answers through its own cloud and Home Assistant). Nothing here can stop them; keep their wake sensitivity low or their microphones off while the rooted speaker is in use, or give each speaker its own wake phrase (above). Station identity is not passed to the gateway today; once it is, «the addressed speaker wins» can replace «the loudest wins» without changing the rest.
+- Knobs: `AISIS_STT_DEDUP=0` turns arbitration off, `AISIS_STT_DEDUP_WINDOW_S` (2.0) and `AISIS_STT_DEDUP_GRACE_S` (1.2) tune it.
+
 ## Wake phrase
 
 The phrase is a configuration value, not code. A candidate is accepted by measurement, not by counting syllables or letters:

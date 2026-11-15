@@ -27,6 +27,7 @@ from aiohttp import WSMsgType, web
 import dsp_settings
 import speech_frontend
 import stt_tuning
+import utterance_arbiter
 import voice_vocab
 
 LOG = logging.getLogger("aisis.stt")
@@ -60,11 +61,22 @@ WEAK_CONTRAST = 3.0
 # Distrusted transcripts of audio that WAS speech (a short «да» captioned «Спасибо.», a stuck loop): unlike a
 # hallucination on silence, the owner talked, so the empty end-of-stream final carries the reason (see finish()).
 UNCLEAR_SPEECH = ("weak_filler", "repetition", "too_many_words")
+# Final of a session whose utterance another speaker's session already answered (utterance_arbiter).
+HEARD_ELSEWHERE = "heard_elsewhere"
 
 
 def _fold(text):
     folded = re.sub(r"[^a-zа-я0-9 ]+", " ", text.lower().replace("ё", "е"))
     return re.sub(r"\s+", " ", folded).strip()
+
+
+def _seconds(env, key, default):
+    """A positive number of seconds from `env`; the default when unset or garbage."""
+    try:
+        value = float(env.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 def is_silence_hallucination(text):
@@ -371,6 +383,10 @@ class STTGateway:
         self.pruned_at = 0.0
         self.speaker_disabled_until = 0.0
         self.speaker_background = set()
+        # One utterance heard by several speakers is answered once (utterance_arbiter). AISIS_STT_DEDUP=0 turns it off.
+        self.arbiter = None if self.env.get("AISIS_STT_DEDUP") == "0" else utterance_arbiter.Arbiter(
+            window=_seconds(self.env, "AISIS_STT_DEDUP_WINDOW_S", utterance_arbiter.WINDOW_S),
+            grace=_seconds(self.env, "AISIS_STT_DEDUP_GRACE_S", utterance_arbiter.GRACE_S))
 
     def live_tuning(self):
         """The startup tuning with the dashboard's end-of-speech wait and level front-end overrides; read per conversation, no restart."""
@@ -570,6 +586,7 @@ class STTGateway:
         stats = {"bytes": 0, "bin": 0, "voiced": 0, "peak": 0, "squares": 0, "samples": 0}
         LOG.info("stt_session_open")
         self.tv_activation()
+        me = self.arbiter.open() if self.arbiter is not None else None
 
         async def finish(utt, trigger, rejected):
             """One utterance -> one final. `rejected` is the gate's verdict (None = send it to the recognizer)."""
@@ -604,15 +621,24 @@ class STTGateway:
                     if rejected is None:
                         text = heard
                         speaker = await self.speaker_result(speaker_task, utt.speech_pcm, rate, text)
+                        foreign = speaker is not None and speaker["mode"] == "enforce" and speaker["verdict"] == "foreign"
+                        if me is not None and text.strip() and not foreign:
+                            verdict = await self.arbiter.claim(me, text, utt.voiced_rms)
+                            if self.arbiter.partners(me):
+                                LOG.info("stt_arbitrate verdict=%s session=%d winner=%s level=%.1f text=%r", verdict, me.id, me.winner, utt.voiced_rms, text)
+                            if verdict == utterance_arbiter.DUPLICATE:
+                                rejected, text, speaker = HEARD_ELSEWHERE, "", None
                     else:
                         speaker_task.cancel()
+                if me is not None and not text.strip():
+                    await self.arbiter.abstain(me)  # nothing to act on: a partner session stops waiting for this one
                 if rejected:
                     LOG.info("stt_rejected reason=%s trigger=%s heard=%r", rejected, trigger, heard)
                 if utt is not None:
                     self.archive(utt, {"trigger": trigger, "status": "sent" if rejected is None else ("gate" if asr_ms is None else "blacklist"),
                         "reason": rejected, "transcript": heard, "asr_ms": asr_ms,
                         "final_ms": None if asr_ms is None else utt.trailing_ms + asr_ms})
-                if rejected and trigger == "vad" and not eof and not ws.closed and not cancelled:
+                if rejected and rejected != HEARD_ELSEWHERE and trigger == "vad" and not eof and not ws.closed and not cancelled:
                     # Noise/caption mid-stream: the station may still be waiting for the real command. Drop it, keep listening.
                     recognition = None
                     if rejected in UNCLEAR_SPEECH:
@@ -675,6 +701,11 @@ class STTGateway:
                     config = json.loads(message.data)
                     if config.get("type") == "cancel":
                         cancelled = True
+                        if recognition is not None and not recognition.done():
+                            recognition.cancel()   # a cancelled session must not keep a claim on the answer while the socket closes
+                            await asyncio.gather(recognition, return_exceptions=True)
+                        if me is not None:
+                            await self.arbiter.close(me)
                         await ws.close(code=1000, message=b"audio cancelled")
                         break
                     if config.get("type") == "finish":
@@ -715,6 +746,8 @@ class STTGateway:
             await ws.close(code=1011, message=b"recognizer unavailable")
         finally:
             LOG.info("stt_session_close bytes=%dB frames=%d", stats["bytes"], stats["bin"])
+            if me is not None:
+                await self.arbiter.close(me)
             cancelled = True
             # A websocket transport close is cancellation, not normal EOF. The
             # native caller must send finish and wait for its final JSON first.
