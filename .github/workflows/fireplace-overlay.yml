@@ -1,0 +1,85 @@
+name: Fireplace voice overlay
+on:
+  pull_request:
+    paths:
+      - services/yandex-station/overlays/tv-apps/**
+      - services/yandex-station/bluegreen/**
+      - .github/workflows/fireplace-overlay.yml
+  push:
+    branches: [fix/fireplace-voice-request-*]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fireplace-overlay-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  fireplace-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 25.9.0
+      - name: Build and verify the isolated launch contract
+        working-directory: services/yandex-station/overlays/tv-apps
+        run: |
+          set -euo pipefail
+          umask 077
+          AISIS_CI_LOG="$(mktemp /tmp/aisis-fireplace-ci.XXXXXX.log)"
+          printf 'AISIS_CI_LOG=%s\n' "$AISIS_CI_LOG" >> "$GITHUB_ENV"
+          exec > >(tee "$AISIS_CI_LOG") 2>&1
+          trap 'status=$?; printf "%s completion exit=%s log=%s\n" "$(date -u +%FT%TZ)" "$status" "$AISIS_CI_LOG"' EXIT
+          printf '%s startup log=%s\n' "$(date -u +%FT%TZ)" "$AISIS_CI_LOG"
+          npm install --ignore-scripts --no-save --no-audit --no-fund --package-lock=false typescript@5.9.3
+          ./node_modules/.bin/tsc --strict --target ES2022 --module esnext --outDir "$RUNNER_TEMP/aisis-fireplace-compiled" src/backend/tv-app-intents.ts
+          node --test tests/test_tv_app_intents.mjs tests/test_fireplace_intents.mjs
+          mkdir -p "$RUNNER_TEMP/aisis-fireplace-overlay/src/backend"
+          cp src/backend/tv-app-intents.ts "$RUNNER_TEMP/aisis-fireplace-overlay/src/backend/"
+          cp ha-intents.patch prepare_overlay.py "$RUNNER_TEMP/aisis-fireplace-overlay/"
+          sha256sum "$RUNNER_TEMP/aisis-fireplace-overlay/"*.* "$RUNNER_TEMP/aisis-fireplace-overlay/src/backend/tv-app-intents.ts"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: success()
+        with:
+          name: fireplace-voice-overlay-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/aisis-fireplace-overlay/
+            ${{ runner.temp }}/aisis-fireplace-compiled/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: fireplace-contract-log-${{ github.sha }}
+          path: ${{ env.AISIS_CI_LOG }}
+          if-no-files-found: ignore
+          retention-days: 7
+
+  artifact-deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify persistent artifact deployment and corpus gate contracts
+        run: |
+          set -euo pipefail
+          umask 077
+          AISIS_DEPLOY_CI_LOG="$(mktemp /tmp/aisis-artifact-ci.XXXXXX.log)"
+          printf 'AISIS_DEPLOY_CI_LOG=%s\n' "$AISIS_DEPLOY_CI_LOG" >> "$GITHUB_ENV"
+          exec > >(tee "$AISIS_DEPLOY_CI_LOG") 2>&1
+          trap 'status=$?; printf "%s completion exit=%s log=%s\n" "$(date -u +%FT%TZ)" "$status" "$AISIS_DEPLOY_CI_LOG"' EXIT
+          printf '%s startup log=%s\n' "$(date -u +%FT%TZ)" "$AISIS_DEPLOY_CI_LOG"
+          bash -n services/yandex-station/bluegreen/deploy.sh
+          python3 -m unittest discover -s services/yandex-station/bluegreen/tests -v
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: artifact-deployment-log-${{ github.sha }}
+          path: ${{ env.AISIS_DEPLOY_CI_LOG }}
+          if-no-files-found: ignore
+          retention-days: 7

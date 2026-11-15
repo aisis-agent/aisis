@@ -1,0 +1,193 @@
+"""Native-CI fixture: validate commands and keep desired/actual state independent."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).parent
+ARGS = sys.argv[1:]
+with (ROOT / 'calls.jsonl').open('a') as stream:
+    stream.write(json.dumps(['bg', *ARGS]) + '\n')
+if ARGS and ARGS[0].startswith('maintenance-'):
+    path = Path(os.environ['AISIS_TEST_HELPERS_DIR']) / 'bgctl.py'
+    spec = importlib.util.spec_from_file_location('actual_maintenance_cli', path)
+    actual = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(actual)
+    raise SystemExit(actual.main())
+STATE = json.loads((ROOT / 'state.json').read_text())
+
+
+def require(condition):
+    if not condition:
+        raise ValueError('unsupported fixture arguments: ' + repr(ARGS))
+
+
+def idle_color():
+    return STATE['idle_color']
+
+
+def get_value():
+    require(len(ARGS) == 3 and ARGS[1] == 'prod')
+    key = ARGS[2]
+    if key == 'active' and os.environ.get('REQUIRE_MAINTENANCE') == '1':
+        require((Path(os.environ['AISIS_BG_STATE']) / 'maintenance').is_file())
+    values = {'active': STATE['active']}
+    for color in ('blue', 'green'):
+        values['IMG_' + color.upper()] = STATE['images'][color]
+        values['ARTIFACT_' + color.upper()] = STATE['artifacts'][color]
+    require(key in values)
+    print(values[key])
+
+
+def recreate(color):
+    require(color == idle_color())
+    STATE['recreate_attempts'] += 1
+    if os.environ.get('FAIL_BEFORE_RECREATE') == '1':
+        print('fixture: compose failed before replacement', file=sys.stderr)
+        return 1
+    desired = {'image': STATE['images'][color], 'artifact': STATE['artifacts'][color]}
+    if os.environ.get('FAIL_RESTORE') == '1' and desired['image'].startswith('previous-'):
+        print('fixture: previous idle recreation failed', file=sys.stderr)
+        return 1
+    STATE['actual'] = desired
+    STATE['actual_id'] = 'fixture-container-' + str(STATE['recreate_attempts'])
+    if os.environ.get('FAIL_FIRST_RECREATE') == '1' and STATE['recreate_attempts'] == 1:
+        print('fixture: candidate recreation failed after replacement', file=sys.stderr)
+        return 1
+    return 0
+
+
+def compose():
+    if ARGS[1:2] == ['stage']:
+        require(ARGS[2:] in [['rm', '-sf', 'quasar-stage-blue', 'quasar-stage-green'],
+                             ['up', '-d', '--force-recreate']])
+        return 0
+    require(ARGS[1:6] == ['prod', 'up', '-d', '--no-deps', '--force-recreate'] and len(ARGS) == 7)
+    require(ARGS[6].startswith('quasar-prod-'))
+    return recreate(ARGS[6].removeprefix('quasar-prod-'))
+
+
+def set_image():
+    require(len(ARGS) == 6 and ARGS[1] in ('stage', 'prod') and ARGS[2] in ('blue', 'green') and ARGS[4] == '--artifact')
+    if ARGS[1] == 'prod':
+        require(ARGS[2] == idle_color())
+        if os.environ.get('FAIL_RESTORE_SELECTION') == '1' and ARGS[3].startswith('previous-'):
+            return 1
+        STATE['images'][ARGS[2]] = ARGS[3]
+        STATE['artifacts'][ARGS[2]] = ARGS[5]
+
+
+def post_switch_change():
+    change = os.environ.get('POST_FLIP_CHANGE', '')
+    if not change or STATE.get('post_switch_changed'):
+        return
+    STATE['post_switch_changed'] = True
+    marker = Path(os.environ['AISIS_BG_STATE']) / 'maintenance'
+    lease = json.loads(marker.read_text())
+    if change == 'owner':
+        lease['owner'] = 'f' * 32
+    elif change == 'expire':
+        lease['deadline_monotonic'] = 0
+    elif change == 'container':
+        STATE['actual_id'] = 'another-owners-container'
+        STATE['actual'] = {'image': 'another-owners-image', 'artifact': ''}
+    marker.write_text(json.dumps(lease))
+
+
+def observation():
+    require(len(ARGS) == 3 and ARGS[1] in ('prod', 'stage') and ARGS[2] in ('blue', 'green', 'switch'))
+    if ARGS[1] == 'stage' or ARGS[2] == 'switch':
+        require(ARGS[0] in ('verify-runtime', 'smoke'))
+        if ARGS[1:] == ['prod', 'switch'] and STATE['active'] == idle_color() and os.environ.get('FAIL_SWITCH') == '1':
+            post_switch_change()
+            return 1
+        return 0
+    require(ARGS[2] == idle_color())
+    if ARGS[0] == 'container-id':
+        require(STATE['actual_id'] is not None)
+        print(STATE['actual_id'])
+    elif ARGS[0] == 'verify-runtime':
+        expected = {'image': STATE['images'][ARGS[2]], 'artifact': STATE['artifacts'][ARGS[2]]}
+        return int(STATE['actual'] != expected)
+    elif ARGS[0] == 'smoke':
+        return int(os.environ.get('FAIL_IDLE') == '1' and not STATE['actual']['image'].startswith('previous-'))
+    return 0
+
+
+def remove_inactive():
+    require(ARGS[:3] == ['remove-inactive', 'prod', idle_color()] and len(ARGS) == 4)
+    require(ARGS[2] != STATE['active'] and ARGS[3] == STATE['actual_id'])
+    STATE['actual'] = None
+    STATE['actual_id'] = None
+
+
+def quarantine():
+    require(len(ARGS) in (8, 9) and ARGS[1:3] == ['prod', idle_color()] and ARGS[6] == '--previous-artifact')
+    require(len(ARGS) == 8 or ARGS[8] == '--preserve')
+    marker = Path(os.environ['AISIS_BG_STATE']) / 'maintenance'
+    lease = json.loads(marker.read_text())
+    active = STATE['active'] == ARGS[2]
+    require(lease['owner'] == ARGS[4] and STATE['actual_id'] == ARGS[3])
+    require(not active or ARGS[0] == 'reject-candidate')
+    STATE['quarantine'] = True
+    STATE['recovery'] = {'image': ARGS[5], 'artifact': ARGS[7]}
+    if len(ARGS) == 8 and not active:
+        STATE['actual'] = None
+        STATE['actual_id'] = None
+
+
+def flip_target(target):
+    require(target in ('blue', 'green') and target != STATE['active'])
+    if target != idle_color() and os.environ.get('REFUSE_ROLLBACK') == '1':
+        return 1
+    STATE['active'] = target
+    return 0
+
+
+def rollback_candidate():
+    require(len(ARGS) == 6 and ARGS[1:3] == ['prod', idle_color()])
+    lease = json.loads((Path(os.environ['AISIS_BG_STATE']) / 'maintenance').read_text())
+    require(lease['owner'] == ARGS[5] and STATE['active'] == ARGS[2] and STATE['actual_id'] == ARGS[3])
+    return flip_target(ARGS[4])
+
+
+def lifecycle():
+    if ARGS[0] == 'wait':
+        require(len(ARGS) == 4 and ARGS[1] in ('prod', 'stage') and ARGS[2] in ('blue', 'green') and ARGS[3] == '90')
+        require(ARGS[1] == 'stage' or ARGS[2] == idle_color())
+    elif ARGS[0] == 'flip':
+        require(len(ARGS) == 3 and ARGS[1] == 'prod')
+        return flip_target(ARGS[2])
+    else:
+        require(ARGS in [['render', 'stage'], ['devices', 'prod']])
+        if ARGS == ['devices', 'prod'] and os.environ.get('FAIL_SPEAKER') == '1':
+            if STATE['active'] != idle_color():
+                print('fixture-speaker')
+            else:
+                post_switch_change()
+
+
+def artifact():
+    if ARGS[0] == 'import-artifact':
+        require(ARGS == ['import-artifact', str(ROOT / 'remote-output')])
+        print('/installed/new-artifact')
+    else:
+        require(ARGS == ['artifact-image', '/installed/new-artifact'])
+        print('sha256:' + 64 * '1')
+
+
+HANDLERS = {'get': get_value, 'compose': compose, 'set-image': set_image,
+            'verify-runtime': observation, 'smoke': observation, 'container-id': observation,
+            'remove-inactive': remove_inactive, 'quarantine-inactive': quarantine, 'reject-candidate': quarantine,
+            'rollback-candidate': rollback_candidate, 'wait': lifecycle, 'flip': lifecycle,
+            'render': lifecycle, 'devices': lifecycle, 'import-artifact': artifact, 'artifact-image': artifact}
+status = 2
+try:
+    require(bool(ARGS) and ARGS[0] in HANDLERS)
+    status = HANDLERS[ARGS[0]]() or 0
+except ValueError as error:
+    print(error, file=sys.stderr)
+finally:
+    (ROOT / 'state.json').write_text(json.dumps(STATE))
+raise SystemExit(status)

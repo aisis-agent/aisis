@@ -2,7 +2,7 @@
 +++ backend/ha-intents.ts
 @@ -19,0 +20 @@
 +import { executeTvAppIntent, parseTvAppIntent, executeFireplaceIntent, parseFireplaceIntent } from './tv-app-intents'
-@@ -1279,0 +1281,35 @@
+@@ -1279,0 +1281,47 @@
 +    // An explicit TV app request always targets the TV/Chromecast pair, even from another speaker.
 +    const tvApp = parseTvAppIntent(text)
 +    if (tvApp !== null) {
@@ -20,12 +20,18 @@
 +        : { kind: 'reply', quasarDirectives: [], text: `Команда отправлена. Открытие ${tvApp.label} на телевизоре пока не подтверждено.` }
 +    }
 +
-+    // The named fireplace is the fixed Kodi video, regardless of the speaker's room.
++    // The fireplace controller chooses a new Kodi video for each request.
 +    const fireplace = parseFireplaceIntent(text)
 +    if (fireplace !== null) {
 +      const outcome = await executeFireplaceIntent(fireplace, {
-+        callScript: async entityId => {
-+          const response = await haFetch(config, '/api/services/script/turn_on', { entity_id: entityId })
++        callScript: async (entityId, variables) => {
++          let response: Response
++          try {
++            response = await haFetch(config, '/api/services/script/turn_on', { entity_id: entityId, variables })
++          } catch {
++            logger.warn('Fireplace launch response unavailable; observing the same request without replay')
++            return
++          }
 +          if (response.status === 202) throw restartingError(response)
 +          if (!response.ok) throw new Error('Projector fireplace launch was not accepted')
 +        },
@@ -33,8 +39,14 @@
 +        readReadiness: async () => await currentEntity(config, 'sensor.living_room_fireplace')
 +      })
 +      logger.info(`Fast projector fireplace: ${outcome.status}`)
-+      return outcome.status === 'confirmed'
-+        ? { kind: 'reply', quasarDirectives: earconDirectives('on'), text: null }
-+        : { kind: 'reply', quasarDirectives: [], text: 'Команда отправлена. Воспроизведение камина на проекторе пока не подтверждено.' }
++      if (outcome.status === 'confirmed') {
++        return { kind: 'reply', quasarDirectives: earconDirectives('on'), text: null }
++      }
++      const text = {
++        starting: 'Запускаю камин на проекторе.',
++        failed: 'Не удалось запустить камин на проекторе.',
++        pending: 'Запуск камина на проекторе пока не подтверждён.'
++      }[outcome.status]
++      return { kind: 'reply', quasarDirectives: [], text }
 +    }
 +

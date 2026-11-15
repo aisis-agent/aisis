@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import ts from 'typescript';
 const transpile=code=>ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { webcrypto } from 'node:crypto';
 
 const matcher=process.env.AISIS_ACTIVE_MATCHER_SOURCE;
 assert.ok(matcher,'AISIS_ACTIVE_MATCHER_SOURCE must be the captured actual production matcher or its patched result');
@@ -20,21 +21,34 @@ for(const match of file.matchAll(/import\s+([\s\S]*?)\s+from\s+['"]([^'"]+)['"]/
 }
  return names;
 }
+function readinessResponse(native,calls){
+ const now=new Date().toISOString();
+ const proof={state:native.proofState??'playing',attributes:{owned:true,file_matches:true,repeat:native.repeat??'one',
+  observed_at:now,launch_started_at:now,request_id:calls.at(-1)?.body.variables?.request_id,
+  source_kind:'youtube',source_id:'fireplace-video-a',title:native.proofTitle??native.attributes?.media_title,progressing:true,...native.proof}};
+ const body=Object.hasOwn(native,'proofBody')?native.proofBody:proof;
+ return new Response(JSON.stringify(body),{headers:native.proofStale?{'x-aisis-cache':'stale'}:{}});
+}
+async function nativeResponse(native,state,stale){
+ if(native.readError)throw Error('native state unavailable');
+ if(native.readWait)await native.readWait;
+ return new Response(JSON.stringify(state),{headers:stale?{'x-aisis-cache':'stale'}:{}});
+}
 async function load(current='on',appId='com.netflix.ninja',responseStatus=200,stale=false,native={}){
  const calls=[],reads=[],state={state:current,attributes:native.attributes??{app_id:appId}};
  const fetch=async(url,options={})=>{
   const pathname=new URL(url).pathname;
-  if(options.method==='POST'){calls.push({path:pathname,body:JSON.parse(options.body)});return new Response('[]',{status:responseStatus})}
-  if(pathname==='/api/states/'+(native.entity??'media_player.televizor')){reads.push(native.entity??'media_player.televizor');return new Response(JSON.stringify(state),{headers:stale?{'x-aisis-cache':'stale'}:{}})}
+  if(options.method==='POST'){calls.push({path:pathname,body:JSON.parse(options.body)});if(native.requestError)throw Error('uncertain request timeout');return new Response('[]',{status:responseStatus})}
+  if(pathname==='/api/states/'+(native.entity??'media_player.televizor')){reads.push(native.entity??'media_player.televizor');return nativeResponse(native,state,stale)}
   if(pathname==='/api/states/sensor.living_room_fireplace'){
    reads.push('sensor.living_room_fireplace');
-   const proof={state:'playing',attributes:{owned:true,file_matches:true,repeat:native.repeat??'one',observed_at:new Date().toISOString(),...native.proof}};
-   return new Response(JSON.stringify(proof),{headers:native.proofStale?{'x-aisis-cache':'stale'}:{}});
+   if(native.proofErrorAfter && reads.filter(id=>id==='sensor.living_room_fireplace').length>native.proofErrorAfter)throw Error('readiness unavailable');
+   return readinessResponse(native,calls);
   }
   if(pathname==='/api/states')return new Response('[]');
   return new Response('');
  };
- const context=vm.createContext({console,fetch,Response,AbortSignal,URL,Map,Set,Date,JSON,Number,String,Promise,
+ const context=vm.createContext({console,fetch,Response,AbortSignal,URL,Map,Set,Date,JSON,Number,String,Promise,crypto:webcrypto,
   setTimeout:(fn,ms)=>{if(ms>=1000)return setTimeout(fn,ms);queueMicrotask(fn);return 0},clearTimeout:timer=>clearTimeout(timer),
   process:{env:{AISIS_HA_URL:'http://ha.test',AISIS_HA_TOKEN:'test-only-token',AISIS_FAST_EARCON:'off'}}});
  const generic={
@@ -88,18 +102,21 @@ test('actual matcher preserves service error and stale/off state boundaries',asy
 });
 
 test('actual matcher targets Kodi for fireplace and never dispatches a TV app script',async()=>{
- const marker='fireplace-fastily-1080p.webm';
+ const marker='Cozy mountain cabin fireplace — 4K';
  for(const phrase of ['открой камин на проекторе','включи камин','запусти на проекторе камин']){
   const api=await load('playing',undefined,200,false,{entity:'media_player.home',attributes:{media_title:marker}});
   const result=await api.match(phrase,{origin:'voice'});
-  assert.deepEqual(api.calls,[{path:'/api/services/script/turn_on',body:{entity_id:'script.living_room_fireplace'}}]);
+  assert.equal(api.calls.length,1);assert.equal(api.calls[0].path,'/api/services/script/turn_on');
+  assert.equal(api.calls[0].body.entity_id,'script.living_room_fireplace');
+  assert.match(api.calls[0].body.variables?.request_id,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.deepEqual(Object.keys(api.calls[0].body).sort(),['entity_id','variables']);
   assert.ok(api.reads.includes('media_player.home'));assert.ok(api.reads.includes('sensor.living_room_fireplace'));assert.ok(api.reads.every(id=>['media_player.home','sensor.living_room_fireplace'].includes(id)));
   assert.equal(result.kind,'reply');assert.equal(result.text,null);
  }
 });
 test('actual fireplace matcher preserves service failure, stale and wrong-video boundaries',async()=>{
  for(const [status,state,stale,title,repeat='one'] of [[500,'playing',false,'fireplace-fastily-1080p.webm'],[202,'playing',false,'fireplace-fastily-1080p.webm'],[200,'idle',false,'fireplace-fastily-1080p.webm'],[200,'playing',true,'fireplace-fastily-1080p.webm'],[200,'playing',false,'another.webm'],[200,'playing',false,'fireplace-fastily-1080p.webm','off'],[200,'playing',false,'fireplace-fastily-1080p.webm','all']]){
-  const api=await load(state,undefined,status,stale,{entity:'media_player.home',attributes:{media_title:title},repeat});
+  const api=await load(state,undefined,status,stale,{entity:'media_player.home',attributes:{media_title:title},repeat,proofTitle:'fireplace-fastily-1080p.webm'});
   const result=await api.match('открой камин на проекторе');
   assert.equal(api.calls.length,1);assert.equal(api.calls[0].path,'/api/services/script/turn_on');
   assert.equal(api.calls[0].body.entity_id,'script.living_room_fireplace');
@@ -109,11 +126,59 @@ test('actual fireplace matcher preserves service failure, stale and wrong-video 
 
 test('actual fireplace matcher rejects stale or foreign readiness even with the right playing title',async()=>{
  for(const native of [
-  {proof:{owned:false}},{proof:{file_matches:false}},
-  {proof:{observed_at:'2000-01-01T00:00:00Z'}},{proofStale:true}
+  {proof:{owned:false}},{proof:{file_matches:false}},{proof:{progressing:false}},
+  {proof:{request_id:'b153f6bc-f3e7-4e17-a138-ff15a8bcaf98'}},{proof:{source_kind:'unknown'}},
+  {proof:{launch_started_at:'2000-01-01T00:00:00Z'}},{proof:{observed_at:'2000-01-01T00:00:00Z'}},{proofStale:true}
  ]){
   const api=await load('playing',undefined,200,false,{entity:'media_player.home',attributes:{media_title:'fireplace-fastily-1080p.webm'},...native});
   const result=await api.match('включи камин на проекторе');
   assert.equal(api.calls.length,1);assert.equal(result.kind,'reply');assert.equal(typeof result.text,'string');assert.ok(result.text.length);
  }
+});
+
+test('an uncertain fireplace transport result never replays or announces definitive failure',async()=>{
+ const api=await load('playing',undefined,200,false,{entity:'media_player.home',attributes:{media_title:'Old fireplace'},requestError:true,proof:{request_id:'b153f6bc-f3e7-4e17-a138-ff15a8bcaf98'}});
+ const result=await api.match('включи камин на проекторе');
+ assert.equal(api.calls.length,1);assert.equal(result.kind,'reply');
+ assert.match(result.text,/пока не подтвержд/);assert.doesNotMatch(result.text,/Не удалось выполнить/);
+});
+
+test('the actual matcher distinguishes this request starting, failing and awaiting proof',async()=>{
+ for(const [state,error,phrase] of [['starting',null,/Запускаю камин/],['error','sources_unavailable',/Не удалось запустить камин/],['unknown','open_unconfirmed',/пока не подтвержд/]]){
+  const api=await load('playing',undefined,200,false,{entity:'media_player.home',attributes:{media_title:'Previous video'},proofState:state,proof:{error,observed_at:null,owned:false,progressing:false}});
+  const result=await api.match('включи камин на проекторе');
+  assert.equal(api.calls.length,1);assert.equal(result.kind,'reply');assert.match(result.text,phrase);
+ }
+});
+
+test('actual matcher treats null and nonobject state responses as unconfirmed after launch',async()=>{
+ for(const proofBody of [null,false,0,'playing',[],{}, {state:'playing',attributes:null}]){
+  const api=await load('playing',undefined,200,false,{entity:'media_player.home',attributes:{media_title:'Existing fireplace'},proofBody});
+  const result=await api.match('включи камин на проекторе');
+  assert.equal(api.calls.length,1);assert.equal(result.kind,'reply');
+  assert.match(result.text,/пока не подтвержд/);assert.doesNotMatch(result.text,/Не удалось/);
+ }
+});
+
+test('actual matcher validates definite error codes independently of failed native reads',async()=>{
+ for(const [error,readError,wanted] of [['sources_unavailable',true,/Не удалось запустить/],[' ',false,/пока не подтвержд/],['future_error',false,/пока не подтвержд/],['cancelled',false,/пока не подтвержд/]]){
+  const api=await load('playing',undefined,200,false,{entity:'media_player.home',readError,proofState:'error',proof:{error}});
+  const result=await api.match('включи камин на проекторе');
+  assert.equal(api.calls.length,1);assert.match(result.text,wanted);
+ }
+});
+
+test('actual matcher reports a definite host failure even when native state is stalled',async()=>{
+ let release;
+ const readWait=new Promise(resolve=>{release=resolve});
+ const api=await load('playing',undefined,200,false,{entity:'media_player.home',readWait,proofState:'error',proof:{error:'sources_unavailable'}});
+ try{
+  const result=await api.match('включи камин на проекторе');
+  assert.equal(api.calls.length,1);assert.match(result.text,/Не удалось запустить/);
+ }finally{release(undefined)}
+});
+test('actual matcher retains an accepted starting receipt through later readiness failures',async()=>{
+ const api=await load('idle',undefined,200,false,{entity:'media_player.home',proofState:'starting',proofErrorAfter:1,proof:{error:null}});
+ const result=await api.match('включи камин на проекторе');
+ assert.equal(api.calls.length,1);assert.match(result.text,/Запускаю камин/);
 });

@@ -12,7 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "corpus_runpod.py"
 SPEC = importlib.util.spec_from_file_location("aisis_corpus_runpod", MODULE_PATH)
@@ -176,6 +176,22 @@ class CorpusGateContracts(unittest.TestCase):
         self.assertIsNone(actual["AISIS_HA_TOKEN"])
         self.assertIsNone(actual["DATABASE_URL"])
         self.assertEqual(actual["NODE_ENV"], "production")
+
+class PrivateBackendRuntimeContracts(unittest.TestCase):
+    def test_private_ci_result_is_still_rejected_if_the_effective_container_changes(self):
+        before = manifest()
+        after = copy.deepcopy(before)
+        after['file_sha256']['/src/backend/ha-intents.ts'] = 'a' * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            with patch.object(gate, 'external_state_root', return_value=state), \
+                    patch.object(gate, 'export_snapshot', side_effect=[before, after]), \
+                    patch.object(gate, 'prepare_input_bundle', return_value=state), \
+                    patch.object(gate, 'execute_backend', return_value=(receipt(before), 0, {'backend': 'github-actions'})):
+                with self.assertRaises(ValueError):
+                    gate.local_gate('aisis-quasar-stage-blue', state, Mock(), 'private-actions')
+            self.assertFalse((state / 'evidence').exists())
+
 
 class CorpusPayloadContracts(unittest.TestCase):
     def test_archive_cannot_escape_or_write_a_link_in_place_of_a_regular_file(self):
