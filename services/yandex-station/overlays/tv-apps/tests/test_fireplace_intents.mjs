@@ -151,3 +151,15 @@ test('starting or failure from a different command cannot describe this launch',
   assert.equal(result.status,'pending');
  }
 });
+
+test('null and nonobject readiness remain pending after exactly one accepted launch',async()=>{
+ for(const proof of [null,false,0,'playing',[],{}, {state:'playing',attributes:null}]){
+  let writes=0;
+  const result=await api.executeFireplaceIntent(parse('включи камин'),{
+   callScript:async()=>{writes++},
+   readNative:async()=>({state:'playing',attributes:{media_title:title}}),
+   readReadiness:async()=>proof,sleep:async()=>{}
+  });
+  assert.equal(result.status,'pending',JSON.stringify(proof));assert.equal(writes,1);
+ }
+});

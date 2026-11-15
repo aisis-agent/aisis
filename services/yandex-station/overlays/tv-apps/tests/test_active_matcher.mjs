@@ -21,6 +21,14 @@ for(const match of file.matchAll(/import\s+([\s\S]*?)\s+from\s+['"]([^'"]+)['"]/
 }
  return names;
 }
+function readinessResponse(native,calls){
+ const now=new Date().toISOString();
+ const proof={state:native.proofState??'playing',attributes:{owned:true,file_matches:true,repeat:native.repeat??'one',
+  observed_at:now,launch_started_at:now,request_id:calls.at(-1)?.body.variables?.request_id,
+  source_kind:'youtube',source_id:'fireplace-video-a',title:native.proofTitle??native.attributes?.media_title,progressing:true,...native.proof}};
+ const body=Object.hasOwn(native,'proofBody')?native.proofBody:proof;
+ return new Response(JSON.stringify(body),{headers:native.proofStale?{'x-aisis-cache':'stale'}:{}});
+}
 async function load(current='on',appId='com.netflix.ninja',responseStatus=200,stale=false,native={}){
  const calls=[],reads=[],state={state:current,attributes:native.attributes??{app_id:appId}};
  const fetch=async(url,options={})=>{
@@ -29,11 +37,7 @@ async function load(current='on',appId='com.netflix.ninja',responseStatus=200,st
   if(pathname==='/api/states/'+(native.entity??'media_player.televizor')){reads.push(native.entity??'media_player.televizor');return new Response(JSON.stringify(state),{headers:stale?{'x-aisis-cache':'stale'}:{}})}
   if(pathname==='/api/states/sensor.living_room_fireplace'){
    reads.push('sensor.living_room_fireplace');
-   const now=new Date().toISOString();
-   const proof={state:native.proofState??'playing',attributes:{owned:true,file_matches:true,repeat:native.repeat??'one',
-    observed_at:now,launch_started_at:now,request_id:calls.at(-1)?.body.variables?.request_id,
-    source_kind:'youtube',source_id:'fireplace-video-a',title:native.proofTitle??native.attributes?.media_title,progressing:true,...native.proof}};
-   return new Response(JSON.stringify(proof),{headers:native.proofStale?{'x-aisis-cache':'stale'}:{}});
+   return readinessResponse(native,calls);
   }
   if(pathname==='/api/states')return new Response('[]');
   return new Response('');
@@ -138,5 +142,14 @@ test('the actual matcher distinguishes this request starting, failing and awaiti
   const api=await load('playing',undefined,200,false,{entity:'media_player.home',attributes:{media_title:'Previous video'},proofState:state,proof:{error,observed_at:null,owned:false,progressing:false}});
   const result=await api.match('включи камин на проекторе');
   assert.equal(api.calls.length,1);assert.equal(result.kind,'reply');assert.match(result.text,phrase);
+ }
+});
+
+test('actual matcher treats null and nonobject state responses as unconfirmed after launch',async()=>{
+ for(const proofBody of [null,false,0,'playing',[],{}, {state:'playing',attributes:null}]){
+  const api=await load('playing',undefined,200,false,{entity:'media_player.home',attributes:{media_title:'Existing fireplace'},proofBody});
+  const result=await api.match('включи камин на проекторе');
+  assert.equal(api.calls.length,1);assert.equal(result.kind,'reply');
+  assert.match(result.text,/пока не подтвержд/);assert.doesNotMatch(result.text,/Не удалось/);
  }
 });
