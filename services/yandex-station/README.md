@@ -70,8 +70,14 @@ support services: aisis-station-kit :18080 (eQuasar sync server, ~/lite-kit),
   probing adapter/stt/pm/ha-cli/kit/lan-proxy/embed units and the postgres,
   tls-voice, dns-relay containers. A `maintenance` file in
   `~/.local/share/aisis/bluegreen-state/` suspends it during deploys.
-- **Whisper prompt**: `aisis-whisper-prompt.timer` regenerates the initial
-  prompt from HA entities/artists every 6 h (code/refresh-whisper-prompt.sh).
+- **Whisper prompt**: `aisis-whisper-prompt.timer` regenerates the recognizer's
+  initial prompt every 6 h (code/refresh-whisper-prompt.sh -> `voice_vocab.py prompt`).
+  It is home vocabulary only (fixed example commands, HA room and device names, library
+  artists; never agent, work or chat text), capped at 150 tokens, and built without
+  one-word imperatives: Whisper answers room noise with whatever the prompt reads like,
+  and «Громкость. Пауза. Дальше.» in the prompt came back as 15 of 59 utterances
+  (2026-11-09..15). When HA is unreachable the previous prompt stays (exit 3 from
+  `voice_vocab.py prompt`, refresh keeps the env file).
 - **Clip feed (recognition messages in Telegram)**: `aisis-clipfeed.service` posts
   every heard utterance through the `tg` CLI into the forum topic `tg_topic` of
   `~/.config/aisis/clip_feed.json` (a pin to a `tg_session` that has ended makes
