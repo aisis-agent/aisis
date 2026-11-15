@@ -10,8 +10,10 @@ and the verdict lands in `clip_truth` (cliptruth.py), which also feeds the ASR b
 
 Why no inbound code here: the bot's updates belong to the tg-ctl daemon (a second getUpdates poller would
 steal them). tg-ctl injects the owner's reply into the agent session that owns the replied-to message
-("[TG from … tg#<id>] ↩ tg#<clip message id> …"). Messages are therefore sent pinned to a registry session
-(`tg_session` in the settings) and that session runs the `truth` subcommand (shim `clip-truth`):
+("[TG from … tg#<id>] ↩ tg#<clip message id> …"). Messages are therefore sent into the forum topic of that session
+(`tg_topic`, tg's `--topic`) and pinned to its registry session (`tg_session`); the session runs the `truth` subcommand
+(shim `clip-truth`, bin/clip-truth in the repo). The topic id is what keeps the posts in place: a pin naming a session that has
+ended makes tg fall back to General without any error, a topic id does not depend on the session being alive.
 
     clip-truth 28345 верно                    # reply to tg#28345
     clip-truth 28345 включи свет в гостиной   # the real words
@@ -60,7 +62,7 @@ FULL_SCALE = 32768
 MAX_GAIN = 60
 
 DEFAULTS = {"enabled": True, "include_rejected": True, "quiet_enabled": False, "quiet_from": "23:00",
-            "quiet_to": "08:00", "rate_per_min": 30, "tg_session": ""}
+            "quiet_to": "08:00", "rate_per_min": 30, "tg_session": "", "tg_topic": 0}
 CLOCK = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 SESSION_KEY = re.compile(r"^[a-z]+:[A-Za-z0-9._-]{1,80}$")
 MSG_REF = re.compile(r"^(?:tg)?#?(\d+)$")
@@ -95,6 +97,9 @@ def _validated(changes: dict) -> dict:
         elif key == "tg_session":
             if not isinstance(value, str) or (value and not SESSION_KEY.match(value)):
                 raise ValueError("tg_session must be a registry session key like omp:<id>, or empty")
+        elif key == "tg_topic":
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**31 - 1:
+                raise ValueError("tg_topic must be a forum topic id (positive integer), or 0 for none")
         out[key] = value
     return out
 
@@ -293,6 +298,8 @@ def tg_send(settings: dict, caption: str, audio: Path | None) -> int | None:
     command = ["tg", "--automated"]
     if settings["tg_session"]:
         command += ["--session", settings["tg_session"]]
+    if settings["tg_topic"]:
+        command += ["--topic", str(settings["tg_topic"])]
     if audio is not None:
         command += ["--file", str(audio)]
     command.append(caption)
@@ -553,15 +560,33 @@ def send_test(db: str) -> int:
     return 0
 
 
-def refresh_session() -> None:
-    """Whoever applies corrections owns the replies from now on: pin new posts to the caller's own session."""
+def _tg_query(flag: str) -> str:
+    """One of tg's identity queries (`--session-id`, `--session-topic`); empty when tg is unavailable or has no answer."""
     try:
-        done = subprocess.run(["tg", "--session-id"], capture_output=True, text=True, timeout=10, env=tg_env(), stdin=subprocess.DEVNULL)
-        key = done.stdout.strip()
-        if done.returncode == 0 and SESSION_KEY.match(key) and key != load_settings()["tg_session"]:
-            update_settings({"tg_session": key})
-    except (OSError, subprocess.SubprocessError, ValueError):
-        pass
+        done = subprocess.run(["tg", flag], capture_output=True, text=True, timeout=10, env=tg_env(), stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def refresh_session() -> None:
+    """Whoever applies corrections owns the replies from now on: pin new posts to the caller's own session and forum topic."""
+    key = _tg_query("--session-id")
+    if not SESSION_KEY.match(key):
+        return
+    topic = _tg_query("--session-topic")
+    current = load_settings()
+    if topic.isdigit():
+        new_topic = int(topic)
+    elif key != current["tg_session"]:
+        new_topic = 0  # another session's topic would route replies to the wrong agent; the session pin routes instead
+    else:
+        new_topic = current["tg_topic"]  # no answer for the same session (daemon down): keep the saved routing
+    if (key, new_topic) != (current["tg_session"], current["tg_topic"]):
+        try:
+            update_settings({"tg_session": key, "tg_topic": new_topic})  # both fields together: a half update would mix two sessions' routes
+        except OSError:
+            pass  # the verdict is already stored; re-pinning is retried by the next correction
 
 
 def apply_truth(db: str, args: list[str], clip_id: str | None, last: bool) -> int:

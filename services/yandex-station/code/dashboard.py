@@ -120,7 +120,7 @@ def clipfeed_state():
 
 def clipfeed_save(body):
     try:
-        clipfeed.update_settings({k: body[k] for k in clipfeed.DEFAULTS if k in body and k != "tg_session"})
+        clipfeed.update_settings({k: body[k] for k in clipfeed.DEFAULTS if k in body and k not in ("tg_session", "tg_topic")})
     except ValueError as e:
         return {"ok": False, "err": str(e)}
     return {"ok": True, **clipfeed_state()}
