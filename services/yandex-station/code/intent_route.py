@@ -49,11 +49,8 @@ TIMER_PREFIXES = ("timer.", "alarm.", "reminder.")   # the executors that need t
 VOLUME_EXECUTORS = frozenset(("speaker.volume", "speaker.volume_delta"))
 FALLBACK_BAND = -1             # intents with priority below zero are the catch-alls: they read what the skills left
 CLARIFY_WINDOW_S = 30.0        # how long a clarification question waits for its answer
-BRAIN_QUESTION_WINDOW_S = 30.0  # how long a question the brain asked stays the thing a short answer replies to
-DEDUPE_S = 5.0                 # the same timer/alarm start or cancel inside this window is not run twice (hook and turn can both carry it)
-START_EXECUTORS = frozenset(("timer.start", "alarm.set"))
-CANCEL_EXECUTORS = frozenset(("timer.cancel", "alarm.cancel", "reminder.cancel"))
-DEDUPED_EXECUTORS = START_EXECUTORS | CANCEL_EXECUTORS   # the only actions a second delivery of one phrase can repeat
+DEDUPE_S = 5.0                 # the same utterance that started or cancelled a timer/alarm, delivered again inside this window, is not run twice
+TIMER_ACTION_EXECUTORS = frozenset(("timer.start", "alarm.set", "timer.cancel", "alarm.cancel", "reminder.cancel"))   # what a second delivery could repeat
 
 
 @dataclass
@@ -130,10 +127,9 @@ class IntentRouter:
     last_reprompt: dict[str, float] = field(default_factory=dict)
     stats: dict[str, int] = field(default_factory=dict)
     pending: dict[str, tuple[str, float]] = field(default_factory=dict)             # station -> (clarification phrase, when)
-    brain_asked: dict[str, float] = field(default_factory=dict)                     # station -> when the brain last asked it a question
-    recent_actions: dict[tuple[str, str], tuple[float, str, int]] = field(default_factory=dict)   # start/cancel -> (when, reply, generation)
-    running: dict[tuple[str, str], asyncio.Task[str | None]] = field(default_factory=dict)       # starts and cancels in flight
-    generation: int = 0    # counts the timer/alarm starts and cancels that ran: a remembered reply is good only within its generation
+    brain_asked: set[str] = field(default_factory=set)                              # stations the brain last spoke to with a question
+    memo: tuple[str, "Route", float] | None = None        # the one remembered utterance: (canonical text, its route, when it ran)
+    running: dict[str, asyncio.Task["Route"]] = field(default_factory=dict)   # timer/alarm utterances in flight, by canonical text
 
     # ── pure classification (the back-test measures this) ───────────────────
     def classify(self, text: str, phase: str | None = None, *, fallback: bool = True) -> Decision | None:
@@ -219,41 +215,46 @@ class IntentRouter:
             return None
         return decision, joined
 
-    async def _once(self, executor: str, args: dict, run: Callable[[], Awaitable[str | None]]) -> str | None:
-        """A timer or alarm start or cancel runs once per DEDUPE_S: the quasar hook and the speaker's own turn can carry the same
-        phrase, so a second «таймер на пять минут» must not start a second timer and a second «отмени таймер» must not answer
-        «Таймеров нет» to a cancel that worked. A duplicate that arrives while the first is running waits for it. Only a reply
-        that was spoken is remembered (a failure is never replayed), and only within its generation: any start or cancel that
-        ran since changed what the reply is about."""
-        key = (executor, json.dumps(args, sort_keys=True, default=str))
-        done = self.recent_actions.get(key)
-        if done is not None and self.monotonic() - done[0] <= DEDUPE_S and done[2] == self.generation:
-            return done[1]
-        task = self.running.get(key)
-        if task is None or task.done():   # a finished task whose cleanup has not run yet is no one to wait for
-            task = asyncio.ensure_future(self._remember(key, executor, run))
+    def _timer_action(self, decision: Decision, via_quasar: bool, station: str) -> bool:
+        """The decision runs a timer or alarm start, set or cancel (alone or as a clause of a compound) and the adapter can run it."""
+        return any((part.action or {}).get("executor") in TIMER_ACTION_EXECUTORS for part in decision.parts or (decision,)) \
+            and self.executable(decision, via_quasar=via_quasar, station=station)
+
+    async def _timer_action_once(self, station: str, text: str, decision: Decision, via_quasar: bool) -> Route:
+        """Timer and alarm actions run in arrival order, and one utterance delivered twice inside DEDUPE_S runs once: the quasar hook
+        and the speaker's own turn can carry the same phrase (a hook timeout), and a second «таймер на пять минут» must not start a
+        second timer nor a second «отмени таймер» answer «Таймеров нет» to a cancel that worked.
+
+        One slot remembers the last utterance that ran: its route and when. It is replayed only for the SAME utterance (a compound
+        as a unit), and only after every action in flight has finished, so a cancel is never answered from the slot ahead of a start
+        that is registered but has not run. Any other utterance that runs an action empties the slot first (start → cancel → start →
+        cancel never replays a stale reply); a failure, a decline or a queued result is never stored. A duplicate that arrives
+        while the first delivery is running waits for it."""
+        key = self.grammar.normalise(text).text
+        while True:
+            task = self.running.get(key)
+            if task is not None and not task.done():
+                return await asyncio.shield(task)
+            earlier = [other for other in self.running.values() if not other.done()]
+            if earlier:   # arrival order: what was registered before this utterance finishes first (no cycle: only earlier ones are waited for)
+                await asyncio.gather(*earlier, return_exceptions=True)
+                continue
+            memo = self.memo
+            if memo is not None and memo[0] == key and self.monotonic() - memo[2] <= DEDUPE_S:
+                return memo[1]
+            task = asyncio.ensure_future(self._run_timer_action(key, station, decision, via_quasar))
             self.running[key] = task
             task.add_done_callback(lambda finished, k=key: self._finished(k, finished))
-        return await asyncio.shield(task)
+            return await asyncio.shield(task)
 
-    async def _remember(self, key: tuple[str, str], executor: str, run: Callable[[], Awaitable[str | None]]) -> str | None:
-        if executor in CANCEL_EXECUTORS:
-            await self._settle_starts()   # a cancel sees the timer a start in flight is creating
-        self.generation += 1
-        generation = self.generation
-        text = await run()
-        if text is not None:
-            now = self.monotonic()
-            self.recent_actions = {k: v for k, v in self.recent_actions.items() if now - v[0] <= DEDUPE_S}
-            self.recent_actions[key] = (now, text, generation)
-        return text
+    async def _run_timer_action(self, key: str, station: str, decision: Decision, via_quasar: bool) -> Route:
+        self.memo = None   # whatever ran before is no longer the last thing that happened
+        route = await self._run(station, decision, via_quasar)
+        if route.kind == "reply":
+            self.memo = (key, route, self.monotonic())
+        return route
 
-    async def _settle_starts(self) -> None:
-        pending = [task for key, task in self.running.items() if key[0] in START_EXECUTORS and not task.done()]
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-
-    def _finished(self, key: tuple[str, str], task: asyncio.Task[str | None]) -> None:
+    def _finished(self, key: str, task: asyncio.Task[Route]) -> None:
         if self.running.get(key) is task:   # a newer task under the same key is not ours to drop
             del self.running[key]
         if not task.cancelled():
@@ -267,7 +268,12 @@ class IntentRouter:
             joined = self._joined_answer(station, text, phase)
             if joined is not None:
                 decision, text = joined
-            route = NONE if decision is None else await self._run(station, decision, via_quasar)
+            if decision is None:
+                route = NONE
+            elif self._timer_action(decision, via_quasar, station):
+                route = await self._timer_action_once(station, text, decision, via_quasar)
+            else:
+                route = await self._run(station, decision, via_quasar)
             if decision is not None and decision.tier == "clarify":
                 self.pending[station] = (text, self.monotonic())
         except Exception as err:  # fail open: the old path answers
@@ -280,20 +286,20 @@ class IntentRouter:
 
     def note_reply(self, station: str, text: str, *, brain: bool = False) -> None:
         """The last thing the speaker said to this station, for «повтори». `brain`: the brain said it. A question of the brain's
-        is remembered for BRAIN_QUESTION_WINDOW_S (a short answer to it is the brain's to continue); any other line replaces it."""
+        is remembered until the next line of any kind to that station (a short answer to it is the brain's to continue)."""
         if text:
             self.last_reply[station] = text
             if brain and text.rstrip().endswith("?"):
-                self.brain_asked[station] = self.monotonic()
+                self.brain_asked.add(station)
             else:
-                self.brain_asked.pop(station, None)
+                self.brain_asked.discard(station)
 
     def _asked_a_question(self, station: str) -> bool:
-        """The brain's last line to this station was a question it is still waiting on: a short answer to it («да», «про собак»)
-        is the brain's to continue, never a catch-all's «не расслышал». The grammar's own questions («Да?», «На сколько
-        поставить таймер?») are not it: the brain has no context for them."""
-        asked = self.brain_asked.get(station)
-        return asked is not None and self.monotonic() - asked <= BRAIN_QUESTION_WINDOW_S
+        """The brain's last line to this station was a question: a short answer to it («да», «про собак») is the brain's to
+        continue, never a catch-all's «не расслышал». There is no expiry: the brain's text is ready long before it is spoken
+        and a long story ends with its question, so no clock says when the listener answers; the next line replaces it. The
+        grammar's own questions («Да?», «На сколько поставить таймер?») are not it: the brain has no context for them."""
+        return station in self.brain_asked
 
     async def _run(self, station: str, decision: Decision, via_quasar: bool) -> Route:
         if decision.parts:
@@ -347,7 +353,7 @@ class IntentRouter:
         """A compound the adapter cannot run. When only the missing timer configuration stops it, it answers «не умею» as a
         single timer phrase does, instead of leaving the brain to pretend; any other clause is the quasar layer's."""
         if self.timers is None and all(self._clause_executable(part, station, timers_bound=True) for part in decision.parts) \
-                and any(((part.action or {}).get("executor") or "").startswith(TIMER_PREFIXES) for part in decision.parts):
+                and all(((part.action or {}).get("executor") or "").startswith(TIMER_PREFIXES) for part in decision.parts):
             return Route("reply", TIMERS_OFF, intent="compound", source="grammar")
         return NONE
 
@@ -360,8 +366,7 @@ class IntentRouter:
             return Route("volume", volume=volume_from(decision), intent=intent, source="grammar")
         if executor == "dialog.end":
             return Route("dialog_end", intent=intent, source="grammar")
-        run = lambda: self._adapter_executor(station, decision, executor, args)
-        text = await (self._once(executor, args, run) if executor in DEDUPED_EXECUTORS else run())
+        text = await self._adapter_executor(station, decision, executor, args)
         if text is None:
             return NONE
         return Route("reply", text, intent=intent, source="skill" if intent.startswith("skill.") else "grammar")
