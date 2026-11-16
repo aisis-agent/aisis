@@ -7,10 +7,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import intent_grammar.grammar as engine
 from intent_grammar import GrammarError, backtest, cli, loads
 from intent_grammar.grammar import load, render_reply
 from intent_grammar.normalize import Canon, edit_distance_le1, normalise, phonetic_key, repair_typo, stem, tokenize
@@ -496,7 +498,7 @@ class ShippedGrammarTests(unittest.TestCase):
         self.assertEqual(self.grammar.decide("громкость десять").slots, {"level": 10})
         self.assertEqual(self.grammar.decide("поставь таймер на две минуты тридцать секунд").slots, {"duration": 150})
         self.assertEqual(self.grammar.decide("таймер на полтора часа").slots, {"duration": 5400})
-        self.assertEqual(self.grammar.decide("убавь громкость на пять процентов").slots["d"], {"amount": 5, "unit": "процент"})
+        self.assertEqual(self.grammar.decide("убавь громкость на пять процентов").slots, {"percent": 5})
         self.assertEqual(self.grammar.decide("кондиционер в спальне на охлаждение двадцать два градуса").slots,
                          {"room": "bedroom", "mode": "cool", "temp": 22})
 
@@ -585,6 +587,51 @@ class ShippedBehaviourTests(unittest.TestCase):
         gate = self.g.gate
         self.assertEqual((gate["max_false_triggers"], gate["max_wrong_actions"], gate["max_p95_us"]), (2, 6, 25000))
         self.assertTrue(gate["min_coverage"])
+
+    def test_relative_volume_takes_a_plain_level_or_a_percent_and_nothing_else(self):
+        for text in ("прибавь два градуса", "сделай громче на два градуса", "убавь на три градуса", "убавь на пять единиц",
+                     "прибавь на тридцать", "убавь громкость на пятьдесят", "прибавь громкость на сто"):
+            with self.subTest(text=text):
+                decision = self.g.decide(text, phase="pre")
+                self.assertTrue(decision is None or decision.intent not in ("volume.delta_up", "volume.delta_down"), text)
+        self.assertEqual(self.g.decide("прибавь два градуса").intent, "climate.warmer")      # degrees belong to the AC
+        self.assertEqual(self.g.decide("убавь на три градуса").intent, "climate.cooler")
+        self.assertEqual(self.args("прибавь громкость на десять"), {"direction": 1, "levels": 10, "percent": None})
+        self.assertEqual(self.args("убавь звук на двадцать процентов"), {"direction": -1, "levels": None, "percent": 20})
+        self.assertEqual(self.args("сделай громче на два"), {"direction": 1, "levels": 2, "percent": None})
+
+    def test_refusals_leave_media_and_knowledge_requests_alone(self):
+        for text in ("включи фильм Идиот", "поставь Сука любовь", "включи Тупой и ещё тупее", "включи матч Медведева",
+                     "расскажи про трамплин", "прыжки с трамплина"):
+            with self.subTest(text=text):
+                self.assertIsNone(self.g.decide(text, phase="pre"), text)      # nothing answers before the quasar layer
+        for text, intent in (("Алиса, путин пидор.", "refuse.insult"), ("ты тупая", "refuse.insult"),
+                             ("Путин молодец", "refuse.politics"), ("Трамп молодец", "refuse.politics")):
+            with self.subTest(text=text):
+                self.assertEqual(self.g.decide(text, phase="pre").intent, intent)
+
+    def test_hardware_commands_are_no_questions(self):
+        for text in ("Поставить температуру 30?", "Сделать свет красным?", "Сделать теплее?", "Сделать холоднее?",
+                     "Яркость пятьдесят?"):
+            with self.subTest(text=text):
+                self.assertNoRealReading(text)
+        for text, intent in (("поставь температуру 30", "climate.set"), ("сделай свет красным", "light.color"),
+                             ("сделай теплее", "climate.warmer"), ("яркость пятьдесят", "light.brightness")):
+            self.assertEqual(self.g.decide(text).intent, intent, text)
+
+    def test_a_long_chain_of_clauses_is_answered_at_once(self):
+        for connector_word in ("путин", "закрой"):
+            text = " и ".join([connector_word] * 30) + " и что"
+            for phase in (None, "pre"):
+                started = time.perf_counter()
+                self.g.decide(text, phase=phase)
+                self.assertLess(time.perf_counter() - started, 0.5, (connector_word, phase))
+        # below the clause cap the search itself must not repeat a failing start: 1.9^k paths otherwise
+        with mock.patch.object(engine, "MAX_CLAUSES", 1000, create=True):
+            text = " и ".join(["путин"] * 14) + " и что"
+            started = time.perf_counter()
+            self.g.decide(text)
+            self.assertLess(time.perf_counter() - started, 1.0)
 
 
 class BundleTests(unittest.TestCase):
@@ -757,6 +804,62 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(len(list(reports.glob("backtest-*.json"))) - reports_before, 2)   # failing runs are still archived
         self.assertEqual(self.backtest_cli(self.mini, "--gate"), 0)
         self.assertNotEqual((reports / "latest.json").read_text(), baseline)   # a passing run is promoted
+
+    def corpus_rows(self):
+        path = self.dir / "real-voice-2026-11-labelled.jsonl"
+        return path, [json.loads(line) for line in path.read_text().splitlines()]
+
+    @staticmethod
+    def write_rows(path, rows):
+        path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows))
+
+    def test_the_owner_can_rebaseline_after_a_row_was_relabelled(self):
+        latest = self.reports / "latest.json"
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "first run"), 0)
+        path, rows = self.corpus_rows()
+        rows[5]["truth"] = "CHITCHAT"      # «Включи карусель» had been labelled a light command by mistake
+        self.write_rows(path, rows)
+        baseline = latest.read_text()
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 1)         # relabelled: red until the owner decides
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 1)
+        self.assertEqual(latest.read_text(), baseline)
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "row 6 was a chat question"), 0)
+        block = json.loads(latest.read_text())["baseline"]
+        self.assertEqual((block["init_reason"], block["rebaselined"]), ("row 6 was a chat question", {"lost_rows": 0, "relabelled": 1}))
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 0)         # the new baseline holds without the flag
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "again"), 2)   # nothing left to accept: refused
+
+    def test_a_rebaseline_accepts_lost_rows_but_never_a_regression(self):
+        latest = self.reports / "latest.json"
+        worse = self.dir / "worse.yaml"
+        worse.write_text(MINI.replace("(на|в)? {room}?", "(на|в)? {room}"))    # «включи свет» is no longer read
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "first run"), 0)
+        baseline = latest.read_text()
+        path, rows = self.corpus_rows()
+        self.write_rows(path, rows[:-1])                                       # the last row is removed from the corpus
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 1)
+        self.assertEqual(self.backtest_cli(worse, "--gate", "--init-baseline", "dropped a row"), 1)   # a regression still fails
+        self.assertEqual(latest.read_text(), baseline)
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "dropped a row"), 0)
+        block = json.loads(latest.read_text())["baseline"]
+        self.assertEqual(block["rebaselined"], {"lost_rows": 1, "relabelled": 0})
+        grammar = self.grammar
+        rows_, manifest = backtest.load_rows(self.dir, grammar)
+        no_baseline = backtest.build_report(grammar, rows_, manifest)
+        self.assertFalse(backtest.accept_rebaseline(no_baseline, grammar, "nothing to compare"))   # only against a compatible baseline
+
+    def test_the_replay_carries_how_the_quasar_layer_answered(self):
+        replay = [{"text": "Громкость на пять", "handled": True, "via": "fast-clarify"},
+                  {"text": "Включи свет.", "handled": True, "via": "media-key"},
+                  {"text": "Выключи свет в спальне", "handled": True, "via": "fast-confirm"},
+                  {"text": "Включи карусель", "handled": False, "via": None}]
+        (self.dir / backtest.REPLAY_FILE).write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in replay))
+        by_text = {row.text: row for row in self.rows()}
+        got = {text: (row.quasar, row.quasar_via, row.quasar_tier) for text, row in by_text.items()}
+        self.assertEqual(got["Громкость на пять"], (True, "fast-clarify", "clarify"))
+        self.assertEqual(got["Включи свет."], (True, "media-key", "execute"))
+        self.assertEqual(got["Выключи свет в спальне"], (True, "fast-confirm", "confirm"))
+        self.assertEqual(got["Включи карусель"], (False, None, "execute"))
 
     def test_a_failing_first_run_leaves_no_baseline(self):
         gated = self.dir / "gated.yaml"

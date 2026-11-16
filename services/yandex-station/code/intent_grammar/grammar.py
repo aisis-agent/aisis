@@ -24,6 +24,7 @@ from .pattern import Alt, Matcher, Node, PatternError, Resolver, SLOT_TYPES, Wor
 from .timewords import duration_ru
 
 PHASES = ("pre", "post")   # pre: safe to answer before the quasar container's own handlers; post: only when they found nothing
+MAX_CLAUSES = 8           # a compound command has at most this many clauses; a longer chain is never split (the search is quadratic)
 TIERS = ("execute", "confirm", "clarify", "query", "canned", "reprompt", "drop")
 # Tiers in which the speaker acts on the world: guarded against negation by default.
 ACTING_TIERS = ("execute", "confirm")
@@ -247,13 +248,14 @@ class Grammar:
             for connector in self.connectors:
                 if tuple(u.tokens[i:i + len(connector)]) == connector and i + len(connector) < n:
                     cuts.append((i, i + len(connector)))
-        if not cuts:
+        if not cuts or len(cuts) >= MAX_CLAUSES:   # no connector, or a chain no speaker says: not worth the quadratic search
             return None
         best: list[Decision] | None = None
+        dead: set[int] = set()   # clause starts that cannot reach the end of the utterance: each is searched once, not once per path to it
 
         def split(start: int, acc: list[Decision]) -> None:
             nonlocal best
-            if best is not None:
+            if best is not None or start in dead:
                 return
             if start >= n:
                 if len(acc) > 1:
@@ -266,6 +268,7 @@ class Grammar:
                     split(nxt, acc + [decision])
                     if best is not None:
                         return
+            dead.add(start)
 
         split(0, [])
         if not best:

@@ -65,7 +65,8 @@ lexicon:
   play_verb: [включи, включай, поставь, сыграй, играй, запусти, давай, послушаем, найди]
   profanity: [пидор*, пидар*, сука, суки, сучк*, хуй*, хуе*, хуя*, бля*, еба*, ебан*, ебат*, пизд*, мудак*, говно*, дерьм*,
               уебан*, ублюдок, ублюдк*, дебил*, идиот*, тупой, тупая, урод*, жопа, жопу, гандон*, шлюх*]
-  politicians: [путин*, зеленск*, байден*, трамп*, навальн*, лукашенк*, медведев*, мишустин*, шойг*]
+  # «трамп» as exact forms: a `трамп*` stem would also read «трамплин»
+  politicians: [путин*, зеленск*, байден*, =трамп, =трампа, =трампу, =трампом, =трампе, навальн*, лукашенк*, медведев*, мишустин*, шойг*]
   emergency: [полици*, =скорая, =скорую, =скорой, неотложк*, пожарн*, =пожар, милици*, спасател*, =спасите, =помогите]
 
 intents:
@@ -199,20 +200,22 @@ intents:
     phase: pre
     priority: 40
     labels: [PROFANITY_OPINION]
-    guards: ["has:profanity", not_question]
+    guards: ["has:profanity", "not_has:cmd_verbs", not_question]   # «включи фильм Идиот» asks for media: the quasar layer's
     patterns: ["..."]
     reply: {kind: canned, say: ["Давай без грубостей.", "Так не надо."]}
     examples: ["Алиса, путин пидор.", "ты тупая"]
+    negatives: ["включи фильм Идиот", "поставь Сука любовь", "включи Тупой и ещё тупее"]
   - id: refuse.politics
     tier: canned
     phase: pre
     priority: 30
     labels: [PROFANITY_OPINION]
-    guards: ["has:politicians", not_question]
+    guards: ["has:politicians", "not_has:cmd_verbs", not_question]
     max_tokens: 8
     patterns: ["..."]
     reply: {kind: canned, say: ["О политике я не высказываюсь."]}
-    examples: ["Путин молодец"]
+    examples: ["Путин молодец", "Трамп молодец"]
+    negatives: ["включи матч Медведева", "расскажи про трамплин", "прыжки с трамплина"]
   - id: refuse.lists
     tier: canned
     phase: pre
@@ -512,36 +515,47 @@ intents:
       - {say: "громкость на двадцать пять процентов", slots: {percent: 25}}
       - {say: "сделай звук на десять процентов", slots: {percent: 10}}
     negatives: ["громкость 150%"]
+  # Relative volume. Args contract (executor speaker.volume_delta): `direction` (+1/-1) and exactly one of `levels` (a plain
+  # number, 1..10 like volume.set) or `percent` (needs its unit). Any other unit is not volume: «прибавь два градуса» is
+  # climate.warmer's, and a bare «на тридцать» is no number of levels.
   - id: volume.delta_up
     tier: execute
     phase: pre
     priority: 5
     labels: [VOLUME, volume, volume_partial]
     slots:
-      d: {type: delta, range: [1, 100]}
+      levels: {type: number, range: [1, 10]}
+      percent: {type: number, range: [1, 100]}
     patterns:
-      - "(прибавь|добавь|увеличь|подними|повысь) (громкость|звук)? {d}"
-      - "{set_verb}? (громче|погромче) {d}"
-    action: {executor: speaker.volume_delta, args: {direction: 1, delta: "$d"}}
+      - "(прибавь|добавь|увеличь|подними|повысь) (громкость|звук)? (на)? {levels}"
+      - "(прибавь|добавь|увеличь|подними|повысь) (громкость|звук)? (на)? {percent} процент*"
+      - "{set_verb}? (громче|погромче) (на)? {levels}"
+      - "{set_verb}? (громче|погромче) (на)? {percent} процент*"
+    action: {executor: speaker.volume_delta, args: {direction: 1, levels: "$levels", percent: "$percent"}}
     reply: {kind: earcon}
     examples:
-      - {say: "прибавь громкость на десять процентов", slots: {d: {amount: 10, unit: "процент"}}}
-      - {say: "сделай громче на два", slots: {d: {amount: 2, unit: ""}}}
+      - {say: "прибавь громкость на десять процентов", slots: {percent: 10}}
+      - {say: "сделай громче на два", slots: {levels: 2}}
+    negatives: ["прибавь два градуса", "сделай громче на два градуса", "прибавь на тридцать", "прибавь громкость на сто"]
   - id: volume.delta_down
     tier: execute
     phase: pre
     priority: 5
     labels: [VOLUME, volume, volume_partial]
     slots:
-      d: {type: delta, range: [1, 100]}
+      levels: {type: number, range: [1, 10]}
+      percent: {type: number, range: [1, 100]}
     patterns:
-      - "(убавь|уменьши|понизь|снизь|сбавь|убери) (громкость|звук)? {d}"
-      - "{set_verb}? (тише|потише) {d}"
-    action: {executor: speaker.volume_delta, args: {direction: -1, delta: "$d"}}
+      - "(убавь|уменьши|понизь|снизь|сбавь|убери) (громкость|звук)? (на)? {levels}"
+      - "(убавь|уменьши|понизь|снизь|сбавь|убери) (громкость|звук)? (на)? {percent} процент*"
+      - "{set_verb}? (тише|потише) (на)? {levels}"
+      - "{set_verb}? (тише|потише) (на)? {percent} процент*"
+    action: {executor: speaker.volume_delta, args: {direction: -1, levels: "$levels", percent: "$percent"}}
     reply: {kind: earcon}
     examples:
-      - {say: "убавь звук на два", slots: {d: {amount: 2, unit: ""}}}
-      - {say: "сделай тише на 20 процентов", slots: {d: {amount: 20, unit: "процент"}}}
+      - {say: "убавь звук на два", slots: {levels: 2}}
+      - {say: "сделай тише на 20 процентов", slots: {percent: 20}}
+    negatives: ["убавь на три градуса", "уменьши температуру на два градуса", "убавь на пятьдесят"]
   - id: volume.max
     tier: execute
     labels: [VOLUME, volume, volume_partial]
@@ -617,6 +631,7 @@ intents:
   - id: light.color
     tier: execute
     labels: [LIGHT_CMD, light, color]
+    guards: [not_question]    # «Сделать свет красным?» asks about the plan, as «Включить свет?» does
     slots:
       color: {type: colors}
       room: {type: rooms}
@@ -631,10 +646,11 @@ intents:
       - {say: "люстру белый цвет", slots: {color: white}}
       - {say: "Алиса, люструй цвет белый.", slots: {color: white}}
       - {say: "цвет белый", slots: {color: white}}
-    negatives: ["включи красный фильм", "белый шум", "красный"]
+    negatives: ["включи красный фильм", "белый шум", "красный", "Сделать свет красным?", "Сделай свет красным?"]
   - id: light.brightness
     tier: execute
     labels: [LIGHT_CMD, light, brightness]
+    guards: [not_question]
     slots:
       value: {type: percent, range: [1, 100]}
       room: {type: rooms}
@@ -673,6 +689,7 @@ intents:
   - id: climate.set
     tier: execute
     labels: [CLIMATE_CMD, climate, setpoint]
+    guards: [not_question]    # «Поставить температуру 30?»
     slots:
       room: {type: rooms}
       mode: {type: hvac_modes}
@@ -690,10 +707,11 @@ intents:
       - {say: "Наставь кондиционер на втором этаже. Обогрев тридцать градусов.", slots: {room: upstairs, mode: heat, temp: 30}}
       - {say: "включи кондиционер на охлаждение", slots: {mode: cool}}
       - {say: "включи кондиционер в спальне на обогрев двадцать два градуса", slots: {room: bedroom, mode: heat, temp: 22}}
-    negatives: ["какая температура на улице"]
+    negatives: ["какая температура на улице", "Поставить температуру 30?", "Поставить кондиционер на 25?"]
   - id: climate.warmer
     tier: execute
     labels: [CLIMATE_CMD, climate]
+    guards: [not_question]
     slots:
       d: {type: delta, range: [1, 10]}
       room: {type: rooms}
@@ -703,9 +721,11 @@ intents:
     action: {executor: ha.climate_delta, args: {room: "$room", direction: 1, delta: "$d"}}
     reply: {kind: earcon}
     examples: ["сделай теплее", "потеплее в спальне", "прибавь температуру на два градуса"]
+    negatives: ["Сделать теплее?", "Сделай теплее?"]
   - id: climate.cooler
     tier: execute
     labels: [CLIMATE_CMD, climate]
+    guards: [not_question]
     slots:
       d: {type: delta, range: [1, 10]}
       room: {type: rooms}
@@ -715,6 +735,7 @@ intents:
     action: {executor: ha.climate_delta, args: {room: "$room", direction: -1, delta: "$d"}}
     reply: {kind: earcon}
     examples: ["сделай холоднее", "похолоднее наверху", "убавь температуру на три градуса"]
+    negatives: ["Сделать холоднее?", "Сделай холоднее?"]
 
   # ── state ───────────────────────────────────────────────────────────────
   - id: state.report
@@ -755,7 +776,7 @@ backtest:
 # addressed to the speaker that got an answer (a cat talked to in the room: one known case).
 # The held-out split is 18 addressed rows today, too few for an absolute number. Regressions are caught row by row against
 # the last promoted report (same phrases, deterministic engine: a row may get better, never worse, no tolerance; losing or
-# relabelling a row fails too). The absolute floor switches on with n: a confidence-interval test from `ci_min_addressed`
+# relabelling a row fails too, until the owner accepts it with `--init-baseline REASON`). The absolute floor switches on with n: a confidence-interval test from `ci_min_addressed`
 # rows, the point floor from `floor_min_addressed`. The 90 % product target is the reported `goal`, not a gate.
 gate:
   max_false_triggers: 2

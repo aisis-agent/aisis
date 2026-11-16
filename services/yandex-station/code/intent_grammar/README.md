@@ -94,21 +94,33 @@ is given and otherwise is no match.
 otherwise real intents (priority >= 0, compounds included) -> arithmetic -> weather -> catch-alls (priority < 0). `route()` executes the decision
 (canned/reprompt lines, clock, timers, Home Assistant climate and colour, weather, music) and returns `reply | silent | volume | dialog_end | none`; every
 failure, a guessed (fuzzy/confirm) reading, or an executor owned by the quasar container is `none`, so the old path continues untouched.
-Reprompts are said once a minute per station: a second miss goes to the brain. A tie between two real intents is an abstain, never split
-into a compound; `Grammar.decide` with the default bands does not hand it to the catch-alls either (the router's explicit bands do).
+Reprompts are said once a minute per station: a second miss goes to the brain. The catch-alls (priority < 0) are also skipped when the speaker's last
+line to that station was a question: «да», «про собак» answer the brain's «Рассказать подробнее?» and are the brain's to continue. A tie between two real
+intents is an abstain, never split into a compound (a chain of eight or more clauses is never split: the search is quadratic); `Grammar.decide` with
+the default bands does not hand it to the catch-alls either (the router's explicit bands do).
+
+A compound runs only when every clause is something the adapter itself can run (`executable`), checked before the first clause runs: a compound
+that ends in `none` has changed nothing. A timer or alarm **start** is deduplicated for five seconds (the quasar hook and the speaker's own turn can
+both carry the phrase; duplicates in flight share one execution; a cancel clears it; a failure is never replayed); nothing else is: Home Assistant
+actions, cancels and queries run every time. A Home Assistant command without a room is about the room of the speaker that heard it (the HA area of
+the station's `media_player`, the way the overlay's speaker-room layer reads it); a speaker whose room Home Assistant does not tell is asked for the
+room, never given the living room.
 
 Replies: `Grammar.say(decision, pick, values=None)` / `render_reply`. A template whose placeholder nobody filled (`Громкость {level}.`
 without a level) gives `None`, never the literal text; the executor passes what it measured as `values={"level": 5}` (they win over
 matched slots).
 
-### Volume action args (executor `speaker.volume`)
+### Volume action args
 
-Exactly one of: `step` (`1` / `-1`, relative), `level` (a plain number on the speaker's own 0..10 scale) or `percent` (0..100).
-A bare number is a level and must be within 0..10, so no volume intent reads «громкость 50» (no action: the catch-all reprompt or the brain
-takes it); a percent needs its unit («50%», «пятьдесят процентов») and keeps it: «громкость 10%» is `{percent: 10}`, «громкость на
-максимум» is `{level: 10}`. A relative change by an amount («прибавь на два», «на десять процентов») is the separate executor
-`speaker.volume_delta` (`direction`, `delta`). `intent_route.volume_from` turns the args into the overlay's `target` (level / 10 or
-percent / 100), `steps` or `deltaLevels`; an action that carries none or several of the units does nothing.
+Executor `speaker.volume`: exactly one of `step` (`1` / `-1`, relative), `level` (a plain number on the speaker's own 0..10 scale) or `percent`
+(0..100). A bare number is a level and must be within 0..10, so no volume intent reads «громкость 50» (no action: the catch-all reprompt or the
+brain takes it); a percent needs its unit («50%», «пятьдесят процентов») and keeps it: «громкость 10%» is `{percent: 10}`, «громкость на
+максимум» is `{level: 10}`.
+
+A relative change by an amount is the separate executor `speaker.volume_delta`: `direction` (`1` / `-1`) and exactly one of `levels` (a plain
+number, 1..10 like `volume.set`) or `percent` (1..100, the unit is required). Any other unit is not volume: «прибавь два градуса» is
+`climate.warmer`'s, and a bare «прибавь на тридцать» is no number of levels. `intent_route.volume_from` turns the args into the overlay's
+`target` (level / 10 or percent / 100), `steps` or `deltaLevels`; an action that carries none or several of the units does nothing.
 
 ## Back-test
 
@@ -117,8 +129,13 @@ Corpus directory: `$AISIS_INTENT_CORPUS_DIR`, else `~/.local/share/aisis/corpus/
 (`{text, expect: {kind, domain, tier?, action?}}`; source `synthetic`, truth = domain).
 
 `quasar-replay.jsonl` (optional, written by `tools/replay_quasar.mts` in a throwaway container of the active quasar image) says which phrases the deployed
-container already answers without a model; with it `--route quasar` is the baseline before the grammar and `--route combined` the production order
+container already answers without a model, and how (`via`); with it `--route quasar` is the baseline before the grammar and `--route combined` the production order
 (grammar pre-phase -> quasar -> grammar rest). Without it the flag falls back to the corpus' own record.
+
+`--route combined` counts a grammar decision only where the runtime acts on it (`IntentRouter.executable`, the check `route()` itself uses): the adapter
+turn cannot change the volume (only the overlay's pre-phase hook can), a guessed reading waits for the owner's «да», and an executor that is not
+configured is declined. The measurement assumes the full production configuration (timers, Home Assistant actions, skills bound:
+`intent_route.measured_router`); a deployment without `AISIS_TIMER_TTS_ENTITY` / `AISIS_TIMER_PLAYER` answers its timer phrases «не умею» instead.
 
 Per row the outcome is one of `correct`, `wrong`, `missed` (abstained on something an intent should answer), `overreach` (answered a
 brain-only class), `brain_ok`, `dropped` / `no_action` (unaddressed speech handled), `false_trigger` (unaddressed speech got an answer),
@@ -133,9 +150,10 @@ definition and the comparison with the previous report.
 that tier and the action's essential arguments: `volume:N` → `speaker.volume` with `level == N`, `setpoint:N` → `ha.climate` with
 `temperature == N`, `brightness:N` → `ha.light_brightness` with `percent == N`, `on:ENTITY` / `off:ENTITY` → `ha.light`/`ha.device` with
 that `state` (the entity id is not compared: the grammar speaks in rooms and devices). Any other form (`brain:…`) and `tier: llm` have
-no exact mapping: that row stays label-only, and so does a decision of the quasar container (`quasar.handled` in `--route quasar|combined`:
-the back-test knows that it answered, not with which tier or arguments). A compound is correct when one of its clauses carries the
-action. Rows without `tier` / `action` are label-only as before.
+no exact mapping: that row stays label-only. A decision of the quasar container (`quasar.handled` in `--route quasar|combined`) carries the
+tier it answered with (the replay's `via`: `fast-confirm` is a confirmation question, `fast-clarify` a clarification, neither a completed action),
+no labels and no arguments (the replay records neither): it is judged on that tier against `expect.tier` alone, never on a label copied from the
+row. A compound is correct when one of its clauses carries the action. Rows without `tier` / `action` are label-only as before.
 
 **Row ids** are content-derived: sha1 of the file stem, `ts` (when present), the canonical text and the n-th exact duplicate. Inserting,
 removing or reordering rows never renames the others, so the comparison with the previous report stays valid.
@@ -157,8 +175,15 @@ reports have (same id, same label, same side of the split). A row may get better
 fail, wrong → abstained is an improvement. Nothing is sampled (same phrases, deterministic engine), so there is no tolerance; a one-row
 allowance would let a 5.6-point loss through at 18 rows. A baseline row gone from the corpus (`lost_rows`) or relabelled fails too, and a
 baseline of another route, split definition or schema is `incompatible`: it fails instead of silently comparing nothing. No usable baseline
-is itself a failure with `--gate`; the first run of a route (or an explicit rebaseline) is `--init-baseline REASON`, refused while a compatible
-baseline exists, and the reason is recorded in the report.
+is itself a failure with `--gate`; the first run of a route (or an explicit rebaseline) is `--init-baseline REASON`, recorded in the report.
+
+**The owner's rebaseline.** A corrected label, an edited row text or a renamed corpus file (row ids include the file name) turns the gate red
+for every later run, because a lost or relabelled row can never come back. The way out is the owner's explicit
+`backtest --route combined --gate --init-baseline "why"`: it is accepted against a **compatible** baseline exactly when the run reports lost or
+relabelled rows, writes the reason and the counts into the report (`baseline.init_reason`, `baseline.rebaselined: {lost_rows, relabelled}`) and
+evaluates the gate again without those two checks only: every other check, the per-row regressions included, still applies, and the report
+becomes the new baseline only when the gate then holds. A compatible baseline with nothing lost or relabelled refuses `--init-baseline` (every row is
+compared with it). The nightly loop never passes the flag.
 
 **Held-out floor by n.** The independent held-out split is small (19 real rows, 18 addressed at the time of writing), so no hand-picked absolute
 rate is gated on it today. `gate.holdout.floor` (coverage, correct) switches on with n: from `ci_min_addressed` rows the split fails when the

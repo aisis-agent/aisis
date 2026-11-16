@@ -13,6 +13,8 @@ Fail-open: a grammar that cannot be loaded, an executor that raises, or a mode o
 """
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 import logging
 import random
@@ -25,7 +27,8 @@ from typing import Any, Awaitable, Callable
 from calc import evaluate as calc_evaluate
 from intent_grammar import Decision, Grammar
 from intent_grammar.grammar import load, render_reply
-from intent_grammar.timewords import duration_ru, plural
+from intent_grammar.timewords import plural
+from timers import duration_accusative, left_text
 import voice_skills
 
 LOG = logging.getLogger("aisis.intent")
@@ -44,7 +47,9 @@ ADAPTER_EXECUTORS = frozenset(("clock.say", "clock.date", "dialog.repeat_last", 
 VOLUME_EXECUTORS = frozenset(("speaker.volume", "speaker.volume_delta"))
 FALLBACK_BAND = -1             # intents with priority below zero are the catch-alls: they read what the skills left
 CLARIFY_WINDOW_S = 30.0        # how long a clarification question waits for its answer
-ACTION_DEDUPE_S = 5.0          # the same timer or Home Assistant action inside this window is not run twice
+START_DEDUPE_S = 5.0           # the same timer or alarm START inside this window is not run twice (hook and turn can both carry it)
+DEDUPED_EXECUTORS = frozenset(("timer.start", "alarm.set"))   # the only actions a second delivery of one phrase can repeat
+CANCEL_EXECUTORS = frozenset(("timer.cancel", "alarm.cancel"))
 
 
 @dataclass
@@ -80,8 +85,9 @@ def date_text(now: datetime) -> str:
 
 def volume_from(decision: Decision) -> dict[str, float] | None:
     """The overlay's volume contract (`target` 0..1 of full scale, signed `steps`, signed `deltaLevels` on the 0..10 scale)
-    from the grammar's `speaker.volume` args: exactly one of `step` (+-1), `level` (0..10) or `percent` (0..100). The unit
-    is never guessed from the size of a number; an action that breaks the contract does nothing."""
+    from the grammar's volume args. `speaker.volume`: exactly one of `step` (+-1), `level` (0..10) or `percent` (0..100).
+    `speaker.volume_delta`: `direction` (+-1) and exactly one of `levels` (1..10) or `percent` (1..100). The unit is never
+    guessed from the size of a number; an action that breaks the contract does nothing."""
     args = (decision.action or {}).get("args") or {}
     if decision.action and decision.action["executor"] == "speaker.volume":
         given = {key: args[key] for key in ("step", "level", "percent") if args.get(key) is not None}
@@ -94,11 +100,15 @@ def volume_from(decision: Decision) -> dict[str, float] | None:
             return {"steps": float(value)}
         scale = 10 if key == "level" else 100
         return {"target": value / scale} if 0 <= value <= scale else None
-    delta = args.get("delta") or {}
-    amount = delta.get("amount")
-    if not isinstance(amount, (int, float)) or args.get("direction") not in (-1, 1):
+    given = {key: args[key] for key in ("levels", "percent") if args.get(key) is not None}
+    if len(given) != 1 or args.get("direction") not in (-1, 1):
         return None
-    levels = amount / 10 if delta.get("unit") == "процент" else amount
+    (key, amount), = given.items()
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        return None
+    if not 1 <= amount <= (10 if key == "levels" else 100):
+        return None
+    levels = amount / 10 if key == "percent" else amount
     return {"deltaLevels": args["direction"] * float(levels)}
 
 
@@ -116,11 +126,13 @@ class IntentRouter:
     last_reprompt: dict[str, float] = field(default_factory=dict)
     stats: dict[str, int] = field(default_factory=dict)
     pending: dict[str, tuple[str, float]] = field(default_factory=dict)             # station -> (clarification phrase, when)
-    recent_actions: dict[tuple[str, str], tuple[float, str]] = field(default_factory=dict)
+    recent_starts: dict[tuple[str, str], tuple[float, str]] = field(default_factory=dict)   # timer/alarm start -> (when, reply)
+    starting: dict[tuple[str, str], asyncio.Task[str | None]] = field(default_factory=dict)  # starts in flight
 
     # ── pure classification (the back-test measures this) ───────────────────
-    def classify(self, text: str, phase: str | None = None) -> Decision | None:
-        """phase="pre": only what may answer before the quasar container's own handlers; None: everything."""
+    def classify(self, text: str, phase: str | None = None, *, fallback: bool = True) -> Decision | None:
+        """phase="pre": only what may answer before the quasar container's own handlers; None: everything.
+        `fallback=False` keeps the catch-alls (priority < 0) out, whatever the router's `catchall` switch says."""
         if phase == "pre":
             return self.grammar.decide(text, phase="pre")
         decision = self.grammar.decide(text, min_priority=0)
@@ -137,7 +149,49 @@ class IntentRouter:
             return Decision(intent="skill.weather", tier="query", slots={"mode": mode},
                             action={"executor": "skill.weather", "args": {"mode": mode}}, reply=None,
                             labels=("WEATHER", "weather_time"), confidence=1.0, fuzzy=False, pattern=-1, text=text)
-        return self.grammar.decide(text, max_priority=FALLBACK_BAND) if self.catchall else None
+        return self.grammar.decide(text, max_priority=FALLBACK_BAND) if self.catchall and fallback else None
+
+    def executable(self, decision: Decision, *, via_quasar: bool, station: str | None = None) -> bool:
+        """Whether `route()` acts on the decision (speaks, runs an executor, hands a volume change to the overlay) instead of
+        declining it with `none`. The one check the runtime and the back-test share, so a decision the runtime would decline
+        (a quasar-owned executor, a guess that needs the owner's «да», an executor that is not configured) is not counted
+        as handled. A reprompt inside its cooldown and an executor that fails at run time are not known here."""
+        if decision.parts:
+            return all(self._clause_executable(part, station) for part in decision.parts)
+        if decision.tier in ("drop", "canned", "reprompt", "clarify"):
+            return True
+        if decision.tier == "confirm" or decision.fuzzy:
+            return False
+        return self._executes(decision, via_quasar, station)
+
+    def _clause_executable(self, part: Decision, station: str | None) -> bool:
+        """One clause of a compound: the adapter must be able to answer it itself, the quasar layer takes the whole utterance otherwise."""
+        if part.tier not in ("execute", "query", "canned") or part.fuzzy:
+            return False
+        if part.tier == "canned":
+            return True
+        return (part.action or {}).get("executor") in ADAPTER_EXECUTORS and self._executes(part, False, station)
+
+    def _executes(self, decision: Decision, via_quasar: bool, station: str | None) -> bool:
+        action = decision.action or {}
+        executor = action.get("executor")
+        if executor in VOLUME_EXECUTORS:
+            return via_quasar and volume_from(decision) is not None
+        if executor == "dialog.end":
+            return via_quasar
+        if executor == "music.play":
+            return not (action.get("args") or {}).get("query") and self.skills is not None
+        if executor not in ADAPTER_EXECUTORS:
+            return False
+        if executor.startswith(("timer.", "alarm.")):
+            return self.timers is not None
+        if executor.startswith("ha."):
+            return self.ha is not None
+        if executor == "skill.weather":
+            return self.skills is not None
+        if executor == "dialog.repeat_last":
+            return station is None or station in self.last_reply
+        return True
 
     # ── execution ───────────────────────────────────────────────────────────
     def shadow(self, text: str, phase: str | None = None) -> Route:
@@ -158,27 +212,39 @@ class IntentRouter:
             return None
         return decision, joined
 
-    async def _once(self, executor: str, args: dict, run: Callable[[], Awaitable[str | None]], intent: str) -> Route:
-        """Timer and Home Assistant actions run once per ACTION_DEDUPE_S: the quasar hook and the speaker's own turn can carry the
-        same phrase, and a second «таймер на пять минут» must not start a second timer."""
+    async def _start_once(self, executor: str, args: dict, run: Callable[[], Awaitable[str | None]]) -> str | None:
+        """A timer or alarm start runs once per START_DEDUPE_S: the quasar hook and the speaker's own turn can carry the same
+        phrase, and a second «таймер на пять минут» must not start a second timer. A duplicate that arrives while the first is
+        still running waits for it; only a reply that was spoken is remembered, a failure is never replayed."""
         key = (executor, json.dumps(args, sort_keys=True, default=str))
-        now = self.monotonic()
-        done = self.recent_actions.get(key)
-        if done is not None and now - done[0] <= ACTION_DEDUPE_S:
-            text = done[1]
-        else:
-            text = await run()
-            if text is None:
-                return NONE
-            self.recent_actions = {k: v for k, v in self.recent_actions.items() if now - v[0] <= ACTION_DEDUPE_S}
-            self.recent_actions[key] = (now, text)
-        return Route("reply", text, intent=intent, source="grammar")
+        done = self.recent_starts.get(key)
+        if done is not None and self.monotonic() - done[0] <= START_DEDUPE_S:
+            return done[1]
+        task = self.starting.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self._remember_start(key, run))
+            self.starting[key] = task
+            task.add_done_callback(lambda finished, k=key: self._start_finished(k, finished))
+        return await asyncio.shield(task)
+
+    async def _remember_start(self, key: tuple[str, str], run: Callable[[], Awaitable[str | None]]) -> str | None:
+        text = await run()
+        if text is not None:
+            now = self.monotonic()
+            self.recent_starts = {k: v for k, v in self.recent_starts.items() if now - v[0] <= START_DEDUPE_S}
+            self.recent_starts[key] = (now, text)
+        return text
+
+    def _start_finished(self, key: tuple[str, str], task: asyncio.Task[str | None]) -> None:
+        self.starting.pop(key, None)
+        if not task.cancelled():
+            task.exception()   # the awaiters report it; a task nobody awaits any more must not log «never retrieved»
 
     async def route(self, station: str, text: str, *, phase: str | None = None, via_quasar: bool = False) -> Route:
         """Decide and execute one turn; Route("none") hands it on. `via_quasar`: the caller (quasar) runs volume itself."""
         started = time.perf_counter_ns()
         try:
-            decision = self.classify(text, phase)
+            decision = self.classify(text, phase, fallback=not self._asked_a_question(station))
             joined = self._joined_answer(station, text, phase)
             if joined is not None:
                 decision, text = joined
@@ -188,7 +254,7 @@ class IntentRouter:
         except Exception as err:  # fail open: the old path answers
             LOG.warning("intent_route_failed class=%s", type(err).__name__)
             route = NONE
-        route.ms = (time.perf_counter_ns() - started) // 1_000_000
+        route = dataclasses.replace(route, ms=(time.perf_counter_ns() - started) // 1_000_000)   # a copy: NONE is shared
         self.stats[route.source if route.kind != "none" else "none"] = self.stats.get(
             route.source if route.kind != "none" else "none", 0) + 1
         return route
@@ -197,6 +263,11 @@ class IntentRouter:
         """The last thing the speaker said to this station, for «повтори»."""
         if text:
             self.last_reply[station] = text
+
+    def _asked_a_question(self, station: str) -> bool:
+        """The speaker's last line to this station was a question: a short answer to it («да», «про собак») is the brain's
+        to continue, never a catch-all's «не расслышал»."""
+        return self.last_reply.get(station, "").rstrip().endswith("?")
 
     async def _run(self, station: str, decision: Decision, via_quasar: bool) -> Route:
         if decision.parts:
@@ -212,9 +283,18 @@ class IntentRouter:
             if not line:
                 return NONE
             return Route("reply", line, listen=tier in ("reprompt", "clarify"), intent=intent, source="grammar")
-        if tier == "confirm" or decision.fuzzy:
-            return NONE   # a guessed reading never acts without the owner's «да», which only the quasar layer can ask
+        if not self.executable(decision, via_quasar=via_quasar, station=station):
+            return self._declined(decision)
         return await self._execute(station, decision, via_quasar)
+
+    def _declined(self, decision: Decision) -> Route:
+        """A decision the adapter does not run. Unconfigured timers still answer honestly instead of leaving the brain to
+        pretend; everything else is the old path's (quasar container, brain)."""
+        executor = (decision.action or {}).get("executor") or ""
+        if executor.startswith(("timer.", "alarm.")) and self.timers is None and decision.tier in ("execute", "query") \
+                and not decision.fuzzy:
+            return Route("reply", TIMERS_OFF, intent=decision.intent, source="grammar")
+        return NONE
 
     def _reprompt_allowed(self, station: str) -> bool:
         now = self.monotonic()
@@ -224,13 +304,12 @@ class IntentRouter:
         return True
 
     async def _compound(self, station: str, decision: Decision, via_quasar: bool) -> Route:
+        """Every clause must be something the adapter runs, checked BEFORE the first one runs: a compound that ends in `none`
+        has changed nothing (a clause that fails while running can still leave the earlier ones done)."""
+        if not self.executable(decision, via_quasar=via_quasar, station=station):
+            return NONE
         lines: list[str] = []
         for part in decision.parts:
-            if part.tier not in ("execute", "query", "canned") or part.fuzzy:
-                return NONE
-            executor = (part.action or {}).get("executor")
-            if part.tier != "canned" and executor not in ADAPTER_EXECUTORS:
-                return NONE   # one clause belongs to the quasar layer: it takes the whole utterance, as before
             done = await self._run(station, part, via_quasar)
             if done.kind == "none":
                 return NONE
@@ -240,19 +319,17 @@ class IntentRouter:
 
     async def _execute(self, station: str, decision: Decision, via_quasar: bool) -> Route:
         action = decision.action or {}
-        executor = action.get("executor")
+        executor = action["executor"]
         args = action.get("args") or {}
         intent = decision.intent
         if executor in VOLUME_EXECUTORS:
-            volume = volume_from(decision) if via_quasar else None
-            return Route("volume", volume=volume, intent=intent, source="grammar") if volume else NONE
-        if executor == "dialog.end" and via_quasar:
+            return Route("volume", volume=volume_from(decision), intent=intent, source="grammar")
+        if executor == "dialog.end":
             return Route("dialog_end", intent=intent, source="grammar")
-        if executor not in ADAPTER_EXECUTORS and not (executor == "music.play" and not args.get("query")):
-            return NONE
-        if executor.startswith(("timer.", "alarm.", "ha.")):
-            return await self._once(executor, args, lambda: self._adapter_executor(station, decision, executor, args), intent)
-        text = await self._adapter_executor(station, decision, executor, args)
+        if executor in CANCEL_EXECUTORS:
+            self.recent_starts.clear()   # a start after a cancel is a new start, whatever was started a moment ago
+        run = lambda: self._adapter_executor(station, decision, executor, args)
+        text = await (self._start_once(executor, args, run) if executor in DEDUPED_EXECUTORS else run())
         if text is None:
             return NONE
         return Route("reply", text, intent=intent, source="skill" if intent.startswith("skill.") else "grammar")
@@ -261,9 +338,9 @@ class IntentRouter:
         if executor == "skill.math":
             return decision.slots["answer"]
         if executor == "skill.weather":
-            return await self.skills.weather(args["mode"]) if self.skills else None
+            return await self.skills.weather(args["mode"])
         if executor == "music.play":
-            return await self.skills.music() if self.skills else None
+            return await self.skills.music()
         if executor == "clock.say":
             return clock_text(self.now())
         if executor == "clock.date":
@@ -271,19 +348,17 @@ class IntentRouter:
         if executor == "dialog.repeat_last":
             return self.last_reply.get(station)
         if executor.startswith(("timer.", "alarm.")):
-            return await self._timer(decision, executor, args)
+            return await self._timer(executor, args)
         if executor.startswith("ha."):
-            return await self.ha.run(executor, args) if self.ha else None
+            return await self.ha.run(executor, args, station)
         return None
 
-    async def _timer(self, decision: Decision, executor: str, args: dict) -> str | None:
-        if self.timers is None:
-            return TIMERS_OFF
+    async def _timer(self, executor: str, args: dict) -> str | None:
         if executor == "timer.start":
             started = await self.timers.start(int(args["seconds"]), args.get("note"))
             if args.get("note"):
-                return f"Напомню через {duration_ru(started['seconds'])}."
-            return f"Таймер на {duration_ru(started['seconds'])}."
+                return f"Напомню через {duration_accusative(started['seconds'])}."
+            return f"Таймер на {duration_accusative(started['seconds'])}."
         if executor == "timer.cancel":
             count = await self.timers.cancel("timer")
             return "Таймер отменён." if count else "Таймеров нет."
@@ -291,7 +366,6 @@ class IntentRouter:
             left = self.timers.remaining()
             if not left:
                 return "Таймеров нет."
-            from timers import left_text
             return left_text(left[0]["left"]).capitalize() + "."
         if executor == "alarm.set":
             time_slot = args["time"]
@@ -313,16 +387,32 @@ def load_grammar(path: str | Path | None = None) -> Grammar | None:
         return None
 
 
+class _Bound:
+    """Stands for an executor binding (timers, Home Assistant, skills) when the back-test measures the route; never called."""
+    __slots__ = ()
+
+
+def measured_router(grammar: Grammar) -> IntentRouter:
+    """The router as a fully configured adapter runs it, for measurement only: timers, Home Assistant actions and the
+    skills are bound, so what the back-test counts as handled is what production answers when its configuration is complete."""
+    bound = _Bound()
+    return IntentRouter(grammar, skills=bound, timers=bound, ha=bound)
+
+
 def measured_route(router: IntentRouter, *, mode: str) -> Callable[[Any], Decision | None]:
     """The decision function of the back-test, by what is measured:
 
     adapter   the adapter route alone (grammar, arithmetic, weather, catch-alls)
     quasar    only what the quasar container already answered (the baseline before this work)
-    combined  the production route: grammar pre-phase -> quasar handlers -> grammar rest
+    combined  the production route: grammar pre-phase -> quasar handlers -> grammar rest. A grammar decision counts only
+              when the runtime would act on it there (`IntentRouter.executable`): a volume change in the turn path, an
+              unconfigured timer or a guess the owner has to confirm is not an answer. A phrase the quasar container
+              answered keeps the tier it answered with (the replay's `via`); its label and arguments are not observed, so
+              the row is judged on the tier alone.
     """
     def handled_by_quasar(row: Any) -> Decision:
-        return Decision(intent="quasar.handled", tier="execute", slots={}, action=None, reply=None,
-                        labels=(row.truth,), confidence=1.0, fuzzy=False, pattern=-1, text=row.text)
+        return Decision(intent="quasar.handled", tier=row.quasar_tier, slots={}, action=None, reply=None,
+                        labels=(), confidence=1.0, fuzzy=False, pattern=-1, text=row.text)
 
     def decide(row: Any) -> Decision | None:
         if mode == "adapter":
@@ -330,7 +420,10 @@ def measured_route(router: IntentRouter, *, mode: str) -> Callable[[Any], Decisi
         if mode == "quasar":
             return handled_by_quasar(row) if row.quasar else None
         early = router.classify(row.text, "pre")
-        if early is not None:
+        if early is not None and router.executable(early, via_quasar=True):
             return early
-        return handled_by_quasar(row) if row.quasar else router.classify(row.text)
+        if row.quasar:
+            return handled_by_quasar(row)
+        late = router.classify(row.text)
+        return late if late is not None and router.executable(late, via_quasar=False) else None
     return decide

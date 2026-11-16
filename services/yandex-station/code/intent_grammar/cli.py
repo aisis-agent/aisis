@@ -101,7 +101,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     decide = None
     if args.route != "grammar":
         import intent_route  # the adapter's own route (grammar + arithmetic + weather skills); lives in code/
-        decide = intent_route.measured_route(intent_route.IntentRouter(grammar), mode=args.route)
+        decide = intent_route.measured_route(intent_route.measured_router(grammar), mode=args.route)
     destination = Path(args.out).expanduser() if args.out else backtest.archive_path()
     # compare -> save -> promote is one step under the baseline lock, so two runs cannot interleave their baselines
     with contextlib.nullcontext() if args.no_latest else backtest.baseline_lock():
@@ -110,12 +110,16 @@ def cmd_backtest(args: argparse.Namespace) -> int:
                                        decide=decide, route=args.route, require_baseline=args.gate and not args.init_baseline)
         if args.init_baseline:
             if report["baseline"]["usable"]:
-                print("--init-baseline refused: a compatible baseline exists; every row is compared with it", file=sys.stderr)
-                return 2
-            # an explicit start (first run of a route) or rebaseline: absolute checks only, the reason travels with the report
-            report = backtest.build_report(grammar, rows, manifest, include_text=not args.no_text, previous=None,
-                                           decide=decide, route=args.route)
-            report["baseline"]["init_reason"] = args.init_baseline
+                # a compatible baseline: only the owner's rebaseline of lost or relabelled rows is accepted (regressions still fail)
+                if not backtest.accept_rebaseline(report, grammar, args.init_baseline):
+                    print("--init-baseline refused: a compatible baseline exists and no row was lost or relabelled; "
+                          "every row is compared with it", file=sys.stderr)
+                    return 2
+            else:
+                # an explicit start (first run of a route) or rebaseline: absolute checks only, the reason travels with the report
+                report = backtest.build_report(grammar, rows, manifest, include_text=not args.no_text, previous=None,
+                                               decide=decide, route=args.route)
+                report["baseline"]["init_reason"] = args.init_baseline
         promote = not args.no_latest and report["gate"]["ok"]
         backtest.save_report(report, destination, latest=backtest.reports_dir() / "latest.json" if promote else None)
     for line in backtest.summary_lines(report):
@@ -162,8 +166,10 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--misses", action="store_true", help="print the dev-split rows the grammar does not handle")
     bt.add_argument("--gate", action="store_true", help="exit 1 when the KPI gate or a regression check fails; with no usable baseline "
                     "(none yet, other route or split definition) that is itself a failure unless --init-baseline is given")
-    bt.add_argument("--init-baseline", metavar="REASON", help="the reason for starting without a previous report (the first run of a route, "
-                    "or an explicit rebaseline); recorded in the report, refused when a compatible latest.json exists")
+    bt.add_argument("--init-baseline", metavar="REASON", help="the owner's explicit start or rebaseline, with its reason (recorded in the "
+                    "report): the first run of a route, an unusable baseline, or a compatible baseline whose rows were lost or relabelled "
+                    "(the counts are recorded too; regressions still fail). Refused when a compatible baseline lost and relabelled nothing. "
+                    "The nightly job never passes it")
     bt.set_defaults(run=cmd_backtest)
     return parser
 

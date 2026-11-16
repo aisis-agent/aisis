@@ -1,6 +1,7 @@
 import copy
 import json
 import unittest
+from unittest import mock
 
 import ha_actions
 from ha_actions import HaActions
@@ -37,6 +38,25 @@ AREA_ENTITIES = {
     "Студия": ["light.studio_plug"],
     "Прихожая": [],
 }
+# One player per station, named after its device id, in the HA area of the room the speaker stands in (the quasar layer's
+# speaker-room fixture): the AISIS player of the Studio speaker wins over the Yandex integration's one in another area.
+LIVING, STUDIO, BEDROOM, SECOND_FLOOR, CORNER = "M0011HM00Z86HG", "M00ZRW3008RAJG", "M10DST310HXNPK", "M0FLOOR2", "M0CORNER0"
+PLAYER_AREAS = {
+    "media_player.yandex_station_m0011hm00z86hg": "Гостиная",
+    "media_player.aisis_speaker_m00zrw3008rajg": "Студия",
+    "media_player.yandex_station_m00zrw3008rajg": "Кухня",
+    "media_player.yandex_station_m10dst310hxnpk": "Спальня",
+    "media_player.yandex_station_m0floor2": "Второй этаж",
+    "media_player.yandex_station_m0corner0": "Угол",
+}
+
+
+def registry_tsv():
+    """Tab-separated entity id, friendly name, area: for every entity that has a device (the registry template's answer)."""
+    areas = dict(PLAYER_AREAS)
+    for area, ids in AREA_ENTITIES.items():
+        areas.update({entity_id: area for entity_id in ids})
+    return "".join(f"{entity_id}\t{entity_id}\t{area}\n" for entity_id, area in areas.items())
 
 
 class Now:
@@ -48,10 +68,11 @@ class Now:
 
 
 class FakeHa:
-    def __init__(self, states=None, service_status=200, template_as_text=True):
+    def __init__(self, states=None, service_status=200, template_as_text=True, outage=False):
         self.states = copy.deepcopy(STATES if states is None else states)
         self.service_status = service_status
         self.template_as_text = template_as_text
+        self.outage = outage            # hacli answers every template with its cached registry TSV (status 200)
         self.gets = 0
         self.template_posts = 0
         self.services: list[tuple[str, dict]] = []
@@ -64,6 +85,8 @@ class FakeHa:
     async def post(self, path, body):
         if path == "/api/template":
             self.template_posts += 1
+            if self.outage or "area_entities" not in body["template"]:
+                return 200, registry_tsv()
             area = body["template"].split("'")[1]
             ids = AREA_ENTITIES.get(area, [])
             return 200, (json.dumps(ids) if self.template_as_text else ids)
@@ -71,11 +94,18 @@ class FakeHa:
         return self.service_status, None
 
 
+class LivingRoomActions(HaActions):
+    """HaActions as the commands of the living-room speaker reach it (an explicit `station` still wins)."""
+
+    async def run(self, executor, args, station=LIVING):
+        return await super().run(executor, args, station)
+
+
 class Base(unittest.IsolatedAsyncioTestCase):
     def make(self, **kw):
         self.ha = FakeHa(**kw)
         self.now = Now()
-        self.actions = HaActions(self.ha.get, self.ha.post, ttl=60.0, clock=self.now)
+        self.actions = LivingRoomActions(self.ha.get, self.ha.post, ttl=60.0, clock=self.now)
         return self.actions
 
     def svc(self):
@@ -309,7 +339,7 @@ class Failures(Base):
         async def post(path, body):
             return 500, None
 
-        a = HaActions(FakeHa().get, post)
+        a = LivingRoomActions(FakeHa().get, post)
         self.assertEqual(await a.run("ha.climate", {"room": None, "mode": "heat", "temperature": 25}),
                          ha_actions.REPLY_FAILED)
 
@@ -323,12 +353,114 @@ class Cache(Base):
         a = self.make()
         await a.run("ha.light_brightness", {"percent": 10, "room": None})
         await a.run("ha.light_brightness", {"percent": 20, "room": None})
-        self.assertEqual((self.ha.gets, self.ha.template_posts), (1, 1))
+        self.assertEqual((self.ha.gets, self.ha.template_posts), (1, 2))      # the room of the speaker, then the area's entities
         await a.run("ha.light_brightness", {"percent": 20, "room": "kitchen"})
-        self.assertEqual((self.ha.gets, self.ha.template_posts), (1, 2))
+        self.assertEqual((self.ha.gets, self.ha.template_posts), (1, 3))
         self.now.t += 61
         await a.run("ha.light_brightness", {"percent": 30, "room": None})
-        self.assertEqual((self.ha.gets, self.ha.template_posts), (2, 3))
+        self.assertEqual((self.ha.gets, self.ha.template_posts), (2, 5))
+
+
+class SpeakerRoom(Base):
+    """A command that names no room is about the room of the speaker that heard it (Home Assistant's area of the station's player)."""
+
+    async def heard_by(self, station, executor, args):
+        return await self.actions.run(executor, args, station)
+
+    async def test_colour_and_brightness_act_in_the_speakers_room_not_the_living_room(self):
+        self.make()
+        self.assertEqual(await self.heard_by(BEDROOM, "ha.light_color", {"color": "warm", "room": None}), "Тёплый свет.")
+        self.assertEqual(self.svc(), [("light/turn_on", {"entity_id": "light.bedroom_lamp", "color_temp_kelvin": 2700})])
+        self.ha.services.clear()
+        self.assertEqual(await self.heard_by(SECOND_FLOOR, "ha.light_color", {"color": "red", "room": None}), "Красный свет.")
+        self.assertEqual(self.svc(), [("light/turn_on", {"entity_id": "light.up_lamp", "color_name": "red"})])
+        self.ha.services.clear()
+        self.assertEqual(await self.heard_by(STUDIO, "ha.light_brightness", {"percent": 50, "room": None}),
+                         "Эта лампа не регулируется по яркости.")          # the Studio lamp, not the living-room ones
+        self.assertEqual(self.ha.services, [])
+
+    async def test_the_climate_of_the_speakers_room_and_its_absence(self):
+        self.make()
+        self.assertEqual(await self.heard_by(SECOND_FLOOR, "ha.climate_delta", {"room": None, "direction": 1, "delta": None}),
+                         "Делаю теплее, 23 градуса.")
+        self.assertEqual([body["entity_id"] for _, body in self.svc()], ["climate.kondei_2", "climate.kondei_2"])
+        self.ha.services.clear()
+        self.assertEqual(await self.heard_by(BEDROOM, "ha.climate_delta", {"room": None, "direction": 1, "delta": None}),
+                         "В комнате «Спальня» нет кондиционера.")
+        self.assertEqual(self.ha.services, [])
+
+    async def test_the_own_player_of_the_speaker_decides_its_room(self):
+        self.make()
+        # the Studio speaker also has a Yandex-integration player in the kitchen: the AISIS player (Студия) wins
+        self.assertEqual(await self.heard_by(STUDIO, "ha.light_color", {"color": "red", "room": None}), "Эта лампа не меняет цвет.")
+        self.assertEqual(await self.heard_by(CORNER, "ha.light_color", {"color": "red", "room": None}), "В комнате «Угол» нет света.")
+        self.assertEqual(self.ha.services, [])
+
+    async def test_a_room_that_was_said_beats_the_speakers_room(self):
+        self.make()
+        await self.heard_by(BEDROOM, "ha.light_color", {"color": "warm", "room": "living"})
+        self.assertEqual([body["entity_id"] for _, body in self.svc()], ["light.living_lamp", "light.living_strip"])
+
+    async def test_a_speaker_whose_room_is_unknown_is_asked_never_guessed(self):
+        self.make()
+        for station in (None, "", "quasar", "M0UNKNOWN0"):
+            reply = await self.heard_by(station, "ha.light_color", {"color": "red", "room": None})
+            self.assertEqual(reply, ha_actions.REPLY_WHICH_ROOM, station)
+        self.assertEqual(self.ha.services, [])
+        self.assertEqual(self.ha.gets, 0)
+
+
+class Outage(Base):
+    async def test_the_whole_command_is_queued_not_only_its_first_call(self):
+        a = self.make(service_status=202)
+        reply = await a.run("ha.climate", {"room": "living", "mode": "heat", "temperature": 30})
+        self.assertEqual(reply, ha_actions.REPLY_QUEUED)
+        self.assertEqual(self.svc(), [
+            ("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "heat"}),
+            ("climate/set_temperature", {"entity_id": "climate.kondei_1", "temperature": 30}),
+        ])
+        self.ha.services.clear()
+        self.assertEqual(await a.run("ha.light_brightness", {"percent": 50, "room": "living"}), ha_actions.REPLY_QUEUED)
+        self.assertEqual([body["entity_id"] for _, body in self.svc()], ["light.living_lamp", "light.living_strip"])
+
+    async def test_the_cached_registry_hacli_serves_during_an_outage_still_reaches_the_queue(self):
+        a = self.make(service_status=202, outage=True)      # every template answers with the tab-separated registry, status 200
+        reply = await a.run("ha.light_brightness", {"percent": 50, "room": None})
+        self.assertEqual(reply, ha_actions.REPLY_QUEUED)
+        self.assertEqual([body["entity_id"] for _, body in self.svc()], ["light.living_lamp", "light.living_strip"])
+
+    async def test_a_failure_after_a_queued_call_is_still_a_failure(self):
+        a = self.make()
+        statuses = iter([202, 500])
+
+        async def post(path, body):
+            if path == "/api/template":
+                return await self.ha.post(path, body)
+            return next(statuses), None
+
+        a = LivingRoomActions(self.ha.get, post, ttl=60.0, clock=self.now)
+        self.assertEqual(await a.run("ha.light_brightness", {"percent": 50, "room": "living"}), ha_actions.REPLY_FAILED)
+
+
+class EquipmentLights(Base):
+    JUNK = [light("light.k1se_85b6_light", ["brightness"]), light("light.snapmaker_u1_led_cavity_led", ["brightness"]),
+            light("light.studio_dim", ["brightness"])]
+
+    def studio(self, ids):
+        patcher = mock.patch.dict(AREA_ENTITIES, {"Студия": ids})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return self.make(states=copy.deepcopy(STATES) + copy.deepcopy(self.JUNK))
+
+    async def test_printer_lights_are_never_part_of_the_room_lighting(self):
+        a = self.studio(["light.k1se_85b6_light", "light.snapmaker_u1_led_cavity_led", "light.studio_dim"])
+        self.assertEqual(await a.run("ha.light_brightness", {"percent": 40, "room": "studio"}), "Яркость 40 процентов.")
+        self.assertEqual(self.svc(), [("light/turn_on", {"entity_id": "light.studio_dim", "brightness_pct": 40})])
+
+    async def test_a_room_with_only_equipment_lights_has_no_light(self):
+        a = self.studio(["light.k1se_85b6_light", "light.snapmaker_u1_led_cavity_led"])
+        self.assertEqual(await a.run("ha.light_brightness", {"percent": 40, "room": "studio"}), "В комнате «Студия» нет света.")
+        self.assertEqual(self.ha.services, [])
 
 
 if __name__ == "__main__":

@@ -1,17 +1,19 @@
 """The adapter's grammar route: classification, execution, the /intent/decide and /asr/correct endpoints."""
 import asyncio
 import dataclasses
+import itertools
 import json
 import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
 import intent_route
-from adapter import Adapter
+from adapter import ERROR_REPLY, Adapter
+from intent_grammar import backtest
 from intent_grammar.backtest import Row
 
 NOW = datetime(2026, 11, 16, 17, 5, tzinfo=timezone.utc)
@@ -37,13 +39,33 @@ class FakeTimers:
         return [{"id": "t1", "left": 270, "note": None}]
 
 
-class FakeHa:
-    def __init__(self):
-        self.calls = []
+class StatefulTimers(FakeTimers):
+    """Remembers what is running: a cancel counts and clears the active timers."""
 
-    async def run(self, executor, args):
+    def __init__(self):
+        super().__init__()
+        self.active = 0
+
+    async def start(self, seconds, note=None):
+        self.active += 1
+        return await super().start(seconds, note)
+
+    async def cancel(self, kind="timer"):
+        self.calls.append(("cancel", kind))
+        count, self.active = self.active, 0
+        return count
+
+
+class FakeHa:
+    def __init__(self, reply="Готово."):
+        self.calls = []
+        self.stations = []
+        self.reply = reply
+
+    async def run(self, executor, args, station=None):
         self.calls.append((executor, args))
-        return "Готово."
+        self.stations.append(station)
+        return self.reply
 
 
 def router(**kwargs):
@@ -93,7 +115,7 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(quiet.classify("который час").intent, "time.now")
 
     def test_measured_route_combines_pre_quasar_and_rest(self):
-        decide = intent_route.measured_route(self.router, mode="combined")
+        decide = intent_route.measured_route(intent_route.measured_router(self.router.grammar), mode="combined")
         row = lambda text, quasar: Row("r", text, "LIGHT_CMD", "real", "dev", quasar)
         self.assertEqual(decide(row("который час", True)).intent, "time.now")
         self.assertEqual(decide(row("выключи ночник", True)).intent, "quasar.handled")
@@ -102,6 +124,40 @@ class ClassifyTests(unittest.TestCase):
         baseline = intent_route.measured_route(self.router, mode="quasar")
         self.assertEqual(baseline(row("выключи ночник", True)).intent, "quasar.handled")
         self.assertIsNone(baseline(row("который час", False)))
+
+    def test_the_measurement_counts_only_what_the_runtime_acts_on(self):
+        decide = intent_route.measured_route(intent_route.measured_router(self.router.grammar), mode="combined")
+        row = lambda text, quasar=False: Row("r", text, "VOLUME", "real", "dev", quasar)
+        self.assertIsNone(decide(row("громкость на пять")))          # the turn cannot change the volume: the adapter returns none
+        self.assertEqual(decide(row("прибавь громкость на два")).intent, "volume.delta_up")   # the hook can: it runs before the quasar layer
+        self.assertIsNone(decide(row("выключи свет на кухне")))      # a quasar-owned switch that the quasar layer did not answer
+        self.assertIsNone(decide(row("Ключи гирлянду.")))            # a guess waits for the owner's «да»: the turn goes to the brain
+        self.assertEqual(decide(row("какая погода")).intent, "skill.weather")
+        # a router without timers, Home Assistant or skills declines those decisions at run time: they are no answers
+        bare = intent_route.measured_route(self.router, mode="combined")
+        self.assertIsNone(bare(row("поставь таймер на пять минут")))
+        self.assertIsNone(bare(row("сделай теплее")))
+        self.assertIsNone(bare(row("какая погода")))
+        self.assertEqual(bare(row("который час")).intent, "time.now")
+
+    def test_a_replay_hit_keeps_the_tier_the_quasar_layer_answered_with(self):
+        decide = intent_route.measured_route(intent_route.measured_router(self.router.grammar), mode="combined")
+        grammar = self.router.grammar
+        for via, tier, completed in (("fast-execute", "execute", True), ("fast-clarify", "clarify", False),
+                                     ("fast-confirm", "confirm", False), ("fast-query", "query", True), ("media-key", "execute", True)):
+            row = Row("r", "громкость", "VOLUME", "real", "dev", True, quasar_via=via)
+            decision = decide(row)
+            self.assertEqual((decision.intent, decision.tier, decision.labels), ("quasar.handled", tier, ()), via)
+            self.assertEqual(backtest.classify(row, decision, grammar), "correct", via)      # judged on the tier, not on a copied label
+            self.assertEqual(backtest.metrics(backtest.evaluate(grammar, [row], decide), grammar)["completed"], int(completed), via)
+
+    def test_a_replay_hit_is_judged_on_its_tier_against_the_corpus_expectation(self):
+        grammar = self.router.grammar
+        decide = intent_route.measured_route(intent_route.measured_router(grammar), mode="combined")
+        expecting = lambda tier: Row("r", "освещение 30 процентов", "light", "synthetic", "dev", True,
+                                     expect={"kind": "cmd", "domain": "light", "tier": tier}, quasar_via="fast-confirm")
+        self.assertEqual(backtest.classify(expecting("confirm"), decide(expecting("confirm")), grammar), "correct")
+        self.assertEqual(backtest.classify(expecting("execute"), decide(expecting("execute")), grammar), "wrong")
 
 
 class RouteTests(unittest.IsolatedAsyncioTestCase):
@@ -143,21 +199,67 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await r.route("st", "который час")).intent, "time.now")
         self.assertEqual(timers.calls, [])
 
-    async def test_the_same_timer_or_home_assistant_action_runs_once_in_five_seconds(self):
-        timers, ha = FakeTimers(), FakeHa()
+    async def test_the_same_timer_start_runs_once_in_five_seconds(self):
+        timers = FakeTimers()
         clock = [100.0]
-        r = router(timers=timers, ha=ha, monotonic=lambda: clock[0])
+        r = router(timers=timers, monotonic=lambda: clock[0])
         first = await r.route("quasar", "поставь таймер на пять минут")
         clock[0] += 2.0
         second = await r.route("st", "поставь таймер на пять минут")
         self.assertEqual((first.text, second.text), ("Таймер на 5 минут.", "Таймер на 5 минут."))
         self.assertEqual(timers.calls, [("start", 300, None)])
-        await r.route("st", "сделай теплее")
-        await r.route("quasar", "сделай теплее")
-        self.assertEqual(len(ha.calls), 1)
         clock[0] += 6.0
         await r.route("st", "поставь таймер на пять минут")
         self.assertEqual(len(timers.calls), 2)
+
+    async def test_nothing_but_a_timer_start_is_deduplicated(self):
+        timers, ha = StatefulTimers(), FakeHa()
+        r = router(timers=timers, ha=ha, monotonic=lambda: 100.0)      # the clock never moves: all of it inside the window
+        for _ in range(2):
+            await r.route("st", "сделай теплее")
+        self.assertEqual(len(ha.calls), 2)                              # a repeated «теплее» is a second step
+        self.assertEqual([(await r.route("st", text)).text for text in (
+            "поставь таймер на пять минут", "отмени таймер", "поставь таймер на пять минут", "отмени таймер", "отмени таймер")],
+            ["Таймер на 5 минут.", "Таймер отменён.", "Таймер на 5 минут.", "Таймер отменён.", "Таймеров нет."])
+        self.assertEqual(timers.calls, [("start", 300, None), ("cancel", "timer"), ("start", 300, None), ("cancel", "timer"),
+                                        ("cancel", "timer")])
+        self.assertEqual(timers.active, 0)
+
+    async def test_a_failed_or_queued_home_assistant_reply_is_not_replayed(self):
+        ha = FakeHa(reply="Не удалось выполнить команду умного дома.")
+        r = router(ha=ha, monotonic=lambda: 100.0)
+        await r.route("st", "сделай теплее")
+        ha.reply = "Готово."
+        self.assertEqual((await r.route("st", "сделай теплее")).text, "Готово.")
+        self.assertEqual(len(ha.calls), 2)
+
+    async def test_a_failed_timer_start_is_not_remembered(self):
+        class Flaky(FakeTimers):
+            fail = True
+
+            async def start(self, seconds, note=None):
+                if self.fail:
+                    raise OSError("disk full")
+                return await super().start(seconds, note)
+        timers = Flaky()
+        r = router(timers=timers, monotonic=lambda: 100.0)
+        self.assertEqual((await r.route("st", "поставь таймер на пять минут")).kind, "none")
+        timers.fail = False
+        self.assertEqual((await r.route("st", "поставь таймер на пять минут")).text, "Таймер на 5 минут.")
+        self.assertEqual(timers.calls, [("start", 300, None)])
+
+    async def test_concurrent_duplicates_of_a_timer_start_run_once(self):
+        class Slow(FakeTimers):
+            async def start(self, seconds, note=None):
+                for _ in range(5):
+                    await asyncio.sleep(0)          # the first start is still running when the duplicate arrives
+                return await super().start(seconds, note)
+        timers = Slow()
+        r = router(timers=timers)
+        first, second = await asyncio.gather(r.route("quasar", "поставь таймер на пять минут"),
+                                             r.route("st", "поставь таймер на пять минут"))
+        self.assertEqual((first.text, second.text), ("Таймер на 5 минут.", "Таймер на 5 минут."))
+        self.assertEqual(timers.calls, [("start", 300, None)])
 
     async def test_shadow_classifies_and_executes_nothing(self):
         timers = FakeTimers()
@@ -208,6 +310,14 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         off = router()
         self.assertEqual((await off.route("st", "поставь таймер на пять минут")).text, intent_route.TIMERS_OFF)
 
+    async def test_the_confirmation_says_the_duration_in_the_accusative(self):
+        r = router(timers=FakeTimers(), monotonic=lambda: 100.0)
+        for text, want in (("поставь таймер на минуту", "Таймер на 1 минуту."),
+                           ("напомни через двадцать одну минуту выключить плиту", "Напомню через 21 минуту."),
+                           ("поставь таймер на час тридцать минут", "Таймер на 1 час 30 минут."),
+                           ("поставь таймер на двадцать две минуты", "Таймер на 22 минуты.")):
+            self.assertEqual((await r.route("st", text)).text, want, text)
+
     async def test_home_assistant_executors_need_a_home_assistant_binding(self):
         ha = FakeHa()
         r = router(ha=ha)
@@ -217,6 +327,22 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await r.route("st", "люстру белый цвет")).text, "Готово.")
         self.assertEqual(ha.calls[-1], ("ha.light_color", {"color": "white", "room": None}))
         self.assertEqual((await router().route("st", "кондиционер 23")).kind, "none")
+
+    async def test_a_home_assistant_command_carries_the_speaker_that_heard_it(self):
+        ha = FakeHa()
+        r = router(ha=ha)
+        await r.route("M00ZRW3008RAJG", "сделай свет красным")
+        await r.route("M10DST310HXNPK", "сделай теплее")
+        self.assertEqual(ha.stations, ["M00ZRW3008RAJG", "M10DST310HXNPK"])
+
+    async def test_degrees_are_the_ac_and_never_the_volume(self):
+        ha = FakeHa()
+        r = router(ha=ha)
+        self.assertEqual((await r.route("quasar", "прибавь два градуса", phase="pre", via_quasar=True)).kind, "none")
+        got = await r.route("st", "прибавь два градуса")
+        self.assertEqual((got.kind, got.text), ("reply", "Готово."))
+        self.assertEqual(ha.calls, [("ha.climate_delta", {"room": None, "direction": 1, "delta": {"amount": 2, "unit": "градус"}})])
+        self.assertEqual((await r.route("quasar", "прибавь на тридцать", phase="pre", via_quasar=True)).kind, "none")
 
     async def test_quasar_owned_decisions_are_not_executed_here(self):
         r = router()
@@ -266,9 +392,18 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         timers = FakeTimers()
         r = router(timers=timers)
         got = await r.route("st", "поставь таймер на пять минут и поставь таймер на минуту")
-        self.assertEqual((got.intent, got.text), ("compound", "Таймер на 5 минут. Таймер на 1 минута."))
-        mixed = await r.route("st", "поставь таймер на пять минут и выключи свет")   # one clause is the quasar layer's
-        self.assertEqual(mixed.kind, "none")
+        self.assertEqual((got.intent, got.text), ("compound", "Таймер на 5 минут. Таймер на 1 минуту."))
+
+    async def test_a_compound_with_a_clause_the_adapter_cannot_run_changes_nothing(self):
+        for text in ("поставь таймер на пять минут и выключи свет",     # one clause is the quasar layer's
+                     "поставь таймер на пять минут и сделай теплее"):    # Home Assistant is not bound
+            timers = FakeTimers()
+            mixed = await router(timers=timers).route("st", text)
+            self.assertEqual(mixed.kind, "none", text)
+            self.assertEqual(timers.calls, [], text)                    # nothing started before the answer was none
+        timers = FakeTimers()
+        self.assertEqual((await router(timers=timers, ha=FakeHa()).route("st", "поставь таймер на минуту и повтори")).kind, "none")
+        self.assertEqual(timers.calls, [])                              # «повтори» has nothing to repeat yet
 
     async def test_an_executor_error_fails_open(self):
         class Broken:
@@ -285,6 +420,38 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await r.route("st", "какая погода")).text, "Ясно, десять градусов.")
         self.assertEqual((await r.route("st", "включи музыку")).text, "Включаю.")
         skills.weather.assert_awaited_once_with("now")
+
+    async def test_a_short_reply_to_the_brains_own_question_is_not_a_reprompt(self):
+        r = router()
+        r.note_reply("st", "Рассказать подробнее?")
+        for text in ("да", "нет", "про собак", "ещё одну"):
+            self.assertEqual((await r.route("st", text)).kind, "none", text)      # the brain continues its own conversation
+        self.assertEqual(r.last_reprompt, {})                                       # and no «не расслышал» cooldown was spent
+        self.assertEqual((await r.route("st", "который час")).intent, "time.now")   # a real intent still answers
+        r.note_reply("st", "Сейчас 17 часов 5 минут.")
+        self.assertEqual((await r.route("st", "да")).intent, "asr.garbage_short")  # after a statement the reprompt is back
+        self.assertEqual((await r.route("st", "нет")).kind, "none")                 # the reprompt is said once a minute
+
+    async def test_the_shared_none_route_is_never_stamped(self):
+        counter = itertools.count(0, 3_000_000)
+        with patch.object(intent_route.time, "perf_counter_ns", lambda: next(counter)):
+            got = await router().route("st", "что такое фотосинтез")
+        self.assertEqual(got.kind, "none")
+        self.assertGreater(got.ms, 0)
+        self.assertEqual(intent_route.NONE.ms, 0)
+
+    def test_volume_delta_takes_a_direction_and_exactly_one_amount(self):
+        base = router().classify("громче")
+
+        def delta(**args):
+            return intent_route.volume_from(dataclasses.replace(base, action={"executor": "speaker.volume_delta", "args": args}))
+        self.assertEqual(delta(direction=1, levels=2, percent=None), {"deltaLevels": 2.0})
+        self.assertEqual(delta(direction=-1, levels=None, percent=20), {"deltaLevels": -2.0})
+        for bad in ({"direction": 1}, {"direction": 0, "levels": 2}, {"direction": 1, "levels": 2, "percent": 20},
+                    {"direction": 1, "levels": 11}, {"direction": 1, "levels": 0}, {"direction": 1, "percent": 101},
+                    {"direction": 1, "levels": True}, {"direction": 1, "delta": {"amount": 30, "unit": ""}}):
+            with self.subTest(args=bad):
+                self.assertIsNone(delta(**bad))
 
 
 class AdapterIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -321,6 +488,19 @@ class AdapterIntegrationTests(unittest.IsolatedAsyncioTestCase):
         adapter = await self.adapter()
         first = await self.spoken(adapter, "который час")
         self.assertEqual(await self.spoken(adapter, "повтори"), first)
+
+    async def test_a_rejected_turn_still_gets_its_error_reply(self):
+        adapter = await self.adapter()
+        for data in ({"text": "привет", "metadata": {"stationId": "other"}},                       # station not allowed
+                     {"text": "привет", "metadata": {}},                                             # no station
+                     {"text": "привет", "metadata": "oops"},                                         # metadata that is no mapping
+                     {"text": "привет", "isExternalEvent": True, "metadata": {"stationId": "st1"}}):
+            ws = AsyncMock()
+            ws.closed = False
+            await adapter._process_turn(ws, data)
+            self.assertEqual(ws.send_json.await_args.args[0]["data"]["text"], ERROR_REPLY, data)
+        adapter.turn.assert_not_awaited()
+        self.assertEqual(adapter.intents.last_reply, {})      # nothing was said to a station that was never accepted
 
     async def test_an_emergency_never_goes_to_the_brain(self):
         adapter = await self.adapter()

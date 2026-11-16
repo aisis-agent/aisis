@@ -1,10 +1,16 @@
 """Home Assistant executors for voice commands the quasar layer cannot parse (AC setpoints and deltas, light colour
 and brightness). Entities are resolved through HA areas, so a room never borrows a device from another room: when the
 room has no suitable entity the answer says so instead of acting elsewhere.
+
+A command without a room is about the room of the speaker that heard it. That room is read from Home Assistant the way
+the quasar overlay's speaker-room layer reads it (overlays/speaker-room): the area of the station's `media_player`
+entity, whose id ends in the station id; the adapter keeps no station table of its own. A station whose room Home
+Assistant does not tell is asked for the room, never guessed (the living room is no default).
 """
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Awaitable, Callable
 
@@ -16,7 +22,17 @@ AREAS = {
     "hall": "Прихожая",
     "upstairs": "Второй этаж",
 }
-DEFAULT_ROOM = "living"
+
+# Entity registry of the quasar layer and hacli (`entity \t friendly name \t area` per entity that has a device). hacli
+# answers this very template from its cache, with status 200, while Home Assistant is down.
+REGISTRY_TEMPLATE = (
+    "{% for e in states %}{% set d = device_id(e.entity_id) %}"
+    "{% if d %}{{ e.entity_id }}\t{{ e.attributes.friendly_name }}\t"
+    "{{ area_name(d) }}\n{% endif %}{% endfor %}"
+)
+OWN_PLAYER_PREFIX = "media_player.aisis_speaker_"   # the AISIS speaker's own player wins over the Yandex integration's one
+# Equipment lights (printers' LEDs) that are never part of «свет»: the same filter as the quasar layer's JUNK_LIGHT.
+JUNK_LIGHT = re.compile(r"(k1se|snapmaker|cavity)", re.IGNORECASE)
 
 HVAC_MODES = {"heat": "heat", "cool": "cool", "dry": "dry", "fan": "fan_only", "auto": "auto"}
 MODE_NAMES = {"heat": "обогрев", "cool": "охлаждение", "dry": "осушение", "fan": "вентиляция", "auto": "авто"}
@@ -28,6 +44,7 @@ COLOR_NAMES = {"white": "белый", "red": "красный", "blue": "сини
 KELVIN = {"warm": 2700, "cold": 6500, "white": 4000}
 COLOR_MODES = {"hs", "xy", "rgb", "rgbw", "rgbww"}
 
+REPLY_WHICH_ROOM = "В какой комнате? Назови комнату в команде."
 REPLY_UNKNOWN_ROOM = "Не знаю такую комнату."
 REPLY_UNKNOWN_COMMAND = "Не понял, что сделать."
 REPLY_NO_CLIMATE = "В комнате «{area}» нет кондиционера."
@@ -52,7 +69,7 @@ _UNAVAILABLE = ("unavailable", "unknown")
 
 
 class _Outcome(Exception):
-    """Abort a command with the sentence to speak (queued, failed)."""
+    """Abort a command with the sentence to speak (no such device, Home Assistant failed)."""
 
     def __init__(self, reply: str) -> None:
         super().__init__(reply)
@@ -83,6 +100,43 @@ def _num(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
+class _Command:
+    """The service calls of one voice command. hacli answers 202 when Home Assistant is down and it queued the call for the
+    recovery: the command goes on, so that every operation of it (all the entities, the mode and the setpoint) is queued."""
+
+    def __init__(self) -> None:
+        self.queued = False
+
+
+def _registry(body: Any) -> dict[str, str]:
+    """entity id -> area name from the tab-separated registry (`REGISTRY_TEMPLATE`); entities without an area are left out."""
+    if not isinstance(body, str):
+        return {}
+    areas: dict[str, str] = {}
+    for line in body.splitlines():
+        entity_id, _, rest = line.partition("\t")
+        area = rest.rpartition("\t")[2].strip()
+        if entity_id and area and area != "None":
+            areas[entity_id] = area
+    return areas
+
+
+def speaker_area(areas: dict[str, str], station: str | None) -> str | None:
+    """The HA area of the station `station` (speaker-room.ts `speakerArea`): the area of its own player entity, else of any
+    player whose id ends in `_<station id>`; None when Home Assistant has no such player or it has no area."""
+    ident = (station or "").strip().lower()
+    if not ident:
+        return None
+    other: str | None = None
+    for entity_id, area in areas.items():
+        if not entity_id.startswith("media_player.") or not entity_id.endswith("_" + ident):
+            continue
+        if entity_id.startswith(OWN_PLAYER_PREFIX):
+            return area
+        other = other or area
+    return other
+
+
 class HaActions:
     def __init__(self, get_json: Callable[[str], Awaitable[Any]],
                  post_json: Callable[[str, dict], Awaitable[tuple[int, Any]]],
@@ -93,8 +147,10 @@ class HaActions:
         self._clock = clock
         self._states: tuple[float, dict[str, dict]] | None = None
         self._areas: dict[str, tuple[float, list[str]]] = {}
+        self._registry: tuple[float, dict[str, str]] | None = None
 
-    async def run(self, executor: str, args: dict) -> str:
+    async def run(self, executor: str, args: dict, station: str | None = None) -> str:
+        """`station`: the speaker that heard the command, for a command that names no room."""
         handler = {
             "ha.climate": self._climate,
             "ha.climate_delta": self._climate_delta,
@@ -103,15 +159,27 @@ class HaActions:
         }.get(executor)
         if handler is None:
             return REPLY_UNKNOWN_COMMAND
-        area = AREAS.get(args.get("room") or DEFAULT_ROOM)
-        if area is None:
-            return REPLY_UNKNOWN_ROOM
+        command = _Command()
         try:
-            return await handler(area, args)
+            area = await self._room(args.get("room"), station)
+            reply = await handler(area, args, command)
         except _Outcome as out:
             return out.reply
         except Exception:
             return REPLY_FAILED
+        return REPLY_QUEUED if command.queued else reply
+
+    async def _room(self, room: str | None, station: str | None) -> str:
+        """The HA area the command is about: the room said, else the room of the speaker that heard it."""
+        if room:
+            area = AREAS.get(room)
+            if area is None:
+                raise _Outcome(REPLY_UNKNOWN_ROOM)
+            return area
+        area = speaker_area(await self._area_registry(), station)
+        if area is None:
+            raise _Outcome(REPLY_WHICH_ROOM)
+        return area
 
     # -- lookup ---------------------------------------------------------------------------------------------------
 
@@ -126,6 +194,17 @@ class HaActions:
         self._states = (now, states)
         return states
 
+    async def _area_registry(self) -> dict[str, str]:
+        now = self._clock()
+        if self._registry and now - self._registry[0] < self._ttl:
+            return self._registry[1]
+        status, body = await self._post("/api/template", {"template": REGISTRY_TEMPLATE})
+        if status != 200:
+            raise _Outcome(REPLY_FAILED)
+        areas = _registry(body)
+        self._registry = (now, areas)
+        return areas
+
     async def _area_entity_ids(self, area: str) -> list[str]:
         now = self._clock()
         cached = self._areas.get(area)
@@ -134,7 +213,12 @@ class HaActions:
         status, body = await self._post("/api/template", {"template": f"{{{{ area_entities('{area}') | tojson }}}}"})
         if status != 200:
             raise _Outcome(REPLY_FAILED)
-        parsed = json.loads(body) if isinstance(body, str) else body
+        try:
+            parsed = json.loads(body) if isinstance(body, str) else body
+        except ValueError:
+            # hacli answers every template with its cached registry while Home Assistant is down: read the area off that
+            registry = _registry(body)
+            parsed = [entity_id for entity_id, name in registry.items() if name == area] if registry else None
         if not isinstance(parsed, list):
             raise _Outcome(REPLY_FAILED)
         ids = [e for e in parsed if isinstance(e, str)]
@@ -146,14 +230,14 @@ class HaActions:
         states = await self._all_states()
         return [states[i] for i in ids if i.startswith(domain + ".") and i in states]
 
-    async def _service(self, domain: str, service: str, body: dict) -> None:
+    async def _service(self, command: _Command, domain: str, service: str, body: dict) -> None:
         try:
             status, _ = await self._post(f"/api/services/{domain}/{service}", body)
         except Exception:
             raise _Outcome(REPLY_FAILED)
         if status == 202:
-            raise _Outcome(REPLY_QUEUED)
-        if not 200 <= status < 300:
+            command.queued = True
+        elif not 200 <= status < 300:
             raise _Outcome(REPLY_FAILED)
 
     # -- climate --------------------------------------------------------------------------------------------------
@@ -191,22 +275,22 @@ class HaActions:
                 return preferred
         return modes[0]
 
-    async def _set_temperature(self, entity: dict, temp: float, force_mode: str | None = None) -> float:
+    async def _set_temperature(self, command: _Command, entity: dict, temp: float, force_mode: str | None = None) -> float:
         entity_id = entity["entity_id"]
         temp = self._clamp(entity, temp)
         mode = force_mode
         if mode is None and entity.get("state") == "off":
             mode = self._wake_mode(entity, temp)
         if mode is not None:
-            await self._service("climate", "set_hvac_mode", {"entity_id": entity_id, "hvac_mode": mode})
+            await self._service(command, "climate", "set_hvac_mode", {"entity_id": entity_id, "hvac_mode": mode})
             entity["state"] = mode
-        await self._service("climate", "set_temperature",
+        await self._service(command, "climate", "set_temperature",
                             {"entity_id": entity_id, "temperature": int(temp) if temp.is_integer() else temp})
         # States are cached for `ttl`; a repeated «теплее» inside it must start from the setpoint just sent.
         entity.setdefault("attributes", {})["temperature"] = temp
         return temp
 
-    async def _climate(self, area: str, args: dict) -> str:
+    async def _climate(self, area: str, args: dict, command: _Command) -> str:
         mode_key = args.get("mode")
         temperature = _num(args.get("temperature"))
         if mode_key is not None and mode_key not in HVAC_MODES:
@@ -224,17 +308,17 @@ class HaActions:
         spoken = temperature
         for entity in entities:
             if temperature is None:
-                await self._service("climate", "set_hvac_mode", {"entity_id": entity["entity_id"], "hvac_mode": hvac})
+                await self._service(command, "climate", "set_hvac_mode", {"entity_id": entity["entity_id"], "hvac_mode": hvac})
                 entity["state"] = hvac
             else:
-                spoken = await self._set_temperature(entity, temperature, hvac)
+                spoken = await self._set_temperature(command, entity, temperature, hvac)
         if temperature is None:
             return MODE_VERBS[mode_key]
         if mode_key is None:
             return REPLY_TEMPERATURE.format(temp=_degrees(spoken))
         return REPLY_MODE_TEMPERATURE.format(mode=MODE_NAMES[mode_key].capitalize(), temp=_degrees(spoken))
 
-    async def _climate_delta(self, area: str, args: dict) -> str:
+    async def _climate_delta(self, area: str, args: dict, command: _Command) -> str:
         direction = args.get("direction")
         if direction not in (1, -1):
             return REPLY_UNKNOWN_COMMAND
@@ -257,7 +341,7 @@ class HaActions:
                 if len(entities) == 1:
                     return REPLY_NO_CURRENT_TEMP
                 continue
-            result = await self._set_temperature(entity, base + direction * amount)
+            result = await self._set_temperature(command, entity, base + direction * amount)
             if spoken is None:
                 spoken = result
         if spoken is None:
@@ -268,7 +352,7 @@ class HaActions:
     # -- light ----------------------------------------------------------------------------------------------------
 
     async def _lights(self, area: str) -> list[dict]:
-        found = await self._in_area(area, "light")
+        found = [light for light in await self._in_area(area, "light") if not JUNK_LIGHT.search(light["entity_id"])]
         if not found:
             raise _Outcome(REPLY_NO_LIGHT.format(area=area))
         live = [light for light in found if light.get("state") not in _UNAVAILABLE]
@@ -276,7 +360,7 @@ class HaActions:
             raise _Outcome(REPLY_LIGHT_UNAVAILABLE)
         return live
 
-    async def _light_color(self, area: str, args: dict) -> str:
+    async def _light_color(self, area: str, args: dict, command: _Command) -> str:
         color = args.get("color")
         if color not in COLOR_NAMES:
             return REPLY_UNKNOWN_COMMAND
@@ -295,13 +379,13 @@ class HaActions:
                 body = {"color_name": color}
             else:
                 continue
-            await self._service("light", "turn_on", {"entity_id": light["entity_id"], **body})
+            await self._service(command, "light", "turn_on", {"entity_id": light["entity_id"], **body})
             done += 1
         if not done:
             return REPLY_NO_COLOR
         return REPLY_COLOR.format(color=COLOR_NAMES[color].capitalize())
 
-    async def _light_brightness(self, area: str, args: dict) -> str:
+    async def _light_brightness(self, area: str, args: dict, command: _Command) -> str:
         percent = _num(args.get("percent"))
         if percent is None or not 1 <= percent <= 100:
             return REPLY_UNKNOWN_COMMAND
@@ -311,7 +395,7 @@ class HaActions:
             modes = (light.get("attributes") or {}).get("supported_color_modes")
             if modes is not None and set(modes) <= {"onoff"}:
                 continue
-            await self._service("light", "turn_on", {"entity_id": light["entity_id"], "brightness_pct": percent})
+            await self._service(command, "light", "turn_on", {"entity_id": light["entity_id"], "brightness_pct": percent})
             done += 1
         if not done:
             return REPLY_NO_BRIGHTNESS

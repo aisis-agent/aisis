@@ -484,6 +484,7 @@ class Adapter:
 
     async def _process_turn(self, ws, data):
         listen = False      # the grammar's question («На сколько поставить таймер?») keeps the microphone open
+        station = None     # set once _turn_input has accepted the turn: a rejected one still gets its error reply
         try:
             station, text = self._turn_input(data)
             if text is None:
@@ -514,7 +515,7 @@ class Adapter:
         except Exception as exc:
             LOG.warning("processor_failed class=%s", type(exc).__name__)
             reply = ERROR_REPLY
-        if self.intents is not None:
+        if self.intents is not None and station is not None:
             self.intents.note_reply(station, reply)
         if not ws.closed:
             await ws.send_json({"type": "partialResponse", "data": {"text": reply,

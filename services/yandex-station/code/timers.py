@@ -26,6 +26,7 @@ ANNOUNCE_ATTEMPTS = 3
 ANNOUNCE_RETRY_S = 20
 
 KIND_TIMER = "timer"
+KIND_REMINDER = "reminder"   # a timer with a note: «отмени таймер» must not cancel it
 KIND_ALARM = "alarm"
 
 LEFT_VERB_PLURAL = "осталось"
@@ -70,7 +71,8 @@ def left_text(seconds: int) -> str:
     return f"{verb} {body}"
 
 
-def _duration_accusative(seconds: int) -> str:
+def duration_accusative(seconds: int) -> str:
+    """«1 минуту», «21 минуту», «5 минут»: a duration after «на» / «через»."""
     return " ".join(f"{n} {unit[3] if _plural_index(n) == 0 else unit[_plural_index(n)]}" for n, unit in _parts(seconds))
 
 
@@ -78,18 +80,14 @@ def due_text(note: str | None, seconds: int | None) -> str:
     if note:
         return REMINDER_DUE.format(note=note)
     if seconds:
-        return TIMER_DUE_FOR.format(duration=_duration_accusative(int(seconds)))
+        return TIMER_DUE_FOR.format(duration=duration_accusative(int(seconds)))
     return TIMER_DUE
 
 
-def _alarm_hour_candidates(hour: int, part: str | None, ambiguous: bool) -> list[int]:
-    if hour > 12 or hour == 0:
-        return [hour % 24]
-    if part in ("утра", "ночи"):
-        return [hour % 12]
-    if part in ("дня", "вечера"):
-        return [hour % 12 + 12]
-    if ambiguous:
+def _alarm_hour_candidates(hour: int, ambiguous: bool) -> list[int]:
+    """The 24-hour values to try. The grammar resolves the hour with its day part («7 вечера» arrives as 19); only a bare
+    12-hour reading (`ambiguous`: «будильник на семь») is left open between the morning and the evening hour."""
+    if ambiguous and 1 <= hour <= 12:
         return [hour % 12, hour % 12 + 12]
     return [hour]
 
@@ -111,53 +109,73 @@ class TimerBook:
     async def start(self, seconds: int, note: str | None = None) -> dict:
         if not 1 <= seconds <= MAX_SECONDS:
             raise ValueError("seconds out of range")
-        entry = {"id": uuid.uuid4().hex[:8], "kind": KIND_TIMER, "due": self._clock() + seconds,
+        entry = {"id": uuid.uuid4().hex[:8], "kind": KIND_REMINDER if note else KIND_TIMER, "due": self._clock() + seconds,
                  "seconds": int(seconds), "note": note or None}
         self._add(entry)
         return {"id": entry["id"], "due": entry["due"], "seconds": entry["seconds"], "note": entry["note"]}
 
     async def set_alarm(self, hour: int, minute: int, part: str | None, ambiguous: bool) -> dict:
+        """`hour` is the 24-hour value the grammar resolved: it already carries the day part `part` it was said with.
+        `ambiguous` marks a bare 12-hour reading that may mean the morning or the evening hour: the next of the two rings."""
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             raise ValueError("time out of range")
-        now = datetime.fromtimestamp(self._clock(), self._tz)
-        best: datetime | None = None
-        for h in _alarm_hour_candidates(hour, part, ambiguous):
-            cand = now.replace(hour=h, minute=minute, second=0, microsecond=0)
-            if cand <= now:
-                cand += timedelta(days=1)
-            if best is None or cand < best:
-                best = cand
-        assert best is not None
-        text = f"{best.hour:02d}:{best.minute:02d}"
-        entry = {"id": uuid.uuid4().hex[:8], "kind": KIND_ALARM, "due": best.timestamp(), "seconds": None,
-                 "note": None, "text": text}
+        now = self._clock()
+        today = datetime.fromtimestamp(now, self._tz).date()
+        due: float | None = None
+        for h in _alarm_hour_candidates(hour, ambiguous):
+            # Today and tomorrow, both occurrences of a wall-clock time the clock passes twice (the DST fall-back hour):
+            # the nearest real moment after now wins. A time the clock skips (the spring-forward gap) does not exist, so
+            # it is dropped and the alarm falls on the next day it does.
+            for day in (0, 1):
+                date = today + timedelta(days=day)
+                for fold in (0, 1):
+                    moment = datetime(date.year, date.month, date.day, h, minute, tzinfo=self._tz, fold=fold).timestamp()
+                    local = datetime.fromtimestamp(moment, self._tz)
+                    if moment > now and (local.hour, local.minute) == (h, minute) and (due is None or moment < due):
+                        due = moment
+        if due is None:
+            raise ValueError("no such time")
+        local = datetime.fromtimestamp(due, self._tz)
+        text = f"{local.hour:02d}:{local.minute:02d}"
+        entry = {"id": uuid.uuid4().hex[:8], "kind": KIND_ALARM, "due": due, "seconds": None, "note": None, "text": text}
         self._add(entry)
         return {"id": entry["id"], "due": entry["due"], "text": text}
 
     async def cancel(self, kind: str = KIND_TIMER) -> int:
         ids = [i for i, e in self._entries.items() if e["kind"] == kind]
+        removed = {i: self._entries.pop(i) for i in ids}
+        if ids:
+            try:
+                self._persist()
+            except Exception:
+                self._entries.update(removed)   # a cancel that was not saved did not happen: the file would bring them back
+                raise
         for i in ids:
-            self._entries.pop(i, None)
             task = self._tasks.pop(i, None)
             if task:
                 task.cancel()
-        if ids:
-            self._persist()
         return len(ids)
 
     def remaining(self) -> list[dict]:
+        """Timers and reminders, the nearest first."""
         now = self._clock()
-        return [{"id": e["id"], "left": max(0, int(round(e["due"] - now))), "note": e["note"]}
-                for e in self._entries.values() if e["kind"] == KIND_TIMER]
+        left = [{"id": e["id"], "left": max(0, int(round(e["due"] - now))), "note": e["note"]}
+                for e in self._entries.values() if e["kind"] in (KIND_TIMER, KIND_REMINDER)]
+        return sorted(left, key=lambda item: item["left"])
 
     async def resume(self) -> None:
+        """Re-arm what the file holds. Never raises: a timers file that cannot be written must not stop the adapter."""
         for entry in self._load():
             self._entries[entry["id"]] = entry
         now = self._clock()
-        for entry in list(self._entries.values()):
-            if entry["due"] < now - LATE_FIRE_WINDOW_S:
-                self._entries.pop(entry["id"])
-        self._persist()
+        stale = [i for i, e in self._entries.items() if e["due"] < now - LATE_FIRE_WINDOW_S]
+        for i in stale:
+            self._entries.pop(i)
+        if stale:
+            try:
+                self._persist()
+            except OSError as err:
+                log.warning("timers file not writable, expired entries stay in it: %s", type(err).__name__)
         for entry in self._entries.values():
             self._arm(entry)
 
@@ -175,38 +193,48 @@ class TimerBook:
         if len(self._entries) >= MAX_TIMERS:
             raise ValueError("too many timers")
         self._entries[entry["id"]] = entry
-        self._persist()
+        try:
+            self._persist()
+        except Exception:
+            del self._entries[entry["id"]]   # a timer nobody was told about must not linger, count or come back from the file
+            raise
         self._arm(entry)
 
     def _arm(self, entry: dict[str, Any]) -> None:
         self._tasks[entry["id"]] = asyncio.get_running_loop().create_task(self._run(entry["id"]))
 
     async def _run(self, entry_id: str) -> None:
-        entry = self._entries.get(entry_id)
-        if entry is None:
-            return
-        delay = entry["due"] - self._clock()
-        if delay > 0:
-            await self._sleep(delay)
-        if self._entries.pop(entry_id, None) is None:
-            return
-        self._tasks.pop(entry_id, None)
-        self._persist()
-        if entry["kind"] == KIND_ALARM:
-            text = ALARM_DUE.format(text=entry.get("text", ""))
-        else:
-            text = due_text(entry.get("note"), entry.get("seconds"))
-        for attempt in range(ANNOUNCE_ATTEMPTS):
+        try:
+            entry = self._entries.get(entry_id)
+            if entry is None:
+                return
+            delay = entry["due"] - self._clock()
+            if delay > 0:
+                await self._sleep(delay)
+            if self._entries.pop(entry_id, None) is None:
+                return
             try:
-                if await self._announce(text):
-                    return
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
-            if attempt < ANNOUNCE_ATTEMPTS - 1:
-                await self._sleep(ANNOUNCE_RETRY_S)
-        log.warning("timer %s announcement failed after %d attempts", entry_id, ANNOUNCE_ATTEMPTS)
+                self._persist()
+            except OSError as err:   # a full disk must not silence the alarm: at worst it rings once more after a restart
+                log.warning("timers file not writable at fire time: %s", type(err).__name__)
+            if entry["kind"] == KIND_ALARM:
+                text = ALARM_DUE.format(text=entry.get("text", ""))
+            else:
+                text = due_text(entry.get("note"), entry.get("seconds"))
+            for attempt in range(ANNOUNCE_ATTEMPTS):
+                try:
+                    if await self._announce(text):
+                        return
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+                if attempt < ANNOUNCE_ATTEMPTS - 1:
+                    await self._sleep(ANNOUNCE_RETRY_S)
+            log.warning("timer %s announcement failed after %d attempts", entry_id, ANNOUNCE_ATTEMPTS)
+        finally:
+            if self._tasks.get(entry_id) is asyncio.current_task():   # registered until the announcement is over: close() cancels it
+                del self._tasks[entry_id]
 
     def _load(self) -> list[dict[str, Any]]:
         if not self._path or not os.path.exists(self._path):
@@ -220,7 +248,9 @@ class TimerBook:
         out = []
         for e in data if isinstance(data, list) else []:
             if isinstance(e, dict) and isinstance(e.get("id"), str) and isinstance(e.get("due"), (int, float)) \
-                    and e.get("kind") in (KIND_TIMER, KIND_ALARM):
+                    and e.get("kind") in (KIND_TIMER, KIND_REMINDER, KIND_ALARM):
+                if e["kind"] == KIND_TIMER and e.get("note"):
+                    e = {**e, "kind": KIND_REMINDER}   # written before reminders had their own kind
                 out.append(e)
         return out[:MAX_TIMERS]
 

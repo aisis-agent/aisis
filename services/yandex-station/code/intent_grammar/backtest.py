@@ -61,6 +61,12 @@ class Row:
     split: str
     quasar: bool = False   # the quasar container already answered this phrase without a model (synthetic: expect.kind != llm; real: layer L1, verdict ok/clarify)
     expect: dict[str, Any] | None = field(default=None, compare=False)   # the corpus' own tier/action, when it has one
+    quasar_via: str | None = None   # how it answered: the replay's `via` («fast-confirm», «media-key», …); None when not observed
+
+    @property
+    def quasar_tier(self) -> str:
+        """The tier the quasar container answered this row with (never the row's expected one)."""
+        return replay_tier(self.quasar_via)
 
 
 def corpus_dir(explicit: str | None = None) -> Path:
@@ -122,10 +128,10 @@ def load_rows(directory: Path, grammar: Grammar) -> tuple[list[Row], list[dict[s
                 continue
             basis = f"{path.stem}|{record.get('ts', '')}|{split_key(text)}"
             occurrences[basis] = occurrences.get(basis, 0) + 1
-            quasar = replay[text] if replay is not None and text in replay else _quasar_handled(source, record)
+            quasar, via = replay[text] if replay is not None and text in replay else _quasar_handled(source, record)
             expect = record.get("expect") if source == "synthetic" and isinstance(record.get("expect"), dict) else None
             rows.append(Row(_row_id(basis, occurrences[basis]), text, truth, source, split_of(text, percent),
-                            quasar=quasar, expect=expect))
+                            quasar=quasar, expect=expect, quasar_via=via))
             count += 1
         manifest.append({"file": name, "source": source, "rows": count, "sha256": hashlib.sha256(data).hexdigest()})
     return rows, manifest
@@ -134,22 +140,38 @@ def load_rows(directory: Path, grammar: Grammar) -> tuple[list[Row], list[dict[s
 REPLAY_FILE = "quasar-replay.jsonl"
 
 
-def _load_replay(path: Path) -> dict[str, bool] | None:
-    """What the deployed quasar layer answers without a model, per phrase (tools/replay_quasar.mts); None when absent."""
+def _load_replay(path: Path) -> dict[str, tuple[bool, str | None]] | None:
+    """What the deployed quasar layer answers without a model, per phrase: (handled, via). tools/replay_quasar.mts writes
+    it; None when the file is absent."""
     if not path.exists():
         return None
-    handled: dict[str, bool] = {}
+    handled: dict[str, tuple[bool, str | None]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.strip():
             record = json.loads(line)
-            handled[str(record["text"]).strip()] = bool(record["handled"])
+            via = record.get("via")
+            handled[str(record["text"]).strip()] = (bool(record["handled"]), via if isinstance(via, str) else None)
     return handled
 
 
-def _quasar_handled(source: str, record: dict[str, Any]) -> bool:
+def replay_tier(via: str | None) -> str:
+    """The tier of the quasar container's answer from the replay's `via`: `fast-confirm` asked for a «да», `fast-clarify`
+    asked a question, `fast-query` answered; the other handlers (media keys, apps, music, end of dialog) acted, arithmetic
+    answered. An unknown route is taken for an action."""
+    if via and via.startswith("fast-") and via[5:] in TIERS:
+        return via[5:]
+    return "query" if via == "math" else "execute"
+
+
+def _quasar_handled(source: str, record: dict[str, Any]) -> tuple[bool, str | None]:
+    """Without a replay file: the corpus' own record of whether the container answered, and the tier it recorded (a real
+    row's `verdict`; a synthetic row's expected tier, the only trace of one)."""
     if source == "synthetic":
-        return (record.get("expect") or {}).get("kind") not in (None, "llm")
-    return record.get("layer") == "L1" and record.get("verdict") in ("ok", "clarify")
+        expect = record.get("expect") or {}
+        tier = expect.get("tier")
+        return expect.get("kind") not in (None, "llm"), f"fast-{tier}" if tier in TIERS else None
+    handled = record.get("layer") == "L1" and record.get("verdict") in ("ok", "clarify")
+    return handled, "fast-clarify" if record.get("verdict") == "clarify" else None
 
 
 def _truth(source: str, record: dict[str, Any]) -> str:
@@ -175,8 +197,9 @@ class Outcome:
 _ACTION_ARGUMENT = {"volume": ("speaker.volume", "level"), "setpoint": ("ha.climate", "temperature"),
                     "brightness": ("ha.light_brightness", "percent")}
 _SWITCH_EXECUTORS = ("ha.light", "ha.device")
-# Decisions of the quasar container, not of the grammar (`intent_route.measured_route`): the back-test knows that the
-# container answered, never with which tier or arguments, so such a decision is judged by its label alone.
+# Decisions of the quasar container, not of the grammar (`intent_route.measured_route`). The replay records that the
+# container answered and how (`via`, so the tier), never with which label or arguments: such a decision carries no labels
+# and is judged on its observed tier alone, not on a label copied from the row's expectation.
 OPAQUE_INTENTS = frozenset(("quasar.handled",))
 
 
@@ -204,15 +227,15 @@ def meets_expectation(expect: dict[str, Any], decision: Decision) -> bool:
     """Whether a decision with the right label also has the tier and action the corpus row expects.
 
     The tier is compared when it names a grammar tier (`llm` is no decision: label-only). The action is compared by the
-    mapping above, over every part of a compound; a form without an exact mapping makes the whole row label-only, and
-    so does a decision of the quasar container (`OPAQUE_INTENTS`)."""
+    mapping above, over every part of a compound; a form without an exact mapping makes the whole row label-only. A
+    decision of the quasar container (`OPAQUE_INTENTS`) has an observed tier but no observed arguments: only the tier is compared."""
+    tier = expect.get("tier")
     if decision.intent in OPAQUE_INTENTS:
-        return True
+        return tier not in TIERS or decision.tier == tier
     spec = expect.get("action")
     matcher = _action_matcher(str(spec)) if spec else None
     if spec and matcher is None:
         return True
-    tier = expect.get("tier")
     if tier in TIERS and decision.tier != tier:
         return False
     if matcher is None:
@@ -235,7 +258,7 @@ def classify(row: Row, decision: Decision | None, grammar: Grammar) -> str:
         return "overreach" if answered else "brain_ok"
     if not answered:
         return "missed"
-    if decision.tier == "drop" or row.truth not in decision.labels:
+    if decision.tier == "drop" or (decision.intent not in OPAQUE_INTENTS and row.truth not in decision.labels):
         return "wrong"
     return "correct" if row.expect is None or meets_expectation(row.expect, decision) else "wrong"
 
@@ -487,11 +510,32 @@ def check_gate(report: dict[str, Any], grammar: Grammar) -> dict[str, Any]:
             failures.append(f"baseline unusable: {compare_['incompatible']} (rebaseline explicitly, never by deleting latest.json)")
         if compare_["regressed"]:
             failures.append(f"{len(compare_['regressed'])} rows got worse than in the previous report")
-        if compare_["lost_rows"]:
-            failures.append(f"{sum(compare_['lost_rows'].values())} rows of the previous report are gone from the corpus (rows are only added)")
-        if compare_["relabelled"]:
-            failures.append(f"{len(compare_['relabelled'])} rows changed their label since the previous report (relabelling needs an explicit rebaseline)")
+        rebaselined = baseline.get("rebaselined")   # the owner accepted the lost and relabelled rows of this run (`accept_rebaseline`)
+        if compare_["lost_rows"] and not rebaselined:
+            failures.append(f"{sum(compare_['lost_rows'].values())} rows of the previous report are gone from the corpus (rows are only added; "
+                            "an owner's rebaseline is `--init-baseline REASON`)")
+        if compare_["relabelled"] and not rebaselined:
+            failures.append(f"{len(compare_['relabelled'])} rows changed their label since the previous report (an owner's rebaseline "
+                            "is `--init-baseline REASON`)")
     return {"ok": not failures, "failures": failures}
+
+
+def accept_rebaseline(report: dict[str, Any], grammar: Grammar, reason: str) -> bool:
+    """The owner's explicit rebaseline against a COMPATIBLE baseline: the corpus lost or relabelled rows (a label fixed, a
+    file renamed, a row removed), which the ratchet reports and fails for ever. The reason and the counts are written into the
+    report's baseline block and the gate is evaluated again without those two checks; every other check, the per-row
+    regressions included, still applies. False (and nothing changed) when there is no compatible baseline or nothing was
+    lost or relabelled: then no rebaseline is needed and `--init-baseline` is refused."""
+    compare_ = report.get("compare")
+    if not compare_ or compare_.get("incompatible"):
+        return False
+    lost, relabelled = sum(compare_["lost_rows"].values()), len(compare_["relabelled"])
+    if not lost and not relabelled:
+        return False
+    report["baseline"]["init_reason"] = reason
+    report["baseline"]["rebaselined"] = {"lost_rows": lost, "relabelled": relabelled}
+    report["gate"] = check_gate(report, grammar)
+    return True
 
 
 def _safety_failures(grammar: Grammar, rule: dict[str, Any]) -> list[str]:
@@ -649,6 +693,10 @@ def summary_lines(report: dict[str, Any]) -> list[str]:
         compare_ = report["compare"]
         lines.append(f"vs previous: {len(compare_['regressed'])} worse, {compare_['fixed']} better, "
                      f"{sum(compare_['lost_rows'].values())} lost, {len(compare_['relabelled'])} relabelled")
+    rebaselined = (report.get("baseline") or {}).get("rebaselined")
+    if rebaselined:
+        lines.append(f"rebaselined by the owner ({report['baseline']['init_reason']}): {rebaselined['lost_rows']} lost, "
+                     f"{rebaselined['relabelled']} relabelled rows accepted")
     legacy = report.get("legacy_floor")
     if legacy:
         lines.append(f"legacy absolute floor {legacy['split']} coverage >= {legacy['floor']}: {legacy['coverage']} on {legacy['addressed']} addressed rows, "
