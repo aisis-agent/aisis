@@ -411,6 +411,16 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ha.calls), 2)       # Home Assistant retried, not the stored failure replayed
         self.assertEqual(len(timers.calls), 2)   # the accepted cost: the timer clause runs again with it
 
+    async def test_a_compound_with_repeat_never_replays_another_stations_last_line(self):
+        r = router(timers=FakeTimers(), monotonic=lambda: 100.0)
+        r.note_reply("kitchen", "Секрет кухни.")
+        r.note_reply("bedroom", "Тайна спальни.")
+        kitchen = await r.route("kitchen", "поставь таймер на минуту и повтори")
+        bedroom = await r.route("bedroom", "поставь таймер на минуту и повтори")
+        self.assertIn("Секрет кухни", kitchen.text)
+        self.assertIn("Тайна спальни", bedroom.text)
+        self.assertNotIn("Секрет кухни", bedroom.text)
+
     async def test_a_timer_with_a_clock_clause_delivered_by_the_hook_and_then_the_turn_is_one_timer(self):
         timers = FakeTimers()
         r = router(timers=timers, monotonic=lambda: 100.0)

@@ -50,6 +50,7 @@ VOLUME_EXECUTORS = frozenset(("speaker.volume", "speaker.volume_delta"))
 FALLBACK_BAND = -1             # intents with priority below zero are the catch-alls: they read what the skills left
 CLARIFY_WINDOW_S = 30.0        # how long a clarification question waits for its answer
 BRAIN_QUESTION_WINDOW_S = 300.0   # a question of the brain's is the brain's to continue for this long; hook-answered or quasar-answered lines never reach note_reply, so no line can be relied on to clear it
+STATION_BOUND_PREFIXES = ("ha.", "dialog.repeat_last")   # clauses whose answer depends on the speaking station: a compound with one is never replayed to another utterance's delivery
 DEDUPE_S = 5.0                 # the same utterance that started or cancelled a timer/alarm, delivered again inside this window, is not run twice
 TIMER_ACTION_EXECUTORS = frozenset(("timer.start", "alarm.set", "timer.cancel", "alarm.cancel", "reminder.cancel"))   # what a second delivery could repeat
 
@@ -229,9 +230,9 @@ class IntentRouter:
         One slot remembers the last utterance that ran: its route and when. It is replayed only for the SAME utterance (a compound
         as a unit), and only after every action in flight has finished, so a cancel is never answered from the slot ahead of a start
         that is registered but has not run. Any other utterance that runs an action empties the slot first (start → cancel → start →
-        cancel never replays a stale reply); a failure, a decline or a queued result is never stored, and neither is a compound with a Home Assistant clause
-        (it depends on the speaker's room and may fail or queue behind a reply that still says «готово»; a repeat runs it again, timer
-        clause included). A duplicate that arrives
+        cancel never replays a stale reply); a failure, a decline or a queued result is never stored, and neither is a compound with a Home Assistant or
+        «повтори» clause (the answer depends on the speaking station, and Home Assistant may fail or queue behind a reply that still
+        says «готово»; a repeat runs it again, timer clause included). A duplicate that arrives
         while the first delivery is running waits for it."""
         key = self.grammar.normalise(text).text
         while True:
@@ -253,7 +254,7 @@ class IntentRouter:
     async def _run_timer_action(self, key: str, station: str, decision: Decision, via_quasar: bool) -> Route:
         self.memo = None   # whatever ran before is no longer the last thing that happened
         route = await self._run(station, decision, via_quasar)
-        if route.kind == "reply" and not any(((part.action or {}).get("executor") or "").startswith("ha.") for part in decision.parts or (decision,)):
+        if route.kind == "reply" and not any(((part.action or {}).get("executor") or "").startswith(STATION_BOUND_PREFIXES) for part in decision.parts or (decision,)):
             self.memo = (key, route, self.monotonic())
         return route
 
