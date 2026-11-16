@@ -40,6 +40,8 @@ The routing chain is:
 
 For Russian routing, use the multilingual Laya checkpoint and preload it when local routing is enabled. Jev is optional; loss of Jev never blocks the static/deterministic fallback.
 
+Decision table, privacy surface, flags, rollout and the measured comparison of Jev, Laya and LLMs as route classifiers: [docs/research/jev-usage-2026-11.md](../research/jev-usage-2026-11.md).
+
 ## Effort
 
 Reasoning effort is a separate routing dimension from model identity. Canonical AISIS levels are `none | low | medium | high | xhigh | max`.
