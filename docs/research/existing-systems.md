@@ -41,3 +41,5 @@ Laya is suitable as a local compact route-decision model with request-defined ch
 Jev is suitable as a decision model for structured choices such as model tier and reasoning effort.
 
 Both must sit behind one replaceable `RouteDecisionProvider` interface.
+
+Where Jev is used in the speaker stack, with the evidence and the rollout, is in [jev-usage-2026-11.md](jev-usage-2026-11.md): shadow-first, with a confidence gate on every tier or effort choice.
