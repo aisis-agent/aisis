@@ -71,10 +71,12 @@ bad JSON, an unknown and a prototype route name, `GRAMMAR_HOOK=shadow` (not awai
 clarification («Громкость.» → «семь») is answered before the hook is called (`ИТОГ 34/34`). The adapter must serve `/intent/decide` before the flip: without it the hook fails
 open after 250 ms on every turn (correct, but slower than before).
 
-`compose.bluegreen.yaml` passes `GRAMMAR_HOOK` to the prod colors (`${GRAMMAR_HOOK:-on}` from `runtime.env`) and sets `off` for
-stage: `/intent/decide` executes timers on the adapter it reaches, and stage containers share the host network with the
-real adapter, so a stage grammar call could cancel real timers. Stage therefore runs the intent corpus and dialogs on the old
-tiers only (their expectations are pinned to those); the hook itself is checked by `check_grammar_hook.mts`. A container reads its environment once:
+`compose.bluegreen.yaml` passes `GRAMMAR_HOOK` to the prod colors (`${GRAMMAR_HOOK-on}` from `runtime.env`: only an UNSET variable means `on`, an empty
+`GRAMMAR_HOOK=` is `off`) and sets `off` for stage: `/intent/decide` executes timers on the adapter it reaches, and stage containers share the host
+network with the real adapter, so a stage grammar call could cancel real timers. The intent corpus and dialog runs (`deploy.sh` pre-flip checks on stage
+and on the idle prod color, and the dashboard's corpus run) keep the hook on but point `AISIS_ADAPTER_INTENT_URL` at a closed port: the hook's own code path
+runs and fails open, the real adapter is never reached, and the expectations pinned to the old tiers hold. The hook against a real adapter is checked by
+`check_grammar_hook.mts`. A container reads its environment once:
 changing `GRAMMAR_HOOK` means recreating the active color (a deploy with the new value in `runtime.env`).
 
 The adapter side of a clarification question («поставь таймер» → «На сколько поставить таймер?», `listen: true`): the adapter remembers the
