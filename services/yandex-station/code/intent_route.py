@@ -49,6 +49,7 @@ TIMER_PREFIXES = ("timer.", "alarm.", "reminder.")   # the executors that need t
 VOLUME_EXECUTORS = frozenset(("speaker.volume", "speaker.volume_delta"))
 FALLBACK_BAND = -1             # intents with priority below zero are the catch-alls: they read what the skills left
 CLARIFY_WINDOW_S = 30.0        # how long a clarification question waits for its answer
+BRAIN_QUESTION_WINDOW_S = 300.0   # a question of the brain's is the brain's to continue for this long; hook-answered or quasar-answered lines never reach note_reply, so no line can be relied on to clear it
 DEDUPE_S = 5.0                 # the same utterance that started or cancelled a timer/alarm, delivered again inside this window, is not run twice
 TIMER_ACTION_EXECUTORS = frozenset(("timer.start", "alarm.set", "timer.cancel", "alarm.cancel", "reminder.cancel"))   # what a second delivery could repeat
 
@@ -127,7 +128,7 @@ class IntentRouter:
     last_reprompt: dict[str, float] = field(default_factory=dict)
     stats: dict[str, int] = field(default_factory=dict)
     pending: dict[str, tuple[str, float]] = field(default_factory=dict)             # station -> (clarification phrase, when)
-    brain_asked: set[str] = field(default_factory=set)                              # stations the brain last spoke to with a question
+    brain_asked: dict[str, float] = field(default_factory=dict)                     # station -> when the brain last spoke to it with a question
     memo: tuple[str, "Route", float] | None = None        # the one remembered utterance: (canonical text, its route, when it ran)
     running: dict[str, asyncio.Task["Route"]] = field(default_factory=dict)   # timer/alarm utterances in flight, by canonical text
 
@@ -228,7 +229,8 @@ class IntentRouter:
         One slot remembers the last utterance that ran: its route and when. It is replayed only for the SAME utterance (a compound
         as a unit), and only after every action in flight has finished, so a cancel is never answered from the slot ahead of a start
         that is registered but has not run. Any other utterance that runs an action empties the slot first (start → cancel → start →
-        cancel never replays a stale reply); a failure, a decline or a queued result is never stored. A duplicate that arrives
+        cancel never replays a stale reply); a failure, a decline or a queued result is never stored, and neither is a compound with a clause that is not a timer clause (Home
+        Assistant clauses depend on the speaker's room and may fail or queue behind a reply that still says «готово»). A duplicate that arrives
         while the first delivery is running waits for it."""
         key = self.grammar.normalise(text).text
         while True:
@@ -237,7 +239,7 @@ class IntentRouter:
                 return await asyncio.shield(task)
             earlier = [other for other in self.running.values() if not other.done()]
             if earlier:   # arrival order: what was registered before this utterance finishes first (no cycle: only earlier ones are waited for)
-                await asyncio.gather(*earlier, return_exceptions=True)
+                await asyncio.wait(earlier)   # not gather: a cancelled waiter must not cancel another utterance's action
                 continue
             memo = self.memo
             if memo is not None and memo[0] == key and self.monotonic() - memo[2] <= DEDUPE_S:
@@ -250,7 +252,7 @@ class IntentRouter:
     async def _run_timer_action(self, key: str, station: str, decision: Decision, via_quasar: bool) -> Route:
         self.memo = None   # whatever ran before is no longer the last thing that happened
         route = await self._run(station, decision, via_quasar)
-        if route.kind == "reply":
+        if route.kind == "reply" and all((part.action or {}).get("executor", "").startswith(TIMER_PREFIXES) for part in decision.parts or (decision,)):
             self.memo = (key, route, self.monotonic())
         return route
 
@@ -286,20 +288,22 @@ class IntentRouter:
 
     def note_reply(self, station: str, text: str, *, brain: bool = False) -> None:
         """The last thing the speaker said to this station, for «повтори». `brain`: the brain said it. A question of the brain's
-        is remembered until the next line of any kind to that station (a short answer to it is the brain's to continue)."""
+        is remembered until the next line of any kind to that station or BRAIN_QUESTION_WINDOW_S (a short answer to it is the brain's to continue)."""
         if text:
             self.last_reply[station] = text
             if brain and text.rstrip().endswith("?"):
-                self.brain_asked.add(station)
+                self.brain_asked[station] = self.monotonic()
             else:
-                self.brain_asked.discard(station)
+                self.brain_asked.pop(station, None)
 
     def _asked_a_question(self, station: str) -> bool:
         """The brain's last line to this station was a question: a short answer to it («да», «про собак») is the brain's to
-        continue, never a catch-all's «не расслышал». There is no expiry: the brain's text is ready long before it is spoken
-        and a long story ends with its question, so no clock says when the listener answers; the next line replaces it. The
-        grammar's own questions («Да?», «На сколько поставить таймер?») are not it: the brain has no context for them."""
-        return station in self.brain_asked
+        continue, never a catch-all's «не расслышал». The window is long (the brain's text is ready long before it is spoken and a
+        long story ends with its question) but bounded: lines answered by the hook or the quasar layer never reach `note_reply`, so
+        without a bound a question would suppress the catch-alls for hours. The grammar's own questions («Да?», «На сколько
+        поставить таймер?») are not it: the brain has no context for them."""
+        asked = self.brain_asked.get(station)
+        return asked is not None and self.monotonic() - asked <= BRAIN_QUESTION_WINDOW_S
 
     async def _run(self, station: str, decision: Decision, via_quasar: bool) -> Route:
         if decision.parts:

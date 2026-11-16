@@ -382,6 +382,34 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await r.route("st", "поставь таймер на пять минут")).text, "Таймер на 5 минут.")
         self.assertEqual(timers.calls, [("start", 300, None)])
 
+    async def test_a_cancelled_waiter_does_not_cancel_the_action_it_waited_for(self):
+        class Slow(FakeHa):
+            async def run(self, executor, args, station=None):
+                for _ in range(10):
+                    await asyncio.sleep(0)
+                return await super().run(executor, args, station)
+        ha = Slow()
+        timers = FakeTimers()
+        r = router(timers=timers, ha=ha)
+        first = asyncio.ensure_future(r.route("a", "поставь таймер на десять минут и сделай теплее"))
+        await asyncio.sleep(0)
+        waiter = asyncio.ensure_future(r.route("b", "отмени таймер"))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        got = await first
+        self.assertEqual(got.kind, "reply")
+        self.assertEqual(len(ha.calls), 1)
+        self.assertEqual(timers.calls[0], ("start", 600, None))
+
+    async def test_a_compound_with_a_home_assistant_clause_is_not_replayed(self):
+        ha = FakeHa("Не удалось выполнить команду умного дома.")
+        timers = FakeTimers()
+        r = router(timers=timers, ha=ha, monotonic=lambda: 100.0)
+        await r.route("a", "поставь таймер на десять минут и сделай теплее")
+        ha.reply = "Готово."
+        await r.route("a", "поставь таймер на десять минут и сделай теплее")
+        self.assertEqual(len(ha.calls), 2)       # Home Assistant retried, not the stored failure replayed
+
     async def test_concurrent_duplicates_of_a_timer_start_run_once(self):
         class Slow(FakeTimers):
             async def start(self, seconds, note=None):
@@ -567,7 +595,7 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await r.route("st", "да")).intent, "asr.garbage_short")  # after a statement the reprompt is back
         self.assertEqual((await r.route("st", "нет")).kind, "none")                 # the reprompt is said once a minute
 
-    async def test_only_a_question_the_brain_asked_suppresses_the_catch_alls_and_it_does_not_expire(self):
+    async def test_only_a_question_the_brain_asked_suppresses_the_catch_alls_and_it_expires_after_the_window(self):
         clock = [100.0]
         r = router(monotonic=lambda: clock[0])
         for line in ("Да?", "На сколько поставить таймер?", "Какую громкость поставить?"):   # the grammar's own questions
@@ -575,9 +603,11 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await r.route("st", "да")).intent, "asr.garbage_short", line)
             clock[0] += intent_route.REPROMPT_COOLDOWN_S + 1
         r.note_reply("st", "Расскажу длинную историю... Рассказать подробнее?", brain=True)
-        clock[0] += 3600                                                                  # a long story, then the listener answers much later
+        clock[0] += 120                                                                   # a long story, then the listener answers later
         self.assertEqual((await r.route("st", "да")).kind, "none")
         self.assertEqual((await r.route("st", "про собак")).kind, "none")                 # still the brain's, until any other line replaces it
+        clock[0] += intent_route.BRAIN_QUESTION_WINDOW_S                                  # hook-answered lines never clear it: it expires
+        self.assertEqual((await r.route("st", "да")).intent, "asr.garbage_short")
         r.note_reply("st", "Рассказать подробнее?", brain=True)
         r.note_reply("st", "Да?")                                                        # a grammar line replaces the brain's question
         clock[0] += intent_route.REPROMPT_COOLDOWN_S + 1
@@ -662,7 +692,7 @@ class AdapterIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.spoken(adapter, "Громкость."), "Какую громкость поставить?")   # the grammar's question
         self.assertEqual(await self.spoken(adapter, "голи со спортом"), "Не расслышал. Повтори, пожалуйста.")
         self.assertEqual(adapter.turn.await_count, 2)
-        self.assertEqual(adapter.intents.brain_asked, set())
+        self.assertEqual(adapter.intents.brain_asked, {})
 
     async def test_an_emergency_never_goes_to_the_brain(self):
         adapter = await self.adapter()
