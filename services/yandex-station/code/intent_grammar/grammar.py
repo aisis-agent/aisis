@@ -16,7 +16,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 
 from .normalize import Canon, Normalised, normalise
@@ -26,6 +26,8 @@ from .timewords import duration_ru
 TIERS = ("execute", "confirm", "clarify", "query", "canned", "reprompt", "drop")
 # Tiers in which the speaker acts on the world: guarded against negation by default.
 ACTING_TIERS = ("execute", "confirm")
+# What a clause of a compound command asks of the caller, weakest first: the compound takes the strongest.
+_COMPOUND_RANK = {"canned": 0, "query": 1, "execute": 2, "confirm": 3}
 GUARDS = ("not_negated", "not_question", "is_question")
 REPLY_KINDS = ("canned", "template", "earcon", "none")
 _INTENT_KEYS = {"id", "tier", "labels", "priority", "patterns", "slots", "guards", "allow_negation", "fuzzy_ok",
@@ -107,31 +109,36 @@ class Grammar:
         return normalise(text, self.canon)
 
     def decide(self, text: str) -> Decision | None:
-        """One decision or None (abstain). Whole utterance first, then a compound of clauses."""
+        """One decision or None (abstain). Whole utterance first, then a compound of clauses: the split runs only when
+        the whole utterance has no reading at all, never to override two readings that tied."""
         started = time.perf_counter_ns()
         utterance = self.normalise(text)
-        decision = self.decide_normalised(utterance)
-        if decision is None:
+        decision, tied = self._pick(utterance)
+        if decision is None and not tied:
             decision = self._compound(utterance)
         if decision is not None:
             decision.elapsed_us = (time.perf_counter_ns() - started) // 1000
         return decision
 
     def decide_normalised(self, utterance: Normalised) -> Decision | None:
+        return self._pick(utterance)[0]
+
+    def _pick(self, utterance: Normalised) -> tuple[Decision | None, bool]:
+        """The winning decision of one (sub-)utterance and whether it was withheld because two intents tied."""
         if not utterance.tokens:
-            return None
+            return None, False
         found = self._candidates(utterance, fuzzy=False)
         if not found:
             found = self._candidates(utterance, fuzzy=True)
         if not found:
-            return None
+            return None, False
         # priority first, then specificity (more literal words consumed), then ambiguity -> abstain
         found.sort(key=lambda c: (-c[0], -c[1]))
         top = found[0]
         rivals = {c[2].intent for c in found if (c[0], c[1]) == (top[0], top[1])}
         if len(rivals) > 1:
-            return None
-        return top[2]
+            return None, True
+        return top[2], False
 
     def candidates(self, text: str) -> list[Decision]:
         """Every intent that reads the utterance (priority/specificity order); more than one at the top is a conflict."""
@@ -220,8 +227,10 @@ class Grammar:
         split(0, [])
         if not best:
             return None
-        first = best[0]
-        return Decision(intent="compound", tier=first.tier, slots={}, action=None, reply=None,
+        # the compound asks as much of the caller as its most demanding part: one `execute` clause makes it `execute`,
+        # a clause that needs confirmation makes the whole thing `confirm`
+        tier = max((part.tier for part in best), key=_COMPOUND_RANK.__getitem__)
+        return Decision(intent="compound", tier=tier, slots={}, action=None, reply=None,
                         labels=tuple(sorted({label for part in best for label in part.labels})),
                         confidence=min(part.confidence for part in best), fuzzy=any(p.fuzzy for p in best),
                         pattern=-1, text=u.text, parts=tuple(best))
@@ -229,13 +238,16 @@ class Grammar:
     def _clause(self, u: Normalised, start: int, end: int) -> Normalised:
         clause = u.slice(start, end)
         clause.negated = any(token in self.canon.negation for token in clause.tokens)
-        clause.question = any(token in self.canon.question_words for token in clause.tokens)
+        # a question word belongs to its own clause; the question mark ends the utterance and asks every clause
+        clause.question = u.raw.rstrip().endswith("?") or any(token in self.canon.question_words for token in clause.tokens)
         return clause
 
     # ── replies ───────────────────────────────────────────────────────────
-    def say(self, decision: Decision, pick: Callable[[list[str]], str] = lambda options: options[0]) -> str | None:
-        """The sentence to speak for a decision, or None (earcon/none/action only)."""
-        return render_reply(decision, pick)
+    def say(self, decision: Decision, pick: Callable[[list[str]], str] = lambda options: options[0],
+            values: Mapping[str, Any] | None = None) -> str | None:
+        """The sentence to speak for a decision, or None (earcon/none/action only, or a template the executor has to
+        fill: pass what it measured as `values`)."""
+        return render_reply(decision, pick, values)
 
     # ── pinned checks ─────────────────────────────────────────────────────
     def self_check(self) -> list[str]:
@@ -278,26 +290,27 @@ def _resolve(action: dict[str, Any] | None, slots: dict[str, Any]) -> dict[str, 
     return {"executor": action["executor"], "args": args}
 
 
-class _Safe(dict):
-    def __missing__(self, key: str) -> str:
-        return "{" + key + "}"
-
-
-def render_reply(decision: Decision, pick: Callable[[list[str]], str] = lambda options: options[0]) -> str | None:
+def render_reply(decision: Decision, pick: Callable[[list[str]], str] = lambda options: options[0],
+                 values: Mapping[str, Any] | None = None) -> str | None:
+    """The line to speak. `values` are executor-supplied fields for the template (they win over matched slots); a
+    template with a placeholder nobody filled yields None, never the literal «{level}»."""
     reply = decision.reply
     if not reply or reply["kind"] not in ("canned", "template"):
         return decision.ask
     options = reply["say"] if isinstance(reply["say"], list) else [reply["say"]]
     line = pick(list(options))
-    if reply["kind"] == "template":
-        values = _Safe(decision.slots)
-        for name, value in decision.slots.items():
-            if isinstance(value, int) and name in ("duration", "time"):
-                values[name + "_text"] = duration_ru(value)
-            if isinstance(value, dict) and "text" in value:
-                values[name + "_text"] = value["text"]
-        return line.format_map(values)
-    return line
+    if reply["kind"] != "template":
+        return line
+    fields: dict[str, Any] = {**decision.slots, **(values or {})}
+    for name, value in list(fields.items()):
+        if isinstance(value, int) and not isinstance(value, bool) and name in ("duration", "time"):
+            fields[name + "_text"] = duration_ru(value)
+        if isinstance(value, dict) and "text" in value:
+            fields[name + "_text"] = value["text"]
+    try:
+        return line.format_map(fields)
+    except (KeyError, IndexError, ValueError, AttributeError):
+        return None
 
 
 # ── loading ─────────────────────────────────────────────────────────────────

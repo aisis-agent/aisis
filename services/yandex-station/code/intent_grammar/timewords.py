@@ -75,7 +75,17 @@ def _hour_before(tokens: list[str], pos: int) -> list[tuple[int, int]]:
     return [(end, value) for end, value in parse_ordinal(tokens, pos) if 1 <= value <= 12]
 
 
-def _apply_part(hour: int, part: str | None) -> int:
+# The hours a day part may qualify when the time is written on the 24-hour clock («23:30 ночи», «пятнадцать ноль ноль
+# дня»): anything else contradicts itself and is rejected, never shifted by twelve hours.
+_PART_HOURS_24 = {"morning": (0,), "day": range(13, 18), "evening": range(16, 24), "night": (0, 21, 22, 23)}
+
+
+def _apply_part(hour: int, part: str | None) -> int | None:
+    """The 24-hour value of `hour` said with a day part; None when the two contradict each other."""
+    if part is None:
+        return hour
+    if hour == 0 or hour > 12:
+        return hour if hour in _PART_HOURS_24[part] else None
     if part in ("day", "evening") and hour < 12:
         return hour + 12
     if part == "night":
@@ -85,10 +95,35 @@ def _apply_part(hour: int, part: str | None) -> int:
     return hour
 
 
-def _clock(hour: int, minute: int, part: str | None, *, twelve: bool) -> dict[str, object]:
-    hour = _apply_part(hour, part)
-    return {"hour": hour % 24, "minute": minute, "part": part,
-            "ambiguous": twelve and part is None and 1 <= hour <= 12, "text": f"{hour % 24:02d}:{minute:02d}"}
+def _reading(hour: int, minute: int, part: str | None, ambiguous: bool) -> dict[str, object]:
+    return {"hour": hour % 24, "minute": minute, "part": part, "ambiguous": ambiguous,
+            "text": f"{hour % 24:02d}:{minute:02d}"}
+
+
+def _clock(hour: int, minute: int, part: str | None, *, twelve: bool) -> dict[str, object] | None:
+    shown = _apply_part(hour, part)
+    if shown is None:
+        return None
+    return _reading(shown, minute, part, twelve and part is None and 1 <= shown <= 12)
+
+
+def _reference_hour(hour: int, part: str) -> int:
+    """The hour an idiom points at on the 24-hour clock, 1..24: «двенадцатого» in «половина двенадцатого дня» is 12:00."""
+    if part == "morning":
+        return hour
+    if part == "day":
+        return hour + 12 if hour < 12 else hour
+    if part == "evening":
+        return hour + 12                      # twelve in the evening is midnight: 24
+    return 24 if hour == 12 else hour + 12 if hour >= 6 else hour
+
+
+def _before_hour(hour: int, minute: int, part: str | None) -> dict[str, object]:
+    """«половина седьмого»: `minute` past the hour BEFORE the one named. The day part qualifies the named hour, so it
+    is resolved first and only then is one hour taken off («половина двенадцатого дня» is 11:30, not 23:30)."""
+    if part is None:                          # a 12-hour clock with no part: the reading stays ambiguous
+        return _reading((hour - 1) or 12, minute, None, True)
+    return _reading(_reference_hour(hour, part) - 1, minute, part, False)
 
 
 def _with_part(tokens: list[str], pos: int) -> tuple[int, str | None]:
@@ -123,9 +158,11 @@ def parse_clock(tokens: list[str], start: int = 0) -> list[tuple[int, dict[str, 
 
     if ":" in token:
         hh, _, mm = token.partition(":")
-        if hh.isdigit() and mm.isdigit() and int(hh) <= 23 and int(mm) <= 59:
+        if hh.isdigit() and mm.isdigit() and len(hh) <= 2 and len(mm) <= 2 and int(hh) <= 23 and int(mm) <= 59:
             end, part = _with_part(tokens, start + 1)
-            readings.append((end, _clock(int(hh), int(mm), part, twelve=False)))
+            clock = _clock(int(hh), int(mm), part, twelve=False)
+            if clock is not None:
+                readings.append((end, clock))
         return readings
 
     if token in ("полдень",):
@@ -137,17 +174,17 @@ def parse_clock(tokens: list[str], start: int = 0) -> list[tuple[int, dict[str, 
     if token in ("половина", "половину", "пол") and start + 1 < len(tokens):
         for end, hour in _hour_before(tokens, start + 1):
             end2, part = _with_part(tokens, end)
-            readings.append((end2, _clock((hour - 1) or 12, 30, part, twelve=True)))
+            readings.append((end2, _before_hour(hour, 30, part)))
     if token.startswith("пол") and len(token) > 5:
         for end, hour in _hour_before([token[3:]], 0):
             end2, part = _with_part(tokens, start + 1)
-            readings.append((end2, _clock((hour - 1) or 12, 30, part, twelve=True)))
+            readings.append((end2, _before_hour(hour, 30, part)))
 
     # «четверть седьмого» -> 6:15; «без четверти восемь» -> 7:45; «без пятнадцати восемь» -> 7:45
     if token in _QUARTER and start + 1 < len(tokens):
         for end, hour in _hour_before(tokens, start + 1):
             end2, part = _with_part(tokens, end)
-            readings.append((end2, _clock((hour - 1) or 12, 15, part, twelve=True)))
+            readings.append((end2, _before_hour(hour, 15, part)))
     if token == "без" and start + 1 < len(tokens):
         pos = start + 1
         deltas: list[tuple[int, int]] = []
@@ -161,15 +198,14 @@ def parse_clock(tokens: list[str], start: int = 0) -> list[tuple[int, dict[str, 
             for hend, hour in parse_number(tokens, dend):
                 if isinstance(hour, int) and 1 <= hour <= 12:
                     hend2, part = _with_part(tokens, hend)
-                    previous = hour - 1 or 12
-                    readings.append((hend2, _clock(previous, 60 - minus, part, twelve=True)))
+                    readings.append((hend2, _before_hour(hour, 60 - minus, part)))
 
     # «десять минут седьмого» -> 6:10; «двадцать пять минут восьмого» -> 7:25
     for end, value in parse_number(tokens, start):
         if isinstance(value, int) and 1 <= value <= 59 and end < len(tokens) and tokens[end].startswith("минут"):
             for hend, hour in _hour_before(tokens, end + 1):
                 hend2, part = _with_part(tokens, hend)
-                readings.append((hend2, _clock((hour - 1) or 12, value, part, twelve=True)))
+                readings.append((hend2, _before_hour(hour, value, part)))
 
     # «семь», «семь часов», «семь тридцать», «семь ноль пять», «двадцать три сорок», «семь утра»
     for end, hour in parse_number(tokens, start):
@@ -179,8 +215,9 @@ def parse_clock(tokens: list[str], start: int = 0) -> list[tuple[int, dict[str, 
         explicit_hour_word = pos != end
         for mend, minute in _minutes(tokens, pos) or [(pos, 0)]:
             end2, part = _with_part(tokens, mend)
-            twelve = hour <= 12
-            readings.append((end2, _clock(hour, minute, part, twelve=twelve)))
+            clock = _clock(hour, minute, part, twelve=hour <= 12)
+            if clock is not None:
+                readings.append((end2, clock))
             if explicit_hour_word or mend != pos or part is not None:
                 break
     best: dict[int, dict[str, object]] = {}

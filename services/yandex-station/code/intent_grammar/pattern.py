@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Iterator
 
-from .normalize import Normalised, edit_distance_le1, phonetic_key, stem
+from .normalize import Normalised, edit_distance_le1, fold, phonetic_key, stem
 from .numerals import parse_number, parse_ordinal
 from .timewords import parse_clock, parse_duration
 
@@ -127,6 +127,8 @@ def _parse_word(token: str) -> Node:
         return Any1()
     if token == "...":
         return AnyRun()
+    # literals are folded the way utterances are (lower case, ё -> е), or «Алиса» and «ещё» could never match
+    token = fold(token)
     if token.startswith("="):
         return Word("exact", token[1:], token[1:])
     if token.startswith("~"):

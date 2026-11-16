@@ -82,20 +82,20 @@ _ORD_ENDINGS = frozenset(("ый", "ой", "ий", "ого", "ому", "ым", "�
                           "ья", "ье", "ьи", "ьего", "ьему", "ьим", "ьем", "ьей", "ью", "ьих", "ьими", "ей"))
 
 
-def _is_digits(token: str) -> bool:
-    return token.isdigit()
+# A spoken number never has more digits than this: longer runs are line noise, not a quantity.
+MAX_DIGITS = 9
 
 
 def _is_decimal(token: str) -> bool:
-    if not token or not token[0].isdigit():
+    if not token or not token[0].isdigit() or ":" in token:
         return False
     head, _, tail = token.partition(".")
-    return head.isdigit() and (tail == "" or tail.isdigit()) and ":" not in token
+    return head.isdigit() and (tail == "" or tail.isdigit()) and len(head) <= MAX_DIGITS and len(tail) <= MAX_DIGITS
 
 
 def _numeric(token: str) -> Number:
-    value = float(token)
-    return int(value) if value == int(value) and "." not in token else value
+    """The value of a token `_is_decimal` accepted: integers are parsed as integers, never through float."""
+    return float(token) if "." in token else int(token)
 
 
 def _hundreds_unit(token: str) -> tuple[str, int] | None:
@@ -195,7 +195,6 @@ def _ordinal_word(token: str) -> int | None:
     for stem_, value in _ORD_STEMS.items():
         if token.startswith(stem_) and token[len(stem_):] in _ORD_ENDINGS:
             return value
-    if token.endswith(("ый", "ой", "ий")) and token[:-2].isdigit():
+    if token.endswith(("ый", "ой", "ий")) and token[:-2].isdigit() and len(token) <= MAX_DIGITS + 2:
         return int(token[:-2])
     return None
-

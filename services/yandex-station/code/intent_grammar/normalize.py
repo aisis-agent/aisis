@@ -12,26 +12,28 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-# A token is a number (digits, optional :minutes or decimal part, optional %), a word (Latin or Cyrillic letters,
-# hyphens inside), or a lone percent sign.
-_TOKEN = re.compile(r"\d+(?:[:.,]\d+)?%?|[a-zа-я]+(?:-[a-zа-я]+)*|%")
+# A token is a number (digits, optional :minutes or decimal part, optional %, optional leading sign), a word (Latin or
+# Cyrillic letters, hyphens inside), or a lone percent sign. A sign glued to the digits stays part of the token
+# («-5» is not a number: nothing reads it), but a hyphen after a digit is a range dash («5-10»: 5, 10).
+_TOKEN = re.compile(r"(?<!\d)[+-]\d+(?:[:.,]\d+)?%?|\d+(?:[:.,]\d+)?%?|[a-zа-я]+(?:-[a-zа-я]+)*|%")
 _PARTICLE_KA = re.compile(r"-ка$")
 
-# One inflection ending is cut when at least MIN_STEM letters remain. Longest ending first.
+# One inflection ending is cut when at least MIN_STEM letters remain. Longest ending first. No past-tense «-л» ending
+# (-ал -ял -ил -ел) is cut: «включил» must not collapse into the imperative «включи», a report is not a command.
 MIN_STEM = 3   # letters that must remain after an ending is cut (4 for a one-letter ending)
 _ENDINGS = tuple(sorted({
     "ыми", "ими", "ого", "его", "ому", "ему", "ами", "ями", "ешь", "ишь", "ете", "ите", "ают", "яют", "ует", "уют",
     "ать", "ять", "ить", "еть", "уть", "ает", "яет",
     "ой", "ей", "ый", "ий", "ая", "яя", "ое", "ее", "ые", "ие", "ую", "юю", "ых", "их", "ом", "ем", "ым", "им",
     "ов", "ев", "ам", "ям", "ах", "ях", "ою", "ею", "ия", "ай", "яй", "ла", "ли", "ло",
-    "ал", "ял", "ил", "ел", "ть", "ти",
+    "ть", "ти",
     "а", "я", "о", "е", "у", "ю", "ы", "и", "ь", "й",
 }, key=len, reverse=True))
 
 
 def fold(text: str) -> str:
-    """Lower case, ё -> е, typographic dashes -> hyphen."""
-    return text.lower().replace("ё", "е").replace("—", "-").replace("–", "-")
+    """Lower case, ё -> е, typographic dashes and the minus sign -> hyphen."""
+    return text.lower().replace("ё", "е").replace("—", "-").replace("–", "-").replace("−", "-")
 
 
 def stem(word: str) -> str:
@@ -127,7 +129,7 @@ def tokenize(raw: str) -> tuple[list[str], list[tuple[int, int]]]:
             spans.append(span)
         else:
             text = _PARTICLE_KA.sub("", text)
-            if text and text[0].isdigit():
+            if text.lstrip("+-")[:1].isdigit():
                 text = text.replace(",", ".")
             if text:
                 tokens.append(text)
