@@ -1,0 +1,3 @@
+# Local credential files: keys live in the OS keychain or in an uncommitted .env, never in git.
+.env
+.env.*
