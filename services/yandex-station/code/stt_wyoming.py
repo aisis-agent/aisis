@@ -20,12 +20,13 @@ import os
 import re
 import time
 import random
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from aiohttp import WSMsgType, web
 
 import dsp_settings
 import speech_frontend
+import spotter_clips
 import stt_tuning
 import voice_vocab
 
@@ -431,6 +432,13 @@ class STTGateway:
         return (self.env.get("AISIS_DIALOGS_DB") or os.environ.get("AISIS_DIALOGS_DB")
                 or os.path.expanduser("~/.local/share/aisis/dialogs.sqlite3"))
 
+    def prune_archive(self):
+        """Retention: at most once a day, from whichever path just archived a clip (gateway utterance or spotter upload)."""
+        if time.time() - self.pruned_at > 86400:
+            self.pruned_at = time.time()
+            import voiceclips
+            voiceclips.prune(self.db_path())
+
     def archive(self, utt, meta):
         """Keep the utterance and what became of it (voiceclips). Off the event loop; never delays or fails a turn."""
         if not self.archive_enabled:
@@ -442,9 +450,7 @@ class STTGateway:
         def work():
             import voiceclips
             voiceclips.save(self.db_path(), utt.speech_pcm, utt.rate, meta)
-            if time.time() - self.pruned_at > 86400:
-                self.pruned_at = time.time()
-                voiceclips.prune(self.db_path())
+            self.prune_archive()
         job = asyncio.get_running_loop().run_in_executor(None, work)
         self.speaker_background.add(job)
         job.add_done_callback(self.speaker_done)
@@ -547,6 +553,29 @@ class STTGateway:
 
     async def health(self, request):
         return web.json_response({"service": "aisis-wyoming-stt", "configured": bool(self.env.get("AISIS_WYOMING_URI")), "model_downloads": False})
+
+    async def spotter_clip(self, request):
+        """A command the speaker recognised on the device: quasar posts the audio the station uploaded for it (spotter_clips.py)."""
+        if not self.archive_enabled:
+            return web.Response(status=204)
+        audio = await request.read()
+        transcript = unquote(request.headers.get("x-aisis-transcript", ""))
+        station, sent_at = request.headers.get("x-aisis-station"), request.headers.get("x-aisis-ts")
+        def work():
+            saved = spotter_clips.archive(self.db_path(), audio, transcript, station, sent_at)
+            try:
+                self.prune_archive()
+            except Exception as exc:  # the clip is saved; retention retries on the next one
+                LOG.warning("spotter_clip_prune_failed class=%s", type(exc).__name__)
+            return saved
+        try:
+            saved = await asyncio.get_running_loop().run_in_executor(None, work)
+        except spotter_clips.Rejected as rejected:
+            LOG.info("spotter_clip_rejected reason=%s station=%s bytes=%d", rejected.reason, request.headers.get("x-aisis-station", "-"), len(audio))
+            return web.json_response({"error": rejected.reason}, status=422)
+        LOG.info("spotter_clip_archived station=%s source=%s frames=%s", request.headers.get("x-aisis-station", "-"),
+                 request.headers.get("x-aisis-source", "-"), request.headers.get("x-aisis-frames", "-"))
+        return web.json_response(saved, status=201)
 
     async def websocket(self, request):
         if not self.env.get("AISIS_WYOMING_URI"):
@@ -729,6 +758,7 @@ class STTGateway:
         app.on_startup.append(self.warm_speaker)
         app.router.add_get("/", self.websocket)
         app.router.add_get("/healthz", self.health)
+        app.router.add_post("/spotter-clip", self.spotter_clip)
         return app
 
 

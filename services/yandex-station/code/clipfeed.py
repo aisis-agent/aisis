@@ -174,6 +174,8 @@ def describe_result(clip: dict, dialog: dict | None, window_end: float) -> str:
     if not heard:
         return "∅ пустой текст"
     if dialog is None:
+        if clip.get("trigger") == voiceclips.SPOTTER_TRIGGER:  # «громче», «пауза»: the speaker ran it itself, the server heard no text turn
+            return "🔊 команду выполнила сама колонка, серверу пришла только запись"
         return "❔ диалог не найден"
     start = _seconds_of_day(time.strftime("%H:%M:%S", time.localtime(clip["ts"]))) or 0
     stop = start + max(1, int(window_end - clip["ts"]))
@@ -212,7 +214,8 @@ def load_dialog(conn: sqlite3.Connection, dialog_id: str | None) -> dict | None:
 
 
 WAKE_WORDS = ("алис", "яндекс")
-CUT_BY = {"vad": "закрыто по паузе (VAD)", "finish": "поток закончила станция (EOF)", "idle": "закрыто по таймауту потока"}
+CUT_BY = {"vad": "закрыто по паузе (VAD)", "finish": "поток закончила станция (EOF)", "idle": "закрыто по таймауту потока",
+          voiceclips.SPOTTER_TRIGGER: "распознано самой колонкой (споттер команд); запись из лога споттера, текст не от Whisper"}
 SHORT_SPEECH_MS = 700
 REPLY_FOOTER = ("Реплай на это сообщение = что сказали на самом деле; «=» — расшифровка верна, «шум» — речи не было. "
                 "Могли говорить издалека, начало или конец могло обрезаться.")
@@ -230,6 +233,8 @@ def window_end(conn: sqlite3.Connection, clip: dict) -> float:
 def endpoint_hints(clip: dict) -> list[str]:
     """What closed the clip and whether its start or end may be cut: the usual cause of «Полиция» for «Алиса, …»."""
     cut = CUT_BY.get(clip.get("trigger") or "", "причина закрытия неизвестна")
+    if clip.get("trigger") == voiceclips.SPOTTER_TRIGGER:  # no VAD ran: there is no tail or speech length to show, and no wake word to expect
+        return ["✂ %s · длина записи %s с" % (cut, "%.1f" % clip["dur"] if clip.get("dur") is not None else "—")]
     lines = ["✂ %s · хвост тишины %s мс · речь %s мс из %s с" % (
         cut, clip.get("silence_ms", "—"), clip.get("voiced_ms", "—"), "%.1f" % clip["dur"] if clip.get("dur") is not None else "—")]
     heard = (clip.get("transcript") or "").strip()
