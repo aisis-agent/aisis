@@ -1,6 +1,6 @@
 # Fast LLM tier and safe routing for the voice speaker
 
-Ticket: alex-mextner/aisis#88 (relates to #37, response latency). Research date: 2026-11-15. Owner ask: how to get ~1000 tok/s, find a provider with similar speed, and make sure the fast model never answers hard questions or fact lookups.
+Ticket: alex-mextner/aisis#88 (relates to #37, response latency). Research date: 2026-11-15. Owner ask: how to get ~1000 tok/s, find a provider with similar speed, and make sure the fast model never answers hard questions or fact lookups. **Amendment (owner review of PR #91):** the first draft sent weather and other tool-answerable lookups to the strong brain. That was wrong; the router has three routes and tool-answerable questions never reach an LLM (§6).
 
 Labels used for every number: **[AA]** independent measurement by Artificial Analysis (median, 10k-token input, quoted through a third-party page), **[OR]** OpenRouter live-traffic median, **[vendor]** the provider's own claim, **[here]** measured from the speaker host during this research, **[INFERENCE]** my reasoning, not observed.
 
@@ -98,17 +98,20 @@ These estimates assume **llama.cpp CUDA, batch 1, all layers offloaded, ~2k cont
 
 CPU-only bandwidth is unmeasured: assuming ~50 GB/s dual-channel DDR4 gives a ~50 tok/s weight-read ceiling for a 1 GB model, with ~20–30 tok/s as a rough practical estimate. **No useful local 1000 tok/s configuration was found.** A 1.5B Q4 model might yield ~100–150 tok/s with short context; its Russian quality still needs evaluation. Spec 140 reserves only ~3 GB for the speaker stack. More GPU memory helps model fit but does not establish single-stream latency.
 
-## 6. Two-tier routing design
+## 6. Three-route routing design
+
+**Principle: if a local tool can produce the answer, use the tool, not an LLM.** Facts that come from a tool (weather, device state, time/date) are *not* fact lookups for escalation purposes. Routes: **(1) deterministic skills, no LLM:** smart-home commands, timers, volume/media, weather, time/date, unit conversions, music by name: regex/intent match, tool call, templated reply from the tool's structured output. **(2) fast/lite model:** only slot extraction (city, day) when the regex cannot parse it, paraphrase of a tool result, small talk and simple confirmations; strict classification precedes generation and any doubt means ESCALATE. **(3) strong brain:** only open-world knowledge/facts no local tool can answer (prices, rates, people, places, events), complex reasoning, multi-step questions, or when a skill returns «cannot answer» (tool error, unknown city, no data).
+
 
 ```
 utterance ─► [existing] fast-intent / laya / asr_correct (matched commands consumed; unmatched goes onward)
           ─► adapter._process_turn
-               calc_evaluate ─► voice_skills.answer (weather, music) ─► [new] clock skill ─┐
+               ROUTE 1 (no LLM): calc_evaluate ─► voice_skills.answer (weather, music) ─► [new] clock skill ─┐
                                                                                             ▼ none matched
                fast_tier.decide(text, context)
                  CANNED -> fixed reply
-                 BANTER -> strict classifier -> fast generator -> validator
-                 anything uncertain -> Adapter.turn -> claude_primary -> pm reserve
+                 ROUTE 2: BANTER / slot extraction -> strict classifier -> fast generator -> validator
+                 ROUTE 3: uncertain, open-world or skill 'cannot answer' -> Adapter.turn -> claude_primary -> pm reserve
 ```
 
 Proposed module `services/yandex-station/code/fast_tier.py` owns decision, prompt, validator and client; call after `skills.answer` once #85 lands, otherwise after `calc_evaluate`. Switch `AISIS_FAST_TIER=off|shadow|canned|on` (default `off`).
@@ -120,7 +123,7 @@ Use the committed `calc.py` normalization precedent (lower-case, ё→е). After
 1. **Context gate overrides everything:** after an escalated turn, a rejected candidate, or an unresolved clarification, send follow-ups to the strong path for 120 s. `voice_scores.score` is speaker verification, not ASR confidence. Unknown or incomplete input never triggers a content guess.
 2. **Existing tools run first.** Smart-home actions remain in the quasar fast-intent layer; confirm only from successful tool receipts. Add fixed-unit conversions to `calc.py` with a parsed number/unit table (F39–F42), before this router. There is **no CONVERSION route inside `fast_tier`**. Failed parses escalate.
 3. **Canonical allow-list:** one implementation table contains the normalized exact phrases F01–F38 from the corpus, their route, and their exact DENY-word exemptions. F01–F23 are CANNED (F02 «Привет, как дела?» has a fixed greeting); F24–F38 are BANTER. No example elsewhere adds aliases. «Как дела у Дурова?» cannot match «Привет, как дела?». Whole-utterance matching, not capitalization, is the safety boundary.
-4. **DENY rules:** information-seeking stems (`кто`, `что`, `когда`, `почему`, `сколько`, `найди`, `новост`, `погод`, `курс`, `цен`, `счет`), advice/safety/action stems, multiple requests or >8 words escalate unless the entire text is precisely an exempt canonical phrase. A greeting followed by a fact request is never exempt. Unknown text always escalates; missed stems cannot create permission.
+4. **DENY rules:** information-seeking stems (`кто`, `что`, `когда`, `почему`, `сколько`, `найди`, `новост`, `курс`, `цен`, `счет`), advice/safety/action stems, multiple requests or >8 words escalate unless the entire text is precisely an exempt canonical phrase. A greeting followed by a fact request is never exempt. Unknown text always escalates; missed stems cannot create permission.
 5. **Acknowledgements are contextual:** the adapter has no pending-approval state machine. Clarification confirmation exists upstream in quasar/asr_correct; do not intercept it. Without trusted upstream confirmation that no question/action is pending, F16–F23 escalate rather than receive a misleading «Хорошо». Voice never authorizes sensitive writes. Reprompt is allowed only for a clearly truncated phrase or wake-only input, otherwise escalate.
 
 The deterministic rule router grants **eligibility only**. A separate strict LLM classifier must still approve BANTER before answer generation. The classifier cannot override DENY/UNKNOWN.
@@ -137,7 +140,7 @@ System prompt (Russian, sent verbatim; the fixed token is `ESCALATE`):
 ```
 Ты Брачо, голосовой собеседник на домашней колонке. Ты отвечаешь только на болтовню: шутки, настроение, вопросы о тебе самом, короткие реплики вежливости. Если нужна информация о мире, совет, действие или есть сомнение, ответь ровно одним токеном ESCALATE. Не пытайся ответить частично.
 Правила:
-1. Ты не знаешь фактов о мире: погоду, новости, цены, курсы, время и дату, людей, места, события, определения. Проверяемый или меняющийся ответ: ESCALATE.
+1. Ты не знаешь фактов о мире: новости, цены, курсы, время и дату, людей, места, события, определения. Проверяемый или меняющийся ответ: ESCALATE.
 2. Сомневаешься, о чём речь, или фраза похожа на команду, обрывок, шум: ESCALATE.
 3. Не давай советов (здоровье, деньги, право, отношения, безопасность), не объясняй, не сравнивай, не пиши тексты, не решай задачи: ESCALATE.
 4. Ты ничего не включаешь, не ищешь, не запоминаешь и не проверяешь; не обещай этого.
@@ -151,7 +154,7 @@ System prompt (Russian, sent verbatim; the fixed token is `ESCALATE`):
 
 Preserve `Adapter.turn` → `AISIS_CHATGPT_COMMAND` (`claude_primary` → pm reserve), station locks, authenticated loopback PM envelope `{station_id,text,conversation_id,turn_id}` → `{text,conversation_id}`, and no retry of uncertain dispatch. Fast responses use the same station lock and turn-status ledger, without updating browser `conversation_id` or marking the strong persona delivered. **Existing quasar log ingestion into `dialogs` and `dialog_context.recent_block` is the sole transcript path.** Do not append another copy into that history or mutate `claude_primary`'s database; test that the next strong turn sees each spoken fast reply once.
 
-**Strong-tool design:** current `claude_primary` supplies no tools, so keep static knowledge on that path but add a trusted strong-only tool broker for lookups. Proposed schema-validated read-only functions: `weather(location,period)` → existing weather CLI/skill; `search(query)` → a configured search API returning timestamped source URLs/snippets; `music_search(query)` → existing Music Assistant. Music execution and all home-control writes stay in existing authorized deterministic handlers; model text cannot trigger them. For weather/news/prices/current events the broker requires a successful fresh tool result before a factual spoken answer, including requested location/time. On unavailable key, timeout, stale/no sources: «Не получилось проверить», not a memory-based fallback. A chat-only CDP reserve with no verified tools may answer static questions but must not be used to invent live facts. This is a concrete integration requirement for the later implementation, not something the current deployment already does.
+**Strong-tool design:** current `claude_primary` supplies no tools, so keep static knowledge on that path but add a trusted strong-only tool broker for lookups. Proposed schema-validated read-only functions: `search(query)` → a configured search API returning timestamped source URLs/snippets; `music_search(query)` → existing Music Assistant. Music execution and all home-control writes stay in existing authorized deterministic handlers; model text cannot trigger them. For news/prices/current events the broker requires a successful fresh tool result before a factual spoken answer, including requested location/time. On unavailable key, timeout, stale/no sources: «Не получилось проверить», not a memory-based fallback. A chat-only CDP reserve with no verified tools may answer static questions but must not be used to invent live facts. This is a concrete integration requirement for the later implementation, not something the current deployment already does.
 
 ### 6.4 Latency masking (d)
 
@@ -177,25 +180,27 @@ Ordinary telemetry contains only route/reason/timing/verdict. **Shadow text goes
 
 ## 7. Eval plan
 
-Data: [`fast-llm-eval.jsonl`](fast-llm-eval.jsonl): 149 labelled utterances. Core classes: fast-eligible 38, reprompt 30, fact 35, complex 30 (30–50 each). Extras: 4 deterministic conversions, 11 traps, 1 contextual follow-up. IDs are stable; appended test batches are intentionally not renumbered.
+Data: [`fast-llm-eval.jsonl`](fast-llm-eval.jsonl): 149 labelled utterances. Core classes: fast-eligible 38, reprompt 30, fact 32, complex 30 (30–50 each). Extras: 10 deterministic-skill items (4 conversions, 4 weather, 2 time), 8 traps, 1 contextual follow-up. IDs are stable; appended test batches are intentionally not renumbered.
 
 | Label | Count | Expected |
 |---|---|---|
 | `fast` | 38 | CANNED or BANTER when context permits; escalation is safe but reduces recall |
 | `reprompt` | 30 | noise/cut-off phrases: request repetition or safely escalate, never invent content; wake-only: «Слушаю.» |
-| `escalate` | 77 (35 fact, 30 complex/advice/safety/tools, 11 traps, 1 follow-up) | **no fast-model content**; an existing deterministic skill with a successful tool receipt is allowed before routing, otherwise strong path |
-| `deterministic` | 4 | fixed-unit converter in `calc.py`, before routing; recompute results exactly |
+| `escalate` | 71 (32 open-world fact with no local tool, 30 complex/advice/safety/tools, 8 traps, 1 follow-up) | **no fast-model content**; strong path |
+| `deterministic` | 10 (4 conversions, 4 weather, 2 time) | route 1, no LLM: `calc.py` converter, weather-cli skill, clock skill; templated reply from structured tool output; recompute/verify values exactly. Failure or «cannot answer» escalates |
 
 Real traffic is not committed: the corpus above is synthetic, modelled on the adapter log's categories.
 
-Labels describe a **router-only fixture** with no unresolved context unless `prev` is set. End-to-end evaluation also permits verified deterministic clock/weather/music answers before the router and records `deterministic|fast_model|strong` separately. No deterministic tool receipt counts as a fast-model answer. A later harness must additionally cover all four modes, lower-case equivalents, upstream pending-clarification acknowledgements, cancellation, shadow-history isolation and sticky follow-ups without question words («подробнее», «а он»).
+Weather/time utterances (E01, E17, E28, E61, E67, E70) were relabelled from `escalate` to `deterministic` per owner review: they are served by tools, so sending them to the strong brain would be a routing defect. Currency rates, prices, traffic and sun times have no local tool and stay `escalate`.
+
+Labels describe a **router-only fixture** with no unresolved context unless `prev` is set. End-to-end evaluation requires deterministic clock/weather/music answers to be served before the router and records `deterministic|fast_model|strong` separately. No deterministic tool receipt counts as a fast-model answer. A later harness must additionally cover all four modes, lower-case equivalents, upstream pending-clarification acknowledgements, cancellation, shadow-history isolation and sticky follow-ups without question words («подробнее», «а он»).
 
 Metrics and gates:
 
-1. **Wrong-fast-answer rate:** zero content answers from the fast model on the 77 escalation-labelled cases; record false-fast eligibility separately. Also count factual hallucinations generated for fast-eligible prompts. Future robustness work should add manually labelled dropped-syllable/homophone/truncation variants; those variants are **not yet in this corpus** and no generated result is claimed. Shadow gate: zero failures on ≥300 distinct owner-labelled escalation turns (including denied turns). Rule of three: 0/300 gives a ~1% one-sided 95% upper bound, not proof of zero.
+1. **Wrong-fast-answer rate:** zero content answers from the fast model on the 71 escalation-labelled open-world cases; record false-fast eligibility separately. Also count factual hallucinations generated for fast-eligible prompts. Future robustness work should add manually labelled dropped-syllable/homophone/truncation variants; those variants are **not yet in this corpus** and no generated result is claimed. Shadow gate: zero failures on ≥300 distinct owner-labelled escalation turns (including denied turns). Rule of three: 0/300 gives a ~1% one-sided 95% upper bound, not proof of zero.
 2. Reprompt safety: 30/30 produce only a repetition request, wake acknowledgement, or escalation; zero content guesses. Record repetition recall separately, since unknown safely escalates.
 3. Fast recall: fraction of the 38 fast-eligible items answered without strong escalation, with context preconditions met; target ≥70%, secondary to safety.
-4. Converter integration: 4/4 deterministic items match a recomputed value; excluded from router recall and model tok/s.
+4. Deterministic-skill gate: 10/10 `deterministic` items are answered with **zero LLM calls** (skill-route rate 10/10), values match a recomputed conversion or a mocked tool output (weather/time), and none escalates to the strong brain unless the tool reports failure; excluded from router recall and model tok/s. Any LLM call on a tool-answerable item is a routing defect. A slot-extraction call is allowed only after regex failure and is counted separately.
 5. Latency: p50/p95 of rules (<1 ms), CANNED (<5 ms), BANTER (target p50 ≤ 0.7 s, p95 ≤ 1.0 s from the speaker host).
 6. Russian quality, scored by the owner on 20 banter replies, Qwen 3.8 27B vs gpt-oss-120b (natural / awkward / wrong): the tie-breaker for §1.3.
 
