@@ -56,6 +56,8 @@ jobs:
         run: |
           python3 -m unittest test_intent_grammar
           python3 -m intent_grammar compile --check
+      - name: quasar intent-grammar overlay patch applier tests
+        run: python3 -m unittest discover -s services/yandex-station/overlays/intent-grammar -p "test_*.py"
   whitespace:
     runs-on: ubuntu-latest
     timeout-minutes: 5

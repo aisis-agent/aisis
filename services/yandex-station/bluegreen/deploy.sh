@@ -96,15 +96,19 @@ corpus_check() {
   local c=$1 out line pass total expected
   expected=$(wc -l <"$corpus_dir/intents-ru.jsonl")
   docker exec "$c" mkdir -p /src/backend/corpus
+  # The checks run in whatever GRAMMAR_HOOK mode the container has (stage: off; the idle prod color: what runtime.env sets), but the
+  # adapter URL points at a closed port, so in any mode a check can never reach the real adapter, where /intent/decide would
+  # execute timers (with the hook on it fails open). The hook against an adapter is not checked here: see check_grammar_hook.mts.
+  local CHECK_ADAPTER_INTENT_URL=http://127.0.0.1:9/intent/decide
   docker cp "$corpus_dir/." "$c:/src/backend/corpus/"
-  out=$(docker exec -w /src/backend/corpus "$c" /node_modules/.bin/tsx run_corpus.mts 2>&1) || true
+  out=$(docker exec -e AISIS_ADAPTER_INTENT_URL="$CHECK_ADAPTER_INTENT_URL" -w /src/backend/corpus "$c" /node_modules/.bin/tsx run_corpus.mts 2>&1) || true
   line=$(grep -a 'ИТОГ' <<<"$out" || true)
   [[ $line =~ ([0-9]+)/([0-9]+) ]] || { log "corpus on $c: no result line"; return 1; }
   pass=${BASH_REMATCH[1]} total=${BASH_REMATCH[2]}
   log "corpus on $c: $pass/$total (expected $expected)"
   [[ $pass == "$total" && $total == "$expected" ]] || return 1
   # Multi-turn dialogs against a mocked HA: confirmations, slot fill, earcon, volume directive.
-  out=$(docker exec -w /src/backend/corpus "$c" /node_modules/.bin/tsx run_dialogs.mts 2>&1) || true
+  out=$(docker exec -e AISIS_ADAPTER_INTENT_URL="$CHECK_ADAPTER_INTENT_URL" -w /src/backend/corpus "$c" /node_modules/.bin/tsx run_dialogs.mts 2>&1) || true
   line=$(grep -a 'ДИАЛОГИ' <<<"$out" || true)
   [[ $line =~ ([0-9]+)/([0-9]+) ]] || { log "dialogs on $c: no result line"; return 1; }
   log "dialogs on $c: ${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
