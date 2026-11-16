@@ -409,6 +409,16 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         ha.reply = "Готово."
         await r.route("a", "поставь таймер на десять минут и сделай теплее")
         self.assertEqual(len(ha.calls), 2)       # Home Assistant retried, not the stored failure replayed
+        self.assertEqual(len(timers.calls), 2)   # the accepted cost: the timer clause runs again with it
+
+    async def test_a_timer_with_a_clock_clause_delivered_by_the_hook_and_then_the_turn_is_one_timer(self):
+        timers = FakeTimers()
+        r = router(timers=timers, monotonic=lambda: 100.0)
+        hook = await r.route("quasar", "поставь таймер на пять минут и скажи время", phase="pre", via_quasar=True)
+        turn = await r.route("st", "поставь таймер на пять минут и скажи время")
+        self.assertEqual(hook.kind, "reply")
+        self.assertEqual(turn.text, hook.text)
+        self.assertEqual(timers.calls, [("start", 300, None)])
 
     async def test_concurrent_duplicates_of_a_timer_start_run_once(self):
         class Slow(FakeTimers):

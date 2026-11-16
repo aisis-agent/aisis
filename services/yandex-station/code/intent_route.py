@@ -229,8 +229,9 @@ class IntentRouter:
         One slot remembers the last utterance that ran: its route and when. It is replayed only for the SAME utterance (a compound
         as a unit), and only after every action in flight has finished, so a cancel is never answered from the slot ahead of a start
         that is registered but has not run. Any other utterance that runs an action empties the slot first (start → cancel → start →
-        cancel never replays a stale reply); a failure, a decline or a queued result is never stored, and neither is a compound with a clause that is not a timer clause (Home
-        Assistant clauses depend on the speaker's room and may fail or queue behind a reply that still says «готово»). A duplicate that arrives
+        cancel never replays a stale reply); a failure, a decline or a queued result is never stored, and neither is a compound with a Home Assistant clause
+        (it depends on the speaker's room and may fail or queue behind a reply that still says «готово»; a repeat runs it again, timer
+        clause included). A duplicate that arrives
         while the first delivery is running waits for it."""
         key = self.grammar.normalise(text).text
         while True:
@@ -252,7 +253,7 @@ class IntentRouter:
     async def _run_timer_action(self, key: str, station: str, decision: Decision, via_quasar: bool) -> Route:
         self.memo = None   # whatever ran before is no longer the last thing that happened
         route = await self._run(station, decision, via_quasar)
-        if route.kind == "reply" and all((part.action or {}).get("executor", "").startswith(TIMER_PREFIXES) for part in decision.parts or (decision,)):
+        if route.kind == "reply" and not any(((part.action or {}).get("executor") or "").startswith("ha.") for part in decision.parts or (decision,)):
             self.memo = (key, route, self.monotonic())
         return route
 

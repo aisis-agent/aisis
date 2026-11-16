@@ -95,8 +95,9 @@ otherwise real intents (priority >= 0, compounds included) -> arithmetic -> weat
 (canned/reprompt lines, clock, timers, Home Assistant climate and colour, weather, music) and returns `reply | silent | volume | dialog_end | none`; every
 failure, a guessed (fuzzy/confirm) reading, or an executor owned by the quasar container is `none`, so the old path continues untouched.
 Reprompts are said once a minute per station: a second miss goes to the brain. The catch-alls (priority < 0) are also skipped while the last line to the
-station was a question the **brain** asked («Рассказать подробнее?»): «да», «про собак» are the brain's to continue. There is no expiry (the brain's
-text is ready long before it is spoken; the next line of any kind replaces the mark). The adapter tells the router which
+station was a question the **brain** asked («Рассказать подробнее?»): «да», «про собак» are the brain's to continue. The mark lasts five minutes
+(`BRAIN_QUESTION_WINDOW_S`: the brain's text is ready long before it is spoken; lines the hook or the quasar layer answer never reach
+`note_reply`, so only a clock bounds it) or until the next line of any kind replaces it. The adapter tells the router which
 replies are the brain's (`note_reply(..., brain=True)`); the grammar's own questions («Да?», «На сколько поставить таймер?») never count. A tie between two real
 intents is an abstain, never split into a compound (nine or more clauses, counted by their real boundaries, are never split: the search is quadratic);
 `Grammar.decide` with the default bands does not hand it to the catch-alls either (the router's explicit bands do).
@@ -106,7 +107,7 @@ that ends in `none` has changed nothing. Without timers configured a timer phras
 a compound with any other clause goes to the old path whole.
 Timer and alarm starts, sets and cancels run in arrival order, and one **utterance** delivered twice within five seconds runs once (the quasar hook and the
 speaker's own turn can both carry it; so the second «отмени таймер» does not answer «Таймеров нет» to a cancel that worked). One slot remembers the last
-utterance that ran such an action with its reply (a compound only when every clause is a timer clause: Home Assistant clauses depend on the speaker's room and may fail behind a reply that still says «готово»); it is replayed only for the same utterance, after the actions in flight have finished;
+utterance that ran such an action with its reply (a compound unless one of its clauses is a Home Assistant one: those depend on the speaker's room and may fail behind a reply that still says «готово», so a repeated one runs again, timer clause included); it is replayed only for the same utterance, after the actions in flight have finished;
 any other utterance that runs an action empties it, and a failed, declined or queued result is never stored; duplicates in flight share one execution.
 Nothing else is deduplicated: Home Assistant actions and queries run every time. A voice reminder is cancelled by `reminder.cancel` («отмени напоминание»);
 «отмени таймер» with only a reminder left says so and names that phrase. A Home Assistant command without a room is about the room of the speaker
