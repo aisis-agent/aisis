@@ -148,9 +148,10 @@ The Home Assistant component deliberately exposes these generic labels and their
 manifest without authentication. Its endpoints are
 `/api/remote_announcements/manifest` and
 `/api/remote_announcements/audio/<key>.ogg`; they contain no settings or credentials.
-Use an HTTP(S) base URL without user information, a query or a fragment. FFmpeg
+Use an HTTP(S) base URL without user information, a query or a fragment. FFmpeg 7 or newer
 with Opus support must be available on the importer's and adapter's PATH, or via
-their process environment's `FFMPEG` setting.
+their process environment's `FFMPEG` setting. Validation uses the raw PCM muxer's
+single-stream restriction introduced in [FFmpeg 7](https://ffmpeg.org/doxygen/7.0/pcmenc_8c_source.html).
 
 The default cache is `~/.cache/aisis/remote-announcements/`. `--folder` selects a
 separate import location for preparation or tests; the running adapter uses the

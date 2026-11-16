@@ -57,11 +57,15 @@ class AdapterAnnouncementTests(unittest.IsolatedAsyncioTestCase):
         self.adapter._alice_audio.assert_not_awaited()
 
     async def test_missing_and_malformed_markers_never_fall_back(self):
+        manifest = populate(announcement_cache, self.path)
+        marker = announcement_cache.PREFIX + manifest["clips"]["tv"]["key"] + "]"
+        valid = await self.client.post("/v1/audio/speech", headers=self.headers, json={"input": marker})
+        self.assertEqual(valid.status, 200)
+        self.assertEqual(await valid.read(), audio_fixture("tv"))
         for marker in ["[ha-remote:../../secret]", "[ha-remote:" + "b" * 64 + "]",
-                " [ha-remote:" + "b" * 64 + "]", "\n[ha-remote:bad]", "\ufeff[ha-remote:bad]",
-                "\u00a0[ha-remote:bad]", "\u2028[ha-remote:bad]", "\u3000[ha-remote:bad]",
-                "\u200b[ha-remote:bad]", "\u2060[ha-remote:bad]", "[HA-REMOTE:bad]",
-                "[ha-remote:" + "b" * 64 + "]\n"]:
+                " " + marker, "\n" + marker, "\ufeff" + marker, "\u00a0" + marker,
+                "\u2028" + marker, "\u3000" + marker, "\u200b" + marker, "\u2060" + marker,
+                marker.upper(), marker + "\n"]:
             with self.subTest(marker=marker):
                 response = await self.client.post("/v1/audio/speech", headers=self.headers,
                     json={"input": marker})

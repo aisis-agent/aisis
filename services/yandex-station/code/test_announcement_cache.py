@@ -59,14 +59,29 @@ def populate(module, folder):
 class CacheTests(unittest.TestCase):
     def test_unicode_and_case_near_markers_are_classified_but_never_accepted(self):
         module = load_module()
-        marker = "[ha-remote:" + "a" * 64 + "]"
         prefixes = ("\u00a0", "\u2028", "\u3000", "\x1c", "\x85", "\u200b", "\u2060", "\ufeff \u200b")
         with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)
+            manifest = populate(module, path)
+            marker = module.PREFIX + manifest["clips"]["tv"]["key"] + "]"
+            self.assertEqual(module.read_clip(marker, path), audio_fixture("tv"))
             for value in [prefix + marker for prefix in prefixes] + [marker.upper()]:
                 with self.subTest(marker=value):
                     self.assertTrue(module.is_marker(value))
                     with self.assertRaises(module.CacheNotReady):
-                        module.read_clip(value, Path(folder))
+                        module.read_clip(value, path)
+
+    def test_two_short_audio_streams_fail_even_with_combined_duration_metadata(self):
+        module = load_module()
+        audio = subprocess.run([os.environ.get("FFMPEG", "ffmpeg"), "-v", "error",
+            "-f", "lavfi", "-i", "sine=duration=0.4:sample_rate=48000",
+            "-f", "lavfi", "-i", "sine=frequency=330:duration=0.4:sample_rate=48000",
+            "-map", "0:a", "-map", "1:a", "-c:a", "libopus", "-f", "ogg", "pipe:1"],
+            capture_output=True, check=True, timeout=5).stdout
+        self.assertIn(b"OpusHead", audio[:256])
+        self.assertLess(len(audio), 65536)
+        with self.assertRaises(module.CacheNotReady):
+            module.validate_audio(audio, {"sha256": hashlib.sha256(audio).hexdigest(), "duration": 0.8})
 
     def test_non_audio_ogg_stream_is_rejected(self):
         module = load_module()
