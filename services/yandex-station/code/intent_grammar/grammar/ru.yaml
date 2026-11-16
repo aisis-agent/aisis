@@ -1,0 +1,177 @@
+# AISIS speaker intent grammar (Russian). Schema and pattern syntax: ../README.md.
+# Phase 1 seed: the intents the quasar fast layer already serves (volume, media keys, light, repeat, thanks,
+# nameless music), ported into data so the back-test harness has a measured baseline. Executors are names the
+# caller resolves; nothing here talks to hardware.
+version: 1
+locale: ru
+
+lexicon:
+  wake: [алиса, яндекс, брачо]
+  lead_in: [а, ну, слушай, эй, давай, скажи]
+  fillers: [пожалуйста, пожалуйста, вот, же, там, плиз]
+  negation: [не, нельзя, ни, никогда]
+  question_words: [что, какой, какая, какое, какие, сколько, почему, зачем, когда, где, как, кто, ли]
+  connectors: [и, потом, затем, а потом]
+  rooms:
+    living: [гостин*, зал]
+    kitchen: [кухн*]
+    bedroom: [спальн*]
+    studio: [студи*]
+    hall: [прихож*]
+    upstairs: [второй этаж, наверху, наверх]
+  set_verb: [сделай, поставь, установи, выставь, поменяй, переключи]
+  on_verb: [включи, включай, включить, зажги, засвети, вруби, запусти, запускай]
+  off_verb: [выключи, выключай, выключить, погаси, потуши, вырубить, вырубай, отключи]
+
+intents:
+  # ── dialogue ────────────────────────────────────────────────────────────
+  - id: dialog.thanks
+    tier: canned
+    labels: [THANKS]
+    patterns: ["(спасибо|благодарю|спс|благодарствую) (большое|тебе|огромное)?"]
+    reply: {kind: canned, say: ["Пожалуйста."]}
+    examples: [спасибо, "Алиса, спасибо большое"]
+  - id: dialog.dismiss
+    tier: execute
+    allow_negation: true
+    labels: [YES_NO]
+    patterns: ["(ничего|отбой|забудь|проехали|ладно)", "не (надо|нужно)"]
+    action: {executor: dialog.end}
+    reply: {kind: earcon}
+    examples: [ничего, не надо, отбой]
+  - id: dialog.repeat
+    tier: execute
+    labels: [REPEAT]
+    patterns: ["(повтори|повторить) (еще раз)?", "еще раз", "что ты (сказала|сказал)", "повтори (пожалуйста)?"]
+    action: {executor: dialog.repeat_last}
+    reply: {kind: none}
+    examples: [повтори, еще раз, "что ты сказал"]
+
+  # ── media keys ──────────────────────────────────────────────────────────
+  - id: media.stop
+    tier: execute
+    labels: [MEDIA_STOP, media_control, media_partial]
+    patterns: ["(стоп|стой|хватит|остановись|останови|замолчи|прекрати)", "стоп (музыка|музыку)?"]
+    action: {executor: media.key, args: {key: stop}}
+    reply: {kind: earcon}
+    examples: [стоп, хватит, остановись, замолчи]
+  - id: media.pause
+    tier: execute
+    labels: [MEDIA_PAUSE, media_control, media_partial]
+    patterns: ["пауза", "(поставь|поставить) на паузу", "на паузу"]
+    action: {executor: media.key, args: {key: pause}}
+    reply: {kind: earcon}
+    examples: [пауза, "поставь на паузу"]
+  - id: media.next
+    tier: execute
+    labels: [MEDIA_NEXT, media_control, media_partial]
+    patterns: ["(дальше|следующий|следующая|следующую|пропусти|скип|next)", "(следующий|следующая|следующую) (трек|песня|песню|композиция|композицию)",
+               "(переключи|включи) (дальше|следующий трек|следующую песню)"]
+    action: {executor: media.key, args: {key: next}}
+    reply: {kind: earcon}
+    examples: [дальше, "следующий трек", пропусти]
+  - id: media.previous
+    tier: execute
+    labels: [MEDIA_PREVIOUS, media_control, media_partial]
+    patterns: ["(назад|предыдущий|предыдущая|предыдущую)", "(предыдущий|предыдущая|предыдущую) (трек|песня|песню|композиция|композицию)",
+               "(включи|вернись) (назад|к предыдущему|на предыдущий трек)"]
+    action: {executor: media.key, args: {key: previous}}
+    reply: {kind: earcon}
+    examples: [назад, "предыдущий трек"]
+  - id: media.resume
+    tier: execute
+    labels: [MEDIA_RESUME, media_control, media_partial]
+    patterns: ["(продолжи|продолжай|продолжить|возобнови|играй|играть) (дальше|воспроизведение)?"]
+    action: {executor: media.key, args: {key: resume}}
+    reply: {kind: earcon}
+    examples: [продолжи, "продолжи воспроизведение"]
+  - id: music.generic
+    tier: execute
+    labels: [MUSIC_PLAY, music]
+    patterns: ["{on_verb} (какую-нибудь|какую-то|мою)? (музыку|музыка|музон|песню|песенку|что-нибудь)",
+               "(поставь|сыграй|играй) (какую-нибудь|что-нибудь)? (музыку|музыка|песню|песенку|что-нибудь)?"]
+    action: {executor: music.play}
+    reply: {kind: earcon}
+    examples: ["включи музыку", "поставь что-нибудь", "включи песню"]
+    negatives: ["не включай музыку"]
+
+  # ── volume ──────────────────────────────────────────────────────────────
+  - id: volume.up
+    tier: execute
+    labels: [VOLUME, volume]
+    patterns: ["{set_verb}? (громче|погромче|громковато|еще громче)", "(прибавь|добавь|увеличь|подними) (звук|громкость|громкости)?",
+               "(звук|громкость) (больше|громче|выше)"]
+    action: {executor: speaker.volume, args: {step: 1}}
+    reply: {kind: earcon}
+    examples: [громче, "сделай погромче", "прибавь звук"]
+    negatives: ["громкость музыки в клипе", "не делай громче"]
+  - id: volume.down
+    tier: execute
+    labels: [VOLUME, volume]
+    patterns: ["{set_verb}? (тише|потише|тихо)", "(убавь|уменьши|понизь|убери|снизь) (звук|громкость|громкости)?",
+               "(звук|громкость) (меньше|тише|ниже)"]
+    action: {executor: speaker.volume, args: {step: -1}}
+    reply: {kind: earcon}
+    examples: [тише, "сделай потише", "убавь звук"]
+  - id: volume.set
+    tier: execute
+    labels: [VOLUME, volume, volume_partial]
+    slots:
+      value: {type: percent, range: [0, 100]}
+    patterns: ["{set_verb}? громкост* (на|до)? {value}", "{set_verb}? звук (на|до)? {value}", "{value} громкость"]
+    action: {executor: speaker.volume, args: {level: "$value"}}
+    reply: {kind: earcon}
+    examples:
+      - {say: "громкость на пять", slots: {value: 5}}
+      - {say: "сделай громкость семь", slots: {value: 7}}
+      - {say: "громкость 50%", slots: {value: 50}}
+    negatives: ["громкость 150", "не делай громкость пять"]
+  - id: volume.max
+    tier: execute
+    labels: [VOLUME, volume]
+    patterns: ["{set_verb}? (громкость|звук)? (на)? (максимум|максимальную|максимальная|на полную|полную)"]
+    action: {executor: speaker.volume, args: {level: 10}}
+    reply: {kind: earcon}
+    examples: ["громкость на максимум"]
+  - id: volume.query
+    tier: query
+    labels: [VOLUME, volume]
+    patterns: ["(какая|какой|сколько) (сейчас|у тебя)? (громкость|звук|громкости)", "(какая|скажи) громкость"]
+    action: {executor: speaker.volume_query}
+    reply: {kind: template, say: "Громкость {level}."}
+    examples: ["какая громкость", "какая сейчас громкость"]
+
+  # ── light ───────────────────────────────────────────────────────────────
+  - id: light.on
+    tier: execute
+    labels: [LIGHT_CMD, light]
+    slots:
+      room: {type: rooms}
+    patterns: ["{on_verb} (свет|освещение|лампу|лампочку|люстру)", "{on_verb} (свет|освещение|лампу|лампочку|люстру) (в|на)? {room}",
+               "{on_verb} (в|на)? {room} (свет|освещение|лампу|лампочку|люстру)"]
+    action: {executor: ha.light, args: {state: "on", room: "$room"}}
+    reply: {kind: earcon}
+    examples:
+      - {say: "включи свет", slots: {}}
+      - {say: "включи свет на кухне", slots: {room: kitchen}}
+    negatives: ["не включай свет", "я включил свет"]
+  - id: light.off
+    tier: execute
+    labels: [LIGHT_CMD, light]
+    slots:
+      room: {type: rooms}
+    patterns: ["{off_verb} (свет|освещение|лампу|лампочку|люстру)", "{off_verb} (свет|освещение|лампу|лампочку|люстру) (в|на)? {room}",
+               "{off_verb} (в|на)? {room} (свет|освещение|лампу|лампочку|люстру)"]
+    action: {executor: ha.light, args: {state: "off", room: "$room"}}
+    reply: {kind: earcon}
+    examples:
+      - {say: "выключи свет", slots: {}}
+      - {say: "выключи свет в спальне", slots: {room: bedroom}}
+    negatives: ["не выключай свет"]
+
+backtest:
+  # Corpus labels that only a language model answers (the back-test expects abstain on these).
+  brain_labels: [CHITCHAT, KNOWLEDGE, ADVICE, FOLLOWUP, question, smalltalk]
+  # Speech not addressed to the speaker: what a correct decision is for each label.
+  unaddressed: {HALLUCINATION: drop, AMBIENT: no_action}
+  holdout_percent: 20
