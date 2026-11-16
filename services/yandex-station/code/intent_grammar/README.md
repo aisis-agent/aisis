@@ -94,17 +94,21 @@ is given and otherwise is no match.
 otherwise real intents (priority >= 0, compounds included) -> arithmetic -> weather -> catch-alls (priority < 0). `route()` executes the decision
 (canned/reprompt lines, clock, timers, Home Assistant climate and colour, weather, music) and returns `reply | silent | volume | dialog_end | none`; every
 failure, a guessed (fuzzy/confirm) reading, or an executor owned by the quasar container is `none`, so the old path continues untouched.
-Reprompts are said once a minute per station: a second miss goes to the brain. The catch-alls (priority < 0) are also skipped when the speaker's last
-line to that station was a question: «да», «про собак» answer the brain's «Рассказать подробнее?» and are the brain's to continue. A tie between two real
-intents is an abstain, never split into a compound (a chain of eight or more clauses is never split: the search is quadratic); `Grammar.decide` with
-the default bands does not hand it to the catch-alls either (the router's explicit bands do).
+Reprompts are said once a minute per station: a second miss goes to the brain. The catch-alls (priority < 0) are also skipped for 30 s after the
+**brain** asked the station a question («Рассказать подробнее?»): «да», «про собак» are the brain's to continue. The adapter tells the router which
+replies are the brain's (`note_reply(..., brain=True)`); the grammar's own questions («Да?», «На сколько поставить таймер?») never count. A tie between two real
+intents is an abstain, never split into a compound (nine or more clauses, counted by their real boundaries, are never split: the search is quadratic);
+`Grammar.decide` with the default bands does not hand it to the catch-alls either (the router's explicit bands do).
 
 A compound runs only when every clause is something the adapter itself can run (`executable`), checked before the first clause runs: a compound
-that ends in `none` has changed nothing. A timer or alarm **start** is deduplicated for five seconds (the quasar hook and the speaker's own turn can
-both carry the phrase; duplicates in flight share one execution; a cancel clears it; a failure is never replayed); nothing else is: Home Assistant
-actions, cancels and queries run every time. A Home Assistant command without a room is about the room of the speaker that heard it (the HA area of
-the station's `media_player`, the way the overlay's speaker-room layer reads it); a speaker whose room Home Assistant does not tell is asked for the
-room, never given the living room.
+that ends in `none` has changed nothing. Without timers configured a timer phrase, alone or in a compound of timer clauses, answers «не умею».
+A timer or alarm **start** and a **cancel** are deduplicated for five seconds (the quasar hook and the speaker's own turn can both carry the phrase,
+so the second delivery of «отмени таймер» does not answer «Таймеров нет» to a cancel that worked): duplicates in flight share one execution, a cancel
+waits for the starts in flight, a failure is never replayed, and a reply is reused only until any start or cancel runs (a generation counter). Nothing
+else is deduplicated: Home Assistant actions and queries run every time. A voice reminder is cancelled by `reminder.cancel` («отмени напоминание»);
+«отмени таймер» with only a reminder left says so and names that phrase. A Home Assistant command without a room is about the room of the speaker
+that heard it (the HA area of the station's `media_player`, the way the overlay's speaker-room layer reads it); a speaker whose room Home Assistant does
+not tell is asked for the room, never given the living room. Area names reach the Home Assistant template only as an escaped string literal.
 
 Replies: `Grammar.say(decision, pick, values=None)` / `render_reply`. A template whose placeholder nobody filled (`Громкость {level}.`
 without a level) gives `None`, never the literal text; the executor passes what it measured as `values={"level": 5}` (they win over
@@ -174,7 +178,9 @@ split is absent or has nothing addressed.
 reports have (same id, same label, same side of the split). A row may get better, never worse: handled → missed/wrong and missed → wrong
 fail, wrong → abstained is an improvement. Nothing is sampled (same phrases, deterministic engine), so there is no tolerance; a one-row
 allowance would let a 5.6-point loss through at 18 rows. A baseline row gone from the corpus (`lost_rows`) or relabelled fails too, and a
-baseline of another route, split definition or schema is `incompatible`: it fails instead of silently comparing nothing. No usable baseline
+baseline of another route, split definition or schema is `incompatible`: it fails instead of silently comparing nothing (`REPORT_SCHEMA` is also the
+version of how rows are scored: it is bumped with any scoring change, so an older baseline needs the owner's `--init-baseline REASON`, which accepts an
+incompatible baseline). No usable baseline
 is itself a failure with `--gate`; the first run of a route (or an explicit rebaseline) is `--init-baseline REASON`, recorded in the report.
 
 **The owner's rebaseline.** A corrected label, an edited row text or a renamed corpus file (row ids include the file name) turns the gate red

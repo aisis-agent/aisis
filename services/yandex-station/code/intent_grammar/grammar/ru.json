@@ -1069,6 +1069,37 @@
    },
    {
     "action": {
+     "executor": "reminder.cancel"
+    },
+    "examples": [
+     "отмени напоминание",
+     "удали напоминание",
+     "отмени все напоминания"
+    ],
+    "id": "reminder.cancel",
+    "labels": [
+     "timer",
+     "TIMER",
+     "reminder"
+    ],
+    "negatives": [
+     "напомни через пять минут выключить плиту"
+    ],
+    "patterns": [
+     "(отмени|выключи|убери|удали|отключи|сбрось) (все)? напоминани*",
+     "напоминани* (отмени|удали)"
+    ],
+    "phase": "pre",
+    "reply": {
+     "kind": "canned",
+     "say": [
+      "Напоминание отменено."
+     ]
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
      "args": {
       "note": "$what",
       "seconds": "$duration"
@@ -2470,5 +2501,5 @@
   "locale": "ru",
   "version": 1
  },
- "source_sha256": "3eba60890611a7be7f0a83f3b96bf3e7c6ab3d32bdaaa5919a47ebc2ad499b6f"
+ "source_sha256": "0e8957d8dc5e7646728f930fead470088157e9b0038e54e82919ca11d8427503"
 }

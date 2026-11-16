@@ -619,6 +619,16 @@ class ShippedBehaviourTests(unittest.TestCase):
                              ("сделай теплее", "climate.warmer"), ("яркость пятьдесят", "light.brightness")):
             self.assertEqual(self.g.decide(text).intent, intent, text)
 
+    def test_chains_joined_by_any_connector_are_split_by_their_real_boundaries(self):
+        clauses = ["включи свет", "выключи свет", "включи свет", "выключи свет", "включи свет"]
+        for joiner in (" и ", " потом ", " а потом "):                 # «а потом» registers two overlapping cuts per boundary
+            with self.subTest(joiner=joiner):
+                decision = self.g.decide(joiner.join(clauses))
+                self.assertEqual((decision.intent, len(decision.parts)), ("compound", 5))
+        too_long = " а потом ".join(["включи свет"] * 9)
+        decision = self.g.decide(too_long, min_priority=0)
+        self.assertTrue(decision is None or decision.intent != "compound")
+
     def test_a_long_chain_of_clauses_is_answered_at_once(self):
         for connector_word in ("путин", "закрой"):
             text = " и ".join([connector_word] * 30) + " и что"
@@ -828,6 +838,20 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual((block["init_reason"], block["rebaselined"]), ("row 6 was a chat question", {"lost_rows": 0, "relabelled": 1}))
         self.assertEqual(self.backtest_cli(self.mini, "--gate"), 0)         # the new baseline holds without the flag
         self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "again"), 2)   # nothing left to accept: refused
+
+    def test_a_baseline_scored_by_an_older_rule_is_unusable_until_the_owner_restarts_it(self):
+        latest = self.reports / "latest.json"
+        older = self.report()
+        older["schema"] = backtest.REPORT_SCHEMA - 1             # saved before rows were scored the way they are now
+        latest.parent.mkdir(parents=True, exist_ok=True)
+        latest.write_text(json.dumps(older))
+        self.assertEqual(backtest.REPORT_SCHEMA, 3)
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 1)          # «another schema»: not silently compared
+        self.assertEqual(json.loads(latest.read_text())["schema"], older["schema"])
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "scoring changed"), 0)   # nothing lost or relabelled
+        block = json.loads(latest.read_text())
+        self.assertEqual((block["schema"], block["baseline"]["init_reason"]), (backtest.REPORT_SCHEMA, "scoring changed"))
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 0)
 
     def test_a_rebaseline_accepts_lost_rows_but_never_a_regression(self):
         latest = self.reports / "latest.json"

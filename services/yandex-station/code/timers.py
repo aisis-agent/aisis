@@ -123,10 +123,10 @@ class TimerBook:
         today = datetime.fromtimestamp(now, self._tz).date()
         due: float | None = None
         for h in _alarm_hour_candidates(hour, ambiguous):
-            # Today and tomorrow, both occurrences of a wall-clock time the clock passes twice (the DST fall-back hour):
-            # the nearest real moment after now wins. A time the clock skips (the spring-forward gap) does not exist, so
-            # it is dropped and the alarm falls on the next day it does.
-            for day in (0, 1):
+            # Today, tomorrow and the day after, both occurrences of a wall-clock time the clock passes twice (the DST
+            # fall-back hour): the nearest real moment after now wins. A time the clock skips (the spring-forward gap)
+            # does not exist, so it is dropped: set the evening before, the alarm falls on the day after the gap day.
+            for day in (0, 1, 2):
                 date = today + timedelta(days=day)
                 for fold in (0, 1):
                     moment = datetime(date.year, date.month, date.day, h, minute, tzinfo=self._tz, fold=fold).timestamp()

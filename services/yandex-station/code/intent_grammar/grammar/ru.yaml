@@ -439,6 +439,15 @@ intents:
     action: {executor: alarm.cancel}
     reply: {kind: canned, say: ["Будильник отменён."]}
     examples: ["отмени будильник", "выключи будильник"]
+  - id: reminder.cancel
+    tier: execute
+    phase: pre
+    labels: [timer, TIMER, reminder]
+    patterns: ["(отмени|выключи|убери|удали|отключи|сбрось) (все)? напоминани*", "напоминани* (отмени|удали)"]
+    action: {executor: reminder.cancel}
+    reply: {kind: canned, say: ["Напоминание отменено."]}
+    examples: ["отмени напоминание", "удали напоминание", "отмени все напоминания"]
+    negatives: ["напомни через пять минут выключить плиту"]
   - id: reminder.in
     tier: execute
     phase: pre

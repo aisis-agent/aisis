@@ -47,7 +47,11 @@ ENV_CORPUS_DIR = "AISIS_INTENT_CORPUS_DIR"
 # no longer belong to the split of older reports, and the comparison only trusts rows whose side did not change.
 SPLIT_VERSION = 1
 SPLIT_SALT = f"aisis-intents-split-v{SPLIT_VERSION}|"
-REPORT_SCHEMA = 2
+# Version of the report format AND of how rows are scored. Bump it with any change of either: an older baseline is then
+# `incompatible` and only the owner's `--init-baseline REASON` starts a new one (comparing rows scored by another rule
+# would turn the scoring change itself into «regressions»). 3: only decisions the runtime acts on count; quasar replay
+# hits keep their observed tier and carry no label.
+REPORT_SCHEMA = 3
 GOOD_OUTCOMES = frozenset(("correct", "dropped", "brain_ok", "no_action"))
 COMPLETING_TIERS = ("execute", "query", "canned")
 

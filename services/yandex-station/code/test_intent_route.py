@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 from aiohttp.test_utils import TestClient, TestServer
 
 import intent_route
+import timers as timers_module
 from adapter import ERROR_REPLY, Adapter
 from intent_grammar import backtest
 from intent_grammar.backtest import Row
@@ -40,19 +41,27 @@ class FakeTimers:
 
 
 class StatefulTimers(FakeTimers):
-    """Remembers what is running: a cancel counts and clears the active timers."""
+    """Remembers what is running: a cancel counts and clears the active timers or alarms."""
 
     def __init__(self):
         super().__init__()
         self.active = 0
+        self.alarms = 0
 
     async def start(self, seconds, note=None):
         self.active += 1
         return await super().start(seconds, note)
 
+    async def set_alarm(self, hour, minute, part, ambiguous):
+        self.alarms += 1
+        return await super().set_alarm(hour, minute, part, ambiguous)
+
     async def cancel(self, kind="timer"):
         self.calls.append(("cancel", kind))
-        count, self.active = self.active, 0
+        if kind == "alarm":
+            count, self.alarms = self.alarms, 0
+        else:
+            count, self.active = self.active, 0
         return count
 
 
@@ -212,7 +221,7 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         await r.route("st", "поставь таймер на пять минут")
         self.assertEqual(len(timers.calls), 2)
 
-    async def test_nothing_but_a_timer_start_is_deduplicated(self):
+    async def test_only_a_timer_start_or_cancel_delivered_twice_is_deduplicated(self):
         timers, ha = StatefulTimers(), FakeHa()
         r = router(timers=timers, ha=ha, monotonic=lambda: 100.0)      # the clock never moves: all of it inside the window
         for _ in range(2):
@@ -220,10 +229,86 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ha.calls), 2)                              # a repeated «теплее» is a second step
         self.assertEqual([(await r.route("st", text)).text for text in (
             "поставь таймер на пять минут", "отмени таймер", "поставь таймер на пять минут", "отмени таймер", "отмени таймер")],
-            ["Таймер на 5 минут.", "Таймер отменён.", "Таймер на 5 минут.", "Таймер отменён.", "Таймеров нет."])
-        self.assertEqual(timers.calls, [("start", 300, None), ("cancel", "timer"), ("start", 300, None), ("cancel", "timer"),
-                                        ("cancel", "timer")])
+            ["Таймер на 5 минут.", "Таймер отменён.", "Таймер на 5 минут.", "Таймер отменён.", "Таймер отменён."])
+        # every start and cancel that changed something ran; the last «отмени таймер» was the same cancel delivered twice
+        self.assertEqual(timers.calls, [("start", 300, None), ("cancel", "timer"), ("start", 300, None), ("cancel", "timer")])
         self.assertEqual(timers.active, 0)
+
+    async def test_the_hook_and_the_turn_cancelling_the_same_timer_both_hear_that_it_worked(self):
+        timers = StatefulTimers()
+        r = router(timers=timers, monotonic=lambda: 100.0)
+        await r.route("st", "поставь таймер на пять минут")
+        hook = await r.route("quasar", "отмени таймер", phase="pre", via_quasar=True)
+        turn = await r.route("st", "отмени таймер")                        # the hook timed out: the turn carries the phrase again
+        self.assertEqual((hook.text, turn.text), ("Таймер отменён.", "Таймер отменён."))
+        self.assertEqual(timers.calls.count(("cancel", "timer")), 1)
+        await r.route("st", "заведи будильник на семь утра")                # any start makes the remembered reply stale
+        self.assertEqual((await r.route("st", "отмени таймер")).text, "Таймеров нет.")
+        self.assertEqual(timers.calls.count(("cancel", "timer")), 2)
+        alarm = await r.route("st", "отмени будильник")
+        again = await r.route("st", "отмени будильник")
+        self.assertEqual((alarm.text, again.text), ("Будильник отменён.", "Будильник отменён."))
+        self.assertEqual(timers.calls.count(("cancel", "alarm")), 1)
+
+    async def test_a_failed_cancel_is_not_remembered(self):
+        class Flaky(StatefulTimers):
+            fail = True
+
+            async def cancel(self, kind="timer"):
+                if self.fail:
+                    raise OSError("disk full")
+                return await super().cancel(kind)
+        timers = Flaky()
+        r = router(timers=timers, monotonic=lambda: 100.0)
+        await r.route("st", "поставь таймер на пять минут")
+        self.assertEqual((await r.route("st", "отмени таймер")).kind, "none")
+        timers.fail = False
+        self.assertEqual((await r.route("st", "отмени таймер")).text, "Таймер отменён.")
+
+    async def test_a_cancel_and_a_start_in_one_phrase_really_start_a_timer(self):
+        book = self.real_book()
+        r = router(timers=book, monotonic=lambda: 100.0)
+        # the first start's cleanup callback is still queued when the next phrase arrives (overlapping requests)
+        with patch.object(r, "_finished", lambda *args: None):
+            await r.route("st", "поставь таймер на пять минут")
+            got = await r.route("st", "отмени таймер и поставь таймер на пять минут")
+        self.assertEqual(got.text, "Таймер отменён. Таймер на 5 минут.")
+        self.assertEqual([item["left"] for item in book.remaining()], [300])      # a timer exists, not only its confirmation
+
+    def real_book(self):
+        async def never(_delay):
+            await asyncio.Event().wait()
+        book = timers_module.TimerBook(None, AsyncMock(return_value=True), clock=lambda: 1000.0, tz=timezone.utc, sleep=never)
+        self.addAsyncCleanup(book.close)
+        return book
+
+    async def test_a_reminder_has_its_own_cancel(self):
+        book = self.real_book()
+        clock = [100.0]
+        r = router(timers=book, monotonic=lambda: clock[0])
+
+        async def say(text):
+            clock[0] += intent_route.DEDUPE_S + 1       # each phrase is its own, not a second delivery of the previous one
+            return (await r.route("st", text)).text
+        await say("напомни через десять минут выключить плиту")
+        self.assertEqual(await say("отмени таймер"), intent_route.TIMER_CANCEL_REMINDER_HINT)
+        self.assertEqual(len(book.remaining()), 1)                          # «отмени таймер» left it alone
+        self.assertEqual(await say("отмени напоминание"), "Напоминание отменено.")
+        self.assertEqual(book.remaining(), [])
+        self.assertEqual(await say("удали напоминание"), "Напоминаний нет.")
+        self.assertEqual(await say("отмени таймер"), "Таймеров нет.")
+        for text in ("напомни через десять минут выключить плиту", "напомни через час позвонить маме"):
+            await say(text)
+        self.assertEqual(await say("отмени все напоминания"), "Напоминания отменены.")
+        self.assertEqual(book.remaining(), [])
+
+    async def test_a_timer_phrase_without_timers_answers_even_as_part_of_a_compound(self):
+        r = router()
+        for text in ("поставь таймер на пять минут и таймер на минуту", "заведи будильник на семь утра и поставь таймер на минуту"):
+            got = await r.route("st", text)
+            self.assertEqual((got.kind, got.text), ("reply", intent_route.TIMERS_OFF), text)
+        self.assertEqual((await r.route("st", "поставь таймер на пять минут и выключи свет")).kind, "none")   # the quasar layer's clause
+        self.assertEqual((await router(timers=FakeTimers()).route("st", "поставь таймер на минуту и таймер на две минуты")).intent, "compound")
 
     async def test_a_failed_or_queued_home_assistant_reply_is_not_replayed(self):
         ha = FakeHa(reply="Не удалось выполнить команду умного дома.")
@@ -422,8 +507,9 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         skills.weather.assert_awaited_once_with("now")
 
     async def test_a_short_reply_to_the_brains_own_question_is_not_a_reprompt(self):
-        r = router()
-        r.note_reply("st", "Рассказать подробнее?")
+        clock = [100.0]
+        r = router(monotonic=lambda: clock[0])
+        r.note_reply("st", "Рассказать подробнее?", brain=True)
         for text in ("да", "нет", "про собак", "ещё одну"):
             self.assertEqual((await r.route("st", text)).kind, "none", text)      # the brain continues its own conversation
         self.assertEqual(r.last_reprompt, {})                                       # and no «не расслышал» cooldown was spent
@@ -431,6 +517,21 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         r.note_reply("st", "Сейчас 17 часов 5 минут.")
         self.assertEqual((await r.route("st", "да")).intent, "asr.garbage_short")  # after a statement the reprompt is back
         self.assertEqual((await r.route("st", "нет")).kind, "none")                 # the reprompt is said once a minute
+
+    async def test_only_a_question_the_brain_asked_and_only_for_a_while_suppresses_the_catch_alls(self):
+        clock = [100.0]
+        r = router(monotonic=lambda: clock[0])
+        for line in ("Да?", "На сколько поставить таймер?", "Какую громкость поставить?"):   # the grammar's own questions
+            r.note_reply("st", line)
+            self.assertEqual((await r.route("st", "да")).intent, "asr.garbage_short", line)
+            clock[0] += intent_route.REPROMPT_COOLDOWN_S + 1
+        r.note_reply("st", "Рассказать подробнее?", brain=True)
+        clock[0] += intent_route.BRAIN_QUESTION_WINDOW_S + 1                            # nobody answered it for a while
+        self.assertEqual((await r.route("st", "да")).intent, "asr.garbage_short")
+        r.note_reply("st", "Рассказать подробнее?", brain=True)
+        r.note_reply("st", "Да?")                                                        # a grammar line replaces the brain's question
+        clock[0] += intent_route.REPROMPT_COOLDOWN_S + 1
+        self.assertEqual((await r.route("st", "да")).intent, "asr.garbage_short")
 
     async def test_the_shared_none_route_is_never_stamped(self):
         counter = itertools.count(0, 3_000_000)
@@ -501,6 +602,17 @@ class AdapterIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ws.send_json.await_args.args[0]["data"]["text"], ERROR_REPLY, data)
         adapter.turn.assert_not_awaited()
         self.assertEqual(adapter.intents.last_reply, {})      # nothing was said to a station that was never accepted
+
+    async def test_only_the_brains_own_question_is_marked_as_such(self):
+        adapter = await self.adapter()
+        adapter.turn = AsyncMock(side_effect=["Рассказать подробнее?", "про собак — да, расскажу"])
+        self.assertEqual(await self.spoken(adapter, "расскажи про дракона и принцессу и что было дальше у них"), "Рассказать подробнее?")
+        self.assertEqual(await self.spoken(adapter, "да"), "про собак — да, расскажу")     # the brain, not «Не расслышал»
+        self.assertEqual(adapter.turn.await_count, 2)
+        self.assertEqual(await self.spoken(adapter, "Громкость."), "Какую громкость поставить?")   # the grammar's question
+        self.assertEqual(await self.spoken(adapter, "голи со спортом"), "Не расслышал. Повтори, пожалуйста.")
+        self.assertEqual(adapter.turn.await_count, 2)
+        self.assertEqual(adapter.intents.brain_asked, {})
 
     async def test_an_emergency_never_goes_to_the_brain(self):
         adapter = await self.adapter()

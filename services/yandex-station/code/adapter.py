@@ -484,6 +484,7 @@ class Adapter:
 
     async def _process_turn(self, ws, data):
         listen = False      # the grammar's question («На сколько поставить таймер?») keeps the microphone open
+        from_brain = False  # the reply is the brain's own (the router treats a question of its as one a short answer belongs to)
         station = None     # set once _turn_input has accepted the turn: a rejected one still gets its error reply
         try:
             station, text = self._turn_input(data)
@@ -510,13 +511,14 @@ class Adapter:
                 reply = await self.skills.answer(text)
             if reply is None:
                 reply = await self.turn(station, text)
+                from_brain = True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             LOG.warning("processor_failed class=%s", type(exc).__name__)
             reply = ERROR_REPLY
         if self.intents is not None and station is not None:
-            self.intents.note_reply(station, reply)
+            self.intents.note_reply(station, reply, brain=from_brain)
         if not ws.closed:
             await ws.send_json({"type": "partialResponse", "data": {"text": reply,
                 "directives": [], "finished": True, "shouldListen": listen}})

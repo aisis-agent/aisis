@@ -210,7 +210,11 @@ class HaActions:
         cached = self._areas.get(area)
         if cached and now - cached[0] < self._ttl:
             return cached[1]
-        status, body = await self._post("/api/template", {"template": f"{{{{ area_entities('{area}') | tojson }}}}"})
+        # The area name is data (Home Assistant's, or the station's registry entry): it reaches the template only as an escaped
+        # string literal. json.dumps escapes the double quote, the backslash and control characters, which Jinja's string
+        # tokenizer decodes back; an apostrophe or `') if … else area_entities('` in a name stays inside the string.
+        template = f"{{{{ area_entities({json.dumps(area, ensure_ascii=False)}) | tojson }}}}"
+        status, body = await self._post("/api/template", {"template": template})
         if status != 200:
             raise _Outcome(REPLY_FAILED)
         try:

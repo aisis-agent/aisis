@@ -248,7 +248,8 @@ class Grammar:
             for connector in self.connectors:
                 if tuple(u.tokens[i:i + len(connector)]) == connector and i + len(connector) < n:
                     cuts.append((i, i + len(connector)))
-        if not cuts or len(cuts) >= MAX_CLAUSES:   # no connector, or a chain no speaker says: not worth the quadratic search
+        # A boundary is where the next clause starts: «а потом» registers two overlapping cuts (`а потом` and `потом`) for one boundary.
+        if not cuts or len({nxt for _end, nxt in cuts}) >= MAX_CLAUSES:   # no connector, or a chain no speaker says: not worth the quadratic search
             return None
         best: list[Decision] | None = None
         dead: set[int] = set()   # clause starts that cannot reach the end of the utterance: each is searched once, not once per path to it

@@ -217,6 +217,14 @@ class AlarmCase(BookCase):
         info = await self.alarm(now, 2, 30, None, False, tz=belgrade)
         self.assertEqual(info["due"], datetime(2026, 3, 30, 2, 30, tzinfo=belgrade).timestamp())
 
+    async def test_an_alarm_set_the_day_before_a_spring_forward_gap_skips_the_gap_day(self):
+        belgrade = ZoneInfo("Europe/Belgrade")
+        for now, gap_day_after in ((datetime(2027, 3, 27, 23, 0, tzinfo=belgrade), (2027, 3, 29)),    # Saturday night, clocks jump on Sunday
+                                   (datetime(2026, 3, 28, 3, 0, tzinfo=belgrade), (2026, 3, 30))):
+            info = await self.alarm(now.timestamp(), 2, 30, "night", False, tz=belgrade)               # «два тридцать ночи»
+            self.assertEqual(info["due"], datetime(*gap_day_after, 2, 30, tzinfo=belgrade).timestamp(), now)
+            self.assertEqual(info["text"], "02:30")
+
     async def test_unambiguous_and_24h(self):
         info = await self.alarm(ts(2026, 11, 16, 8, 0), 7, 30, None, False)
         self.assertEqual(info["due"], ts(2026, 11, 17, 7, 30))
@@ -392,6 +400,8 @@ class Reminders(BookCase):
             await book.resume()
             self.assertEqual(await book.cancel("timer"), 0)
             self.assertEqual(len(book.remaining()), 1)
+            self.assertEqual(await book.cancel("reminder"), 1)                 # it is cancelled as a reminder, by voice too
+            self.assertEqual(book.remaining(), [])
 
 
 class Shutdown(BookCase):

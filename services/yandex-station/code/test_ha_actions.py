@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 import unittest
 from unittest import mock
 
@@ -75,6 +76,7 @@ class FakeHa:
         self.outage = outage            # hacli answers every template with its cached registry TSV (status 200)
         self.gets = 0
         self.template_posts = 0
+        self.templates: list[str] = []
         self.services: list[tuple[str, dict]] = []
 
     async def get(self, path):
@@ -87,7 +89,8 @@ class FakeHa:
             self.template_posts += 1
             if self.outage or "area_entities" not in body["template"]:
                 return 200, registry_tsv()
-            area = body["template"].split("'")[1]
+            self.templates.append(body["template"])
+            area = json.loads(re.fullmatch(r"\{\{ area_entities\((.*)\) \| tojson \}\}", body["template"], re.DOTALL).group(1))
             ids = AREA_ENTITIES.get(area, [])
             return 200, (json.dumps(ids) if self.template_as_text else ids)
         self.services.append((path, body))
@@ -461,6 +464,36 @@ class EquipmentLights(Base):
         a = self.studio(["light.k1se_85b6_light", "light.snapmaker_u1_led_cavity_led"])
         self.assertEqual(await a.run("ha.light_brightness", {"percent": 40, "room": "studio"}), "В комнате «Студия» нет света.")
         self.assertEqual(self.ha.services, [])
+
+
+class TemplateEncoding(Base):
+    """An area name is data: it reaches the Jinja template only as an escaped string literal."""
+
+    async def lookup_for_area_named(self, name):
+        patcher = mock.patch.dict(PLAYER_AREAS, {"media_player.aisis_speaker_m0weird00": name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        a = self.make()
+        reply = await a.run("ha.light_color", {"color": "red", "room": None}, "M0WEIRD00")
+        self.assertEqual(reply, f"В комнате «{name}» нет света.")     # asked for exactly that area, which has no lights
+        self.assertEqual(self.ha.services, [])
+        return self.ha.templates[-1]
+
+    async def test_an_apostrophe_stays_inside_the_literal(self):
+        template = await self.lookup_for_area_named("Дом О'Брайена")
+        self.assertEqual(template, '{{ area_entities("Дом О\'Брайена") | tojson }}')
+
+    async def test_a_conditional_payload_is_one_string_not_code(self):
+        name = "x') if false else area_entities('Гостиная"
+        template = await self.lookup_for_area_named(name)
+        self.assertEqual(template, "{{ area_entities(" + json.dumps(name, ensure_ascii=False) + ") | tojson }}")
+        self.assertEqual(template.count("area_entities("), 2)       # the payload's own call is text inside the one literal
+
+    async def test_quotes_and_backslashes_are_escaped(self):
+        name = 'a"b\\c}}{%d'
+        template = await self.lookup_for_area_named(name)
+        self.assertEqual(template, "{{ area_entities(" + json.dumps(name, ensure_ascii=False) + ") | tojson }}")
+        self.assertIn('\\"', template)
 
 
 if __name__ == "__main__":
