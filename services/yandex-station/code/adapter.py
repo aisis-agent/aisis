@@ -22,6 +22,7 @@ from collections import defaultdict
 from typing import Any
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, WSMsgType, web
 
+import announcement_cache
 import asr_correct
 import dialog_context
 import dialogstore
@@ -135,21 +136,7 @@ class Adapter:
         if not self.allowed:
             raise ValueError("AISIS_ALLOWED_STATIONS must contain at least one speaker ID")
         self.skills = voice_skills.Skills(self.env)
-        self.chatgpt_timeout: float | None = None
-        if self.env.get("AISIS_PM_URL"):
-            keys = ("AISIS_PM_REPLY_TIMEOUT", "AISIS_PM_REQUEST_TIMEOUT",
-                "AISIS_PM_HTTP_TIMEOUT", "AISIS_CHATGPT_TIMEOUT")
-            try:
-                budgets = [float(self.env.get(key, default)) for key, default in
-                    zip(keys, ("170", "230", "240", "250"))]
-            except ValueError:
-                raise ValueError("PM timeout settings must be finite positive numbers") from None
-            if not all(math.isfinite(value) and value > 0 for value in budgets):
-                raise ValueError("PM timeout settings must be finite positive numbers")
-            if not all(left < right for left, right in zip(budgets, budgets[1:])):
-                raise ValueError("PM timeout order must be AISIS_PM_REPLY_TIMEOUT < "
-                    "AISIS_PM_REQUEST_TIMEOUT < AISIS_PM_HTTP_TIMEOUT < AISIS_CHATGPT_TIMEOUT")
-            self.chatgpt_timeout = budgets[-1]
+        self.chatgpt_timeout: float | None = self._chatgpt_timeout()
         self.store = Store(self.env.get("AISIS_STATE_DB", str(Path.home()/".local/state/aisis/adapter.sqlite3")))
         self.command = json.loads(self.env.get("AISIS_CHATGPT_COMMAND", "[]"))
         if not isinstance(self.command, list) or not all(isinstance(x, str) for x in self.command):
@@ -183,6 +170,23 @@ class Adapter:
         self.corrector_http: ClientSession | None = None
         self.warm_task: asyncio.Task | None = None
         self.catalog_cache: tuple[float, voice_vocab.Catalog] | None = None
+
+    def _chatgpt_timeout(self):
+        if not self.env.get("AISIS_PM_URL"):
+            return None
+        keys = ("AISIS_PM_REPLY_TIMEOUT", "AISIS_PM_REQUEST_TIMEOUT",
+            "AISIS_PM_HTTP_TIMEOUT", "AISIS_CHATGPT_TIMEOUT")
+        try:
+            budgets = [float(self.env.get(key, default)) for key, default in
+                zip(keys, ("170", "230", "240", "250"))]
+        except ValueError:
+            raise ValueError("PM timeout settings must be finite positive numbers") from None
+        if not all(math.isfinite(value) and value > 0 for value in budgets):
+            raise ValueError("PM timeout settings must be finite positive numbers")
+        if not all(left < right for left, right in zip(budgets, budgets[1:])):
+            raise ValueError("PM timeout order must be AISIS_PM_REPLY_TIMEOUT < "
+                "AISIS_PM_REQUEST_TIMEOUT < AISIS_PM_HTTP_TIMEOUT < AISIS_CHATGPT_TIMEOUT")
+        return budgets[-1]
 
     def _persona_settings(self) -> tuple[str, float, int]:
         try:
@@ -559,6 +563,11 @@ class Adapter:
             LOG.warning("yandex_tts_failed status=transport")
             raise web.HTTPBadGateway(text="Yandex synthesis unreachable") from None
 
+    async def announcement_status(self, request):
+        self.authorize(request)
+        result = await asyncio.to_thread(announcement_cache.status)
+        return web.json_response(result)
+
     async def speech(self, request):
         self.authorize(request)
         body = await request.json()
@@ -569,6 +578,13 @@ class Adapter:
             raise web.HTTPBadRequest(text="only Брачо is configured")
         if body.get("response_format", "opus") != "opus":
             raise web.HTTPBadRequest(text="only opus is supported")
+        if announcement_cache.is_marker(text):
+            try:
+                ogg = await asyncio.to_thread(announcement_cache.read_clip, text)
+            except announcement_cache.CacheNotReady:
+                raise web.HTTPServiceUnavailable(text="Remote announcement cache unavailable") from None
+            return web.Response(body=ogg, content_type="audio/ogg")
+
         # Quasar always names Брачо; the real voice is the dashboard setting, read per request.
         # X-AISIS-Voice is an explicit pin (filler generation): no silent fallback for a pin.
         pinned = request.headers.get("X-AISIS-Voice")
@@ -579,34 +595,42 @@ class Adapter:
         if wanted == "bracho" and not self.fish_key():
             raise web.HTTPServiceUnavailable(text="Fish voice credentials not configured")
         async with self.tts_limit:
-            raw = None
-            if wanted == "alice":
-                try:
-                    raw, engine = await self._alice_audio(text, settings)
-                    self.alice_last = {"ok": True, "status": 200, "engine": engine, "at": time.time()}
-                except web.HTTPException as error:
-                    self.alice_last = {"ok": False, "status": error.status,
-                        "engine": tts_settings.alice_engine(settings), "at": time.time()}
-                    if pinned:
-                        raise
-                    LOG.warning("alice_voice_fallback_to_bracho status=%s", error.status)
-            if raw is None:
-                raw = await self._fish_audio(text)
-            # Always transcode to Ogg Opus: quasar's downstream decoder expects an Ogg container.
-            proc = await asyncio.create_subprocess_exec(self.env.get("FFMPEG", "ffmpeg"),
-                "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-ac", "1", "-ar", "48000",
-                "-c:a", "libopus", "-b:a", "64k", "-f", "ogg", "pipe:1",
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-            try:
-                ogg, _ = await asyncio.wait_for(proc.communicate(raw), 30)
-            except BaseException:
-                if proc.returncode is None:
-                    proc.kill()
-                    await proc.wait()
-                raise
-            if proc.returncode or not ogg.startswith(b"OggS") or b"OpusHead" not in ogg[:256]:
-                raise web.HTTPBadGateway(text="Opus encoding failed")
+            raw = await self._synthesize_speech(text, settings, wanted, pinned)
+            ogg = await self._encode_speech(raw)
             return web.Response(body=ogg, content_type="audio/ogg")
+
+    async def _synthesize_speech(self, text, settings, wanted, pinned):
+        raw = None
+        if wanted == "alice":
+            try:
+                raw, engine = await self._alice_audio(text, settings)
+                self.alice_last = {"ok": True, "status": 200, "engine": engine, "at": time.time()}
+            except web.HTTPException as error:
+                self.alice_last = {"ok": False, "status": error.status,
+                    "engine": tts_settings.alice_engine(settings), "at": time.time()}
+                if pinned:
+                    raise
+                LOG.warning("alice_voice_fallback_to_bracho status=%s", error.status)
+        if raw is None:
+            raw = await self._fish_audio(text)
+        return raw
+
+    async def _encode_speech(self, raw):
+        # Always transcode to Ogg Opus: quasar's downstream decoder expects an Ogg container.
+        proc = await asyncio.create_subprocess_exec(self.env.get("FFMPEG", "ffmpeg"),
+            "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-ac", "1", "-ar", "48000",
+            "-c:a", "libopus", "-b:a", "64k", "-f", "ogg", "pipe:1",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            ogg, _ = await asyncio.wait_for(proc.communicate(raw), 30)
+        except BaseException:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            raise
+        if proc.returncode or not ogg.startswith(b"OggS") or b"OpusHead" not in ogg[:256]:
+            raise web.HTTPBadGateway(text="Opus encoding failed")
+        return ogg
 
     async def laya(self, request):
         """Proxy one JSON request line to the local laya classify-server unix socket.
@@ -750,6 +774,7 @@ class Adapter:
         app.router.add_get("/healthz", self.health)
         app.router.add_get("/processor", self.processor)
         app.router.add_post("/v1/audio/speech", self.speech)
+        app.router.add_get("/v1/remote-announcements/status", self.announcement_status)
         app.router.add_post("/laya", self.laya)
         app.router.add_post("/asr/correct", self.asr_correct)
         app.router.add_post("/music/play", self.music_play)
