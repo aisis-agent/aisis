@@ -235,6 +235,8 @@ class IntentRouter:
         says «готово»; a repeat runs it again, timer clause included). A duplicate that arrives
         while the first delivery is running waits for it."""
         key = self.grammar.normalise(text).text
+        if self._station_bound(decision):   # another station's identical phrase is its own action, in flight or finished
+            key = f"{key}\0{station}"
         while True:
             task = self.running.get(key)
             if task is not None and not task.done():
@@ -251,10 +253,14 @@ class IntentRouter:
             task.add_done_callback(lambda finished, k=key: self._finished(k, finished))
             return await asyncio.shield(task)
 
+    @staticmethod
+    def _station_bound(decision: Decision) -> bool:
+        return any(((part.action or {}).get("executor") or "").startswith(STATION_BOUND_PREFIXES) for part in decision.parts or (decision,))
+
     async def _run_timer_action(self, key: str, station: str, decision: Decision, via_quasar: bool) -> Route:
         self.memo = None   # whatever ran before is no longer the last thing that happened
         route = await self._run(station, decision, via_quasar)
-        if route.kind == "reply" and not any(((part.action or {}).get("executor") or "").startswith(STATION_BOUND_PREFIXES) for part in decision.parts or (decision,)):
+        if route.kind == "reply" and not self._station_bound(decision):
             self.memo = (key, route, self.monotonic())
         return route
 

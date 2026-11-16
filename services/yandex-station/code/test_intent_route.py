@@ -421,6 +421,20 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Тайна спальни", bedroom.text)
         self.assertNotIn("Секрет кухни", bedroom.text)
 
+    async def test_a_repeat_compound_in_flight_is_not_shared_with_another_station(self):
+        class Slow(FakeTimers):
+            async def start(self, seconds, note=None):
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                return await super().start(seconds, note)
+        r = router(timers=Slow())
+        r.note_reply("kitchen", "Секрет кухни.")
+        r.note_reply("bedroom", "Тайна спальни.")
+        kitchen, bedroom = await asyncio.gather(r.route("kitchen", "поставь таймер на минуту и повтори"),
+                                                r.route("bedroom", "поставь таймер на минуту и повтори"))
+        self.assertIn("Секрет кухни", kitchen.text)
+        self.assertIn("Тайна спальни", bedroom.text)
+
     async def test_a_timer_with_a_clock_clause_delivered_by_the_hook_and_then_the_turn_is_one_timer(self):
         timers = FakeTimers()
         r = router(timers=timers, monotonic=lambda: 100.0)
