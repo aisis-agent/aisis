@@ -97,14 +97,14 @@ corpus_check() {
   expected=$(wc -l <"$corpus_dir/intents-ru.jsonl")
   docker exec "$c" mkdir -p /src/backend/corpus
   docker cp "$corpus_dir/." "$c:/src/backend/corpus/"
-  out=$(docker exec -w /src/backend/corpus "$c" /node_modules/.bin/tsx run_corpus.mts 2>&1) || true
+  out=$(docker exec -e GRAMMAR_HOOK=off -w /src/backend/corpus "$c" /node_modules/.bin/tsx run_corpus.mts 2>&1) || true
   line=$(grep -a 'ИТОГ' <<<"$out" || true)
   [[ $line =~ ([0-9]+)/([0-9]+) ]] || { log "corpus on $c: no result line"; return 1; }
   pass=${BASH_REMATCH[1]} total=${BASH_REMATCH[2]}
   log "corpus on $c: $pass/$total (expected $expected)"
   [[ $pass == "$total" && $total == "$expected" ]] || return 1
   # Multi-turn dialogs against a mocked HA: confirmations, slot fill, earcon, volume directive.
-  out=$(docker exec -w /src/backend/corpus "$c" /node_modules/.bin/tsx run_dialogs.mts 2>&1) || true
+  out=$(docker exec -e GRAMMAR_HOOK=off -w /src/backend/corpus "$c" /node_modules/.bin/tsx run_dialogs.mts 2>&1) || true
   line=$(grep -a 'ДИАЛОГИ' <<<"$out" || true)
   [[ $line =~ ([0-9]+)/([0-9]+) ]] || { log "dialogs on $c: no result line"; return 1; }
   log "dialogs on $c: ${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"

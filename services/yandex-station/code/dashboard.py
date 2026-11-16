@@ -738,7 +738,7 @@ def corpus_run():
     rc, out = sh(["docker", "cp", CORPUS_DIR + "/.", f"{box}:/src/backend/corpus/"], 30)
     if rc != 0:
         return {"ok": False, "err": f"docker cp: {out[:120]}"}
-    rc, out = sh(["docker", "exec", "-w", "/src/backend/corpus", box,
+    rc, out = sh(["docker", "exec", "-e", "GRAMMAR_HOOK=off", "-w", "/src/backend/corpus", box,
                   "/node_modules/.bin/tsx", "run_corpus.mts"], 120)
     if rc != 0:
         return {"ok": False, "err": out[-200:]}

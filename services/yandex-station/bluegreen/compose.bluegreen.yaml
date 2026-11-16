@@ -44,7 +44,7 @@ x-prod-env: &prod-env
   AISIS_HA_AMBIGUITY_FILE: /state/ha.ambiguity.json
   # The fast-intent layer asks the adapter's intent grammar first (overlays/intent-grammar): on|shadow|off, anything else
   # is off. A container reads its environment once: switching it means recreating the active color with the new value.
-  GRAMMAR_HOOK: ${GRAMMAR_HOOK:-on}
+  GRAMMAR_HOOK: ${GRAMMAR_HOOK-on}
 
 # Stage never reaches the real adapter, STT or Home Assistant: processor, TTS,
 # music and STT point at loopback ports nobody listens on, HA goes to the dry-run
