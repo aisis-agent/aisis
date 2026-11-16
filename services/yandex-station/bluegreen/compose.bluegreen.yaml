@@ -42,6 +42,9 @@ x-prod-env: &prod-env
   # Phrases the owner confirmed once («да» → executes directly next time) must outlive a container recreate and
   # a blue/green flip; they used to live in the container's own filesystem and vanished with every deploy.
   AISIS_HA_AMBIGUITY_FILE: /state/ha.ambiguity.json
+  # The fast-intent layer asks the adapter's intent grammar first (overlays/intent-grammar): on|shadow|off, anything else
+  # is off. A container reads its environment once: switching it means recreating the active color with the new value.
+  GRAMMAR_HOOK: ${GRAMMAR_HOOK:-on}
 
 # Stage never reaches the real adapter, STT or Home Assistant: processor, TTS,
 # music and STT point at loopback ports nobody listens on, HA goes to the dry-run
@@ -58,6 +61,9 @@ x-stage-env: &stage-env
   AISIS_ADAPTER_MUSIC_URL: "http://127.0.0.1:31418/music/play"
   AISIS_HA_URL: "http://127.0.0.1:8895"
   AISIS_HA_TOKEN: "hacli-stage-dry-run"
+  # /intent/decide EXECUTES timers on the adapter it reaches, and with host networking the default URL is the real adapter:
+  # stage makes no grammar call at all.
+  GRAMMAR_HOOK: "off"
 
 x-switch: &switch
   image: ${AISIS_SWITCH_IMAGE:-aisis-yandex-https:3b902d6}

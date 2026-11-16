@@ -2,7 +2,9 @@
 // Most addressed phrases of the speaker are decided by a declarative grammar in the adapter without a language model:
 // «который час», «громче», «не включай свет», wake-only and TTS-echo noise. The fast-intent layer asks it once per
 // turn, after a pending yes/no answer was handled and before anything else, and acts on the verdict.
-// GRAMMAR_HOOK=on|shadow|off (default on). shadow: call and log the answer, never act. off: no call at all.
+// GRAMMAR_HOOK=on|shadow|off (default on; any other value is off). shadow: a classification-only call (`shadow: true`, the
+// adapter executes nothing) that is neither awaited nor acted on, only logged. off: no call at all.
+// AISIS_ADAPTER_TOKEN, when the container has it, is sent as the bearer the adapter's authorize() checks.
 // This file only does HTTP and validation: the mapping to FastIntentResult (reply, volume directives) lives in
 // ha-intents.ts next to the code it reuses, so there is no import cycle.
 import { getLogger } from '../logger'
@@ -50,20 +52,22 @@ function parseVolume (value: unknown): GrammarVolume | null {
   return volume.target === undefined && volume.steps === undefined && volume.deltaLevels === undefined ? null : volume
 }
 
-/** The adapter's verdict as a validated plain object; null on any failure, off or shadow: the caller then runs the old path. */
-export async function grammarRoute (
-  text: string,
-  ctx: { dialogActive: boolean, speakerLevel: null | number },
-  fetchImpl: typeof fetch = fetch
-): Promise<GrammarRoute | null> {
-  // Read per call, not at load: the mode can be switched without reloading the module.
-  const current = (process.env.GRAMMAR_HOOK ?? 'on').toLowerCase()
-  if (current === 'off') return null
+type Mode = 'off' | 'on' | 'shadow'
+
+// Read per call, not at load: the mode can be switched without reloading the module. An unknown value is off.
+function mode (): Mode {
+  const value = (process.env.GRAMMAR_HOOK ?? 'on').toLowerCase()
+  return value === 'on' || value === 'shadow' ? value : 'off'
+}
+
+async function ask (text: string, ctx: { dialogActive: boolean }, shadow: boolean, fetchImpl: typeof fetch): Promise<GrammarRoute | null> {
   const started = Date.now()
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (process.env.AISIS_ADAPTER_TOKEN) headers.Authorization = `Bearer ${process.env.AISIS_ADAPTER_TOKEN}`
   try {
     const response = await fetchImpl(process.env.AISIS_ADAPTER_INTENT_URL ?? 'http://127.0.0.1:31117/intent/decide', {
-      body: JSON.stringify({ dialogActive: ctx.dialogActive, text }),
-      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(shadow ? { dialogActive: ctx.dialogActive, shadow: true, text } : { dialogActive: ctx.dialogActive, text }),
+      headers,
       method: 'POST',
       signal: AbortSignal.timeout(TIMEOUT_MS)
     })
@@ -72,9 +76,12 @@ export async function grammarRoute (
       return null
     }
     const data = await response.json() as Record<string, unknown>
-    const route = typeof data.route === 'string' ? ROUTES[data.route] : undefined
-    if (route === undefined) return null
-    const verdict: GrammarRoute = {
+    const route = typeof data.route === 'string' && Object.hasOwn(ROUTES, data.route) ? ROUTES[data.route] : undefined
+    if (route === undefined) {
+      logger.warn(`Grammar route unknown '${String(data.route)}' for '${text}' after ${Date.now() - started}ms`)
+      return null
+    }
+    return {
       intent: typeof data.intent === 'string' ? data.intent : null,
       listen: data.listen === true,
       ms: finite(data.ms) ? data.ms : Date.now() - started,
@@ -82,15 +89,30 @@ export async function grammarRoute (
       text: typeof data.text === 'string' && data.text.trim() !== '' ? data.text : null,
       volume: route === 'volume' ? parseVolume(data.volume) : null
     }
-    if (current === 'shadow') {
-      logger.info(`Grammar shadow '${text}' -> ${verdict.intent ?? 'none'} (${verdict.route}, ${verdict.ms} ms)`)
-      return null
-    }
-    if (route === 'reply' && verdict.text === null) return null
-    if (route === 'volume' && verdict.volume === null) return null
-    return verdict
   } catch (error) {
     logger.warn(`Grammar route failed for '${text}' after ${Date.now() - started}ms: ${String(error)}`)
     return null
   }
+}
+
+/** The adapter's verdict as a validated plain object; null on any failure, off or shadow: the caller then runs the old path. */
+export async function grammarRoute (
+  text: string,
+  ctx: { dialogActive: boolean, speakerLevel: null | number },
+  fetchImpl: typeof fetch = fetch
+): Promise<GrammarRoute | null> {
+  const current = mode()
+  if (current === 'off') return null
+  if (current === 'shadow') {
+    // Never awaited: a shadow call must not cost the speaker a millisecond.
+    void ask(text, ctx, true, fetchImpl).then(verdict => {
+      if (verdict !== null) logger.info(`Grammar shadow '${text}' -> ${verdict.intent ?? 'none'} (${verdict.ms} ms)`)
+    })
+    return null
+  }
+  const verdict = await ask(text, ctx, false, fetchImpl)
+  if (verdict === null) return null
+  if (verdict.route === 'reply' && verdict.text === null) return null
+  if (verdict.route === 'volume' && verdict.volume === null) return null
+  return verdict
 }

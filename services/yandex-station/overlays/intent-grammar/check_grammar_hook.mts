@@ -19,7 +19,7 @@ interface Protobuf { encodeProtobufStruct: (value: Record<string, unknown>) => u
 // ever reaches a real Home Assistant.
 process.env.AISIS_HA_TOKEN = 'check-only'
 
-interface Call { body: { dialogActive?: boolean, text?: string } }
+interface Call { authorization?: string, body: { dialogActive?: boolean, shadow?: boolean, text?: string } }
 const calls: Call[] = []
 let answer: { delayMs?: number, body: unknown, status?: number } = { body: { route: 'none' } }
 const server = createServer((request, response) => {
@@ -31,7 +31,7 @@ const server = createServer((request, response) => {
   let raw = ''
   request.on('data', chunk => { raw += String(chunk) })
   request.on('end', () => {
-    calls.push({ body: JSON.parse(raw) as Call['body'] })
+    calls.push({ authorization: request.headers.authorization, body: JSON.parse(raw) as Call['body'] })
     setTimeout(() => {
       response.writeHead(answer.status ?? 200, { 'Content-Type': 'application/json' })
       response.end(typeof answer.body === 'string' ? answer.body : JSON.stringify(answer.body))
@@ -98,7 +98,7 @@ result = await matchFastIntent('громкость семь', { speakerLevel: 3 
 check('volume target', JSON.stringify(levelsOf(result)) === JSON.stringify([level(7)]) && result?.text === null, JSON.stringify(names(result)))
 route({ route: 'volume', volume: { steps: 1 } })
 result = await matchFastIntent('громче', { speakerLevel: 4 })
-check('volume steps with speaker level', levelsOf(result).length === 1 && JSON.stringify(levelsOf(result)) !== JSON.stringify([level(4)]), JSON.stringify(names(result)))
+check('volume steps with speaker level go up', [5, 6, 7, 8, 9, 10].some(n => JSON.stringify(levelsOf(result)) === JSON.stringify([level(n)])), JSON.stringify(levelsOf(result)))
 route({ route: 'volume', volume: { steps: -1 } })
 result = await matchFastIntent('тише', { speakerLevel: null })
 check('volume steps without speaker level', names(result).filter(name => name === 'sound_quiter').length >= 1 && levelsOf(result).length === 0, JSON.stringify(names(result)))
@@ -135,16 +135,41 @@ result = await matchFastIntent(MATH)
 check('bad json fails open', result?.text === mathText, JSON.stringify(result))
 
 // modes
-route({ route: 'reply', text: 'shadow answer' })
+route({ route: 'reply', text: 'shadow answer' }, { delayMs: 400 })
 process.env.GRAMMAR_HOOK = 'shadow'
 let before = calls.length
+started = Date.now()
 result = await matchFastIntent(MATH)
-check('shadow calls but never acts', calls.length === before + 1 && result?.text === mathText, JSON.stringify(result))
-process.env.GRAMMAR_HOOK = 'off'
+elapsed = Date.now() - started
+check('shadow never acts and never waits for the adapter', result?.text === mathText && elapsed < 250, `${elapsed} ms ${JSON.stringify(result)}`)
+await new Promise(resolve => setTimeout(resolve, 100))
+check('shadow still asks, classification only', calls.length === before + 1 && calls.at(-1)?.body.shadow === true && calls.at(-1)?.body.text === MATH, JSON.stringify(calls.at(-1)))
+route({ route: 'none' })
+process.env.GRAMMAR_HOOK = 'on'
 before = calls.length
-result = await matchFastIntent(MATH)
-check('off makes no call', calls.length === before && result?.text === mathText, JSON.stringify(result))
+await matchFastIntent(MATH)
+check('on asks without the shadow flag', calls.length === before + 1 && calls.at(-1)?.body.shadow === undefined, JSON.stringify(calls.at(-1)))
+for (const value of ['off', 'OFF', '0', 'false', 'disabled', '']) {
+  process.env.GRAMMAR_HOOK = value
+  before = calls.length
+  result = await matchFastIntent(MATH)
+  check(`GRAMMAR_HOOK='${value}' makes no call`, calls.length === before && result?.text === mathText, JSON.stringify(result))
+}
 delete process.env.GRAMMAR_HOOK
+
+// credential: the bearer the adapter's authorize() checks, only when the container has it
+route({ route: 'none' })
+await matchFastIntent(MATH)
+check('no token, no Authorization header', calls.at(-1)?.authorization === undefined, String(calls.at(-1)?.authorization))
+process.env.AISIS_ADAPTER_TOKEN = 'check-only-token'
+await matchFastIntent(MATH)
+check('the adapter token is sent as a bearer', calls.at(-1)?.authorization === 'Bearer check-only-token', String(calls.at(-1)?.authorization))
+delete process.env.AISIS_ADAPTER_TOKEN
+
+// route names are own properties of the table
+route({ route: '__proto__' })
+result = await matchFastIntent(MATH)
+check('a prototype name is an unknown route', result?.text === mathText, JSON.stringify(result))
 
 // A pending clarification is answered BEFORE the hook: the hook is not called for the answer.
 route({ route: 'none' })

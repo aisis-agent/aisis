@@ -7,17 +7,20 @@ from pathlib import Path
 import prepare_overlay as overlay
 
 HA_BASELINE = ("import { x } from './x'\n" + overlay.HA_IMPORT_BEFORE + "\nasync function matchFastIntentCore () {\n"
-               "    // A question is pending: this turn is the answer.\n" + overlay.HA_HOOK_BEFORE + "    const math = 1\n}\n")
+               "    // A question is pending: this turn is the answer.\n    // «а на кухне?» right after «включи свет в гостиной»: the same command.\n"
+               + overlay.HA_HOOK_BEFORE + "}\n")
 ASR_BASELINE = "// header\n" + overlay.ASR_HEADER_BEFORE + "const MODE = 'on'\n" + overlay.ASR_TIERS_BEFORE
 BASELINE_DIR = os.environ.get("AISIS_QUASAR_BASELINE_DIR")
 
 
 class ApplyPatchesTests(unittest.TestCase):
-    def test_the_hook_is_called_after_the_pending_answer_and_before_the_room_follow_up(self):
+    def test_the_hook_is_called_after_the_pending_answer_and_the_room_follow_up_and_before_the_catalog(self):
         patched = overlay.apply_patches(HA_BASELINE, overlay.HA_INTENTS_PATCHES)
         call = patched.index("await grammarRoute(text,")
-        self.assertLess(patched.index("A question is pending"), call)
-        self.assertLess(call, patched.index("«а на кухне?»"))
+        self.assertLess(patched.index("A question is pending"), patched.index("«а на кухне?»"))
+        self.assertLess(patched.index("«а на кухне?»"), call)
+        self.assertLess(call, patched.index("const math = evaluateMath(s)"))
+        self.assertEqual(patched.count("const math = evaluateMath(s)"), 1)
         self.assertIn(overlay.HA_IMPORT_AFTER, patched)
 
     def test_the_clarify_tier_is_no_longer_eligible_for_the_corrector(self):

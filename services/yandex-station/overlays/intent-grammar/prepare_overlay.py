@@ -6,7 +6,7 @@ without) the brain, and made an incomplete-slot phrase («Громкость.»)
 (docs/research/intent-coverage-audit-2026-11.md §3.1, §4.3, §4.5). Three files change (README.md in this directory):
 
   backend/grammar-hook.ts  NEW, copied from the directory next to this script (adapter client, fail-open)
-  backend/ha-intents.ts    the hook is called right after a pending yes/no answer was handled; its verdict is mapped
+  backend/ha-intents.ts    the hook is called after a pending yes/no answer and the room follow-up were handled; its verdict is mapped
   backend/asr-correct.ts   the clarify tier is no longer eligible for the Haiku corrector
 
     prepare_overlay.py --ha-intents ha-intents.ts --asr-correct asr-correct.ts --output-dir NEW_DIRECTORY
@@ -30,8 +30,8 @@ HOOK_SOURCE = Path(__file__).resolve().parent / "grammar-hook.ts"
 # ha-intents.ts: SHA-256 of an accepted input -> SHA-256 of the patched result. The first is the active image's file, the
 # second the speaker-room overlay's patched result (its README pins it); the hook blocks do not touch its hunks.
 HA_INTENTS_PATCHED_SHA256 = {
-    "245c920baafb0709493e30547c147ebc50d475513595c10c4663708478a3cca9": "09ab55d9adb150f9584b37520ff36297ce9f89432dfae15175a4aa149d112353",
-    "81fac5ca320c639471382b58fbf466f701b88ccf50beda895e75a443737e405b": "4f03a41d98ff9c32817d2c5daa8d9a29eae4b6004847e86e2409826a2d59e1c9",
+    "245c920baafb0709493e30547c147ebc50d475513595c10c4663708478a3cca9": "782c69c48e5b3174e86e015bab1dd0f2b076314e5490f7d12ea18e84b26b39e1",
+    "81fac5ca320c639471382b58fbf466f701b88ccf50beda895e75a443737e405b": "f4ab25c368fc5d6a39d280dcfa298eb3a11e261261fc9dae3dd7d82f36a494c3",
 }
 ASR_CORRECT_PATCHED_SHA256 = {
     "6587bc9624ff8268efd59589a73197882228e7ec12c20145ede656c75e27e5c5": "1f337435e1c4cebd6edf43480330229e128ad035afb3c80fa6664cd319afc48d",
@@ -46,17 +46,15 @@ import { grammarRoute } from './grammar-hook'
 """
 
 HA_HOOK_BEFORE = """\
-    if (trace !== undefined) trace.phrase = s
-
-    // «а на кухне?» right after «включи свет в гостиной»: the same command for the room just named.
+    // Pure arithmetic answers instantly: no HA roundtrip, no brain.
+    const math = evaluateMath(s)
 """
 
 HA_HOOK_AFTER = """\
-    if (trace !== undefined) trace.phrase = s
-
-    // Grammar first (adapter /intent/decide, no language model): after a pending answer was handled, before the
-    // room follow-up, the catalog and the brain. Fail-open: null (timeout, adapter down, GRAMMAR_HOOK=shadow|off)
-    // means the phrase goes on through the tiers below exactly as before.
+    // Grammar first (adapter /intent/decide, no language model): after a pending answer was handled and the room
+    // follow-up («а на кухне?», which needs the previous device command the grammar never sees) had its turn, before
+    // the catalog and the brain. Fail-open: null (timeout, adapter down, GRAMMAR_HOOK=shadow|off) means the phrase goes
+    // on through the tiers below exactly as before.
     const grammar = await grammarRoute(text, { dialogActive: options.dialogActive === true, speakerLevel })
     if (grammar !== null && grammar.route !== 'none') {
       let grammarResult: FastIntentResult | null = null
@@ -75,10 +73,12 @@ HA_HOOK_AFTER = """\
         if (asked.target !== undefined) volume.target = asked.target
         else if (asked.deltaLevels !== undefined) {
           // Levels are the speaker's own 0..10 scale; without its reported level only the direction is known.
-          if (speakerLevel !== null) volume.target = Math.min(1, Math.max(0, (speakerLevel + asked.deltaLevels) / MAX_LEVEL))
+          if (speakerLevel !== null && Number.isFinite(speakerLevel)) volume.target = Math.min(1, Math.max(0, (speakerLevel + asked.deltaLevels) / MAX_LEVEL))
           else volume.steps = Math.sign(asked.deltaLevels)
         } else if (asked.steps !== undefined) volume.steps = asked.steps
         if (volume.target !== undefined || volume.steps !== undefined) {
+          // «повтори» after a level change repeats the level it reached (a target), not the change: the recorded
+          // command has no way to carry a delta in levels.
           if (trace !== undefined) trace.executed = { phrase: trace.phrase, resolved: { type: 'volume', volume } }
           // The step is read only for a relative ask, the same way executeResolved does.
           grammarResult = volumeResult(volume, speakerLevel, volume.steps === undefined ? DEFAULT_VOLUME_STEP_PCT : await volumeStepPct())
@@ -90,7 +90,8 @@ HA_HOOK_AFTER = """\
       }
     }
 
-    // «а на кухне?» right after «включи свет в гостиной»: the same command for the room just named.
+    // Pure arithmetic answers instantly: no HA roundtrip, no brain.
+    const math = evaluateMath(s)
 """
 
 ASR_HEADER_BEFORE = """\
