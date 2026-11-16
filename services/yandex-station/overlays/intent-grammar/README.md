@@ -74,9 +74,10 @@ open after 250 ms on every turn (correct, but slower than before).
 `compose.bluegreen.yaml` passes `GRAMMAR_HOOK` to the prod colors (`${GRAMMAR_HOOK-on}` from `runtime.env`: only an UNSET variable means `on`, an empty
 `GRAMMAR_HOOK=` is `off`) and sets `off` for stage: `/intent/decide` executes timers on the adapter it reaches, and stage containers share the host
 network with the real adapter, so a stage grammar call could cancel real timers. The intent corpus and dialog runs (`deploy.sh` pre-flip checks on stage
-and on the idle prod color, and the dashboard's corpus run) keep the hook on but point `AISIS_ADAPTER_INTENT_URL` at a closed port: the hook's own code path
-runs and fails open, the real adapter is never reached, and the expectations pinned to the old tiers hold. The hook against a real adapter is checked by
-`check_grammar_hook.mts`. A container reads its environment once:
+and on the idle prod color, and the dashboard's corpus run) run in the container's own hook mode (stage: `off`, so the hook is not exercised there; the
+idle prod color: whatever `runtime.env` sets) and always get `AISIS_ADAPTER_INTENT_URL` pointing at a closed port, so in no mode can a check reach the real
+adapter, and the expectations pinned to the old tiers hold. Nothing in deploy or stage checks the hook against a real `/intent/decide`: the hook's code
+is checked by `check_grammar_hook.mts` against a stub; the real endpoint is the live smoke of the adapter. A container reads its environment once:
 changing `GRAMMAR_HOOK` means recreating the active color (a deploy with the new value in `runtime.env`).
 
 The adapter side of a clarification question («поставь таймер» → «На сколько поставить таймер?», `listen: true`): the adapter remembers the
