@@ -1,0 +1,2 @@
+# Unified diffs end their last hunk with a blank context line, which is the file content, not stray whitespace.
+*.patch whitespace=-blank-at-eof
