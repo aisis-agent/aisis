@@ -125,3 +125,79 @@ for old in aisis-yandex-adapter aisis-yandex-stt aisis-yandex-pm aisis-yandex-em
   systemctl --user disable --now "$old.service"
 done
 ```
+
+## Cached universal-remote announcements
+
+The adapter accepts the five prepared Bracho labels through its existing,
+authenticated `POST /v1/audio/speech` endpoint. A control marker has the exact form
+`[ha-remote:<64 lowercase hexadecimal characters>]`. A missing, corrupt or
+malformed marker returns HTTP 503; it never falls back to Fish or Alice synthesis.
+Leading Unicode whitespace, format characters (including a BOM), and case variants
+of the reserved prefix are also rejected rather than spoken. The accepted marker
+format remains exact. Ordinary speech retains its selected provider and fallback.
+
+Prepare the cache once after the Home Assistant `remote_announcements` component
+has generated its five clips:
+
+```bash
+python3 services/yandex-station/code/announcement_cache.py --source http://HA_HOST:8123
+```
+
+This command downloads and validates the fixed labels only; it does not play them.
+The Home Assistant component deliberately exposes these generic labels and their
+manifest without authentication. Its endpoints are
+`/api/remote_announcements/manifest` and
+`/api/remote_announcements/audio/<key>.ogg`; they contain no settings or credentials.
+Use an HTTP(S) base URL without user information, a query or a fragment. FFmpeg 7 or newer
+with Opus support must be available on the importer's and adapter's PATH, or via
+their process environment's `FFMPEG` setting. Validation uses the raw PCM muxer's
+single-stream restriction introduced in [FFmpeg 7](https://ffmpeg.org/doxygen/7.0/pcmenc_8c_source.html).
+
+The default cache is `~/.cache/aisis/remote-announcements/`. `--folder` selects a
+separate import location for preparation or tests; the running adapter uses the
+default location. Each clip must use voice `5cd1ffa5dbb4419cb5766435139c6d92`, be a
+single Ogg Opus audio stream, match its checksum and metadata, and decode to at
+most two seconds. The importer prints the path of its private, incremental log
+at both startup and completion, including failures. No audio belongs in Git.
+
+Publication prepares and validates a private generation, syncs its data and
+metadata, then atomically replaces `current`. A failed pre-publication operation
+preserves the previous cache. If the final directory sync fails after replacement,
+the now-visible generation is retained and the import reports the failure; inspect
+readiness before retrying. Published generations are retained deliberately so an
+already queued old marker stays playable. Imports are an explicit preparation
+operation, not a per-announcement job or an automatic recurring cleanup.
+
+`GET /v1/remote-announcements/status`, using the existing adapter bearer credential,
+returns only capability metadata. `installed: true` means that this adapter has
+the cache extension; `ready: true` additionally means that all five current clips
+were validated. It returns the voice ID and fixed clip keys, never credentials or
+configuration. During an exclusive cache publication, speech returns HTTP 503 and
+status returns `ready: false` promptly instead of waiting in a request worker.
+Import preparation still waits for the normal publication lock when reusing clips.
+A readiness response does not prove actual speaker latency or music ducking; those
+require a coordinated live check.
+
+### Installing the adapter and its companion
+
+After review and CI, deploy during a confirmed idle service window with the
+supported command:
+
+```bash
+services/yandex-station/bluegreen/deploy.sh unit adapter /path/to/reviewed/adapter.py
+```
+
+`announcement_cache.py` must be next to the supplied adapter. The command checks
+both sources, backs up both installed files, installs the companion first, and
+restarts the adapter. A failed health check restores the previous pair. Only the
+companion's stale bytecode is invalidated; unrelated modules and files are left
+alone. A failed restore or restart identifies the retained backup for recovery.
+
+Deployment and rollback share a process-owned `maintenance.lock`. The associated
+marker is refreshed only while its owner token and inode still belong to that
+operation. An unknown, manually created or legacy marker blocks all maintenance
+commands, including rollback: its age alone is not evidence that its owner has
+finished. Resolve that ownership through the normal session/lease coordination
+before removing or replacing the marker. A recognized abandoned v1 marker can be
+reclaimed only after acquiring the process lock. There is no implicit force or
+foreign-owner override.

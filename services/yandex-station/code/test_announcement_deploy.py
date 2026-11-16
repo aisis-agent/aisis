@@ -1,0 +1,262 @@
+"""The supported adapter upgrade publishes and rolls back its cache dependency."""
+import json
+import fcntl
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+DEPLOY = Path(__file__).resolve().parents[1] / "bluegreen/deploy.sh"
+
+
+class AdapterDeploymentTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.folder = Path(self.temp.name)
+        self.app, self.source, self.bin = [self.folder / name for name in ("app", "source", "bin")]
+        for folder in (self.app, self.source, self.bin):
+            folder.mkdir()
+        self.old = "VERSION = 'old'\n"
+        self.new = "import announcement_cache\nVERSION = 'new'\n"
+        (self.app / "adapter.py").write_text(self.old)
+        (self.source / "adapter.py").write_text(self.new)
+        (self.source / "announcement_cache.py").write_text("VERSION = 'new cache'\n")
+        self.trace = self.folder / "restarts.jsonl"
+        systemctl = self.bin / "systemctl"
+        systemctl.write_text(f"#!{sys.executable}\n" + '''import json, os, sys, time
+from pathlib import Path
+app = Path(os.environ['AISIS_CODE_DIR'])
+cache = app / 'announcement_cache.py'
+version = None
+if cache.exists():
+    sys.path.insert(0, str(app))
+    import announcement_cache
+    version = announcement_cache.VERSION
+with Path(os.environ['TEST_RESTART_TRACE']).open('a') as stream:
+    stream.write(json.dumps({'adapter': (app / 'adapter.py').read_text(),
+        'cache': cache.read_text() if cache.exists() else None,
+        'imported_cache': version}) + '\\n')
+if os.environ.get('TEST_RESTART_HOLD'):
+    Path(os.environ['TEST_RESTART_HOLD']).touch()
+    deadline = time.monotonic() + 5
+    while not Path(os.environ['TEST_RESTART_RELEASE']).exists():
+        if time.monotonic() > deadline:
+            raise SystemExit(2)
+        time.sleep(0.01)
+''')
+        (self.bin / "curl").write_text('#!/bin/sh\nexit "$TEST_HEALTH_EXIT"\n')
+        (self.bin / "sleep").write_text("#!/bin/sh\nexit 0\n")
+        for command in self.bin.iterdir():
+            command.chmod(0o700)
+        self.env = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
+            "AISIS_CODE_DIR": str(self.app), "AISIS_BG_STATE": str(self.folder / "state"),
+            "TEST_RESTART_TRACE": str(self.trace), "TEST_HEALTH_EXIT": "0"}
+
+    def deploy(self):
+        return subprocess.run(["bash", str(DEPLOY), "unit", "adapter", str(self.source / "adapter.py")],
+            env=self.env, capture_output=True, text=True, timeout=10)
+
+    def fixed_install_clock(self):
+        command = self.bin / "install"
+        command.write_text(f"#!{sys.executable}\n" + '''import os, subprocess, sys
+subprocess.run(['/usr/bin/install', *sys.argv[1:]], check=True)
+if sys.argv[-1].endswith('/announcement_cache.py'):
+    os.utime(sys.argv[-1], (1700000000, 1700000000))
+''')
+        command.chmod(0o700)
+
+    def test_changed_or_removed_maintenance_owner_is_not_recreated(self):
+        prefix = DEPLOY.read_text().split("cmd=${1:-}", 1)[0]
+        script = self.folder / "refresh.sh"
+        for operation in ('rm -- "$state_dir/maintenance"', 'printf foreign >"$state_dir/maintenance"'):
+            with self.subTest(operation=operation):
+                (self.folder / "state/maintenance").unlink(missing_ok=True)
+                script.write_text(prefix + "\nmaintenance_on\n" + operation + "\nmaintenance_touch\n")
+                result = subprocess.run(["bash", str(script)], env=self.env, capture_output=True, text=True, timeout=3)
+                self.assertNotEqual(result.returncode, 0)
+                marker = self.folder / "state/maintenance"
+                if operation.startswith("rm"):
+                    self.assertFalse(marker.exists())
+                else:
+                    self.assertEqual(marker.read_text(), "foreign")
+                    marker.unlink()
+
+    def test_refresh_updates_only_owned_inode_if_marker_is_replaced(self):
+        marker = self.folder / "maintenance"
+        owner = "aisis-deployment-lock-v1:123:.maintenance.fixture"
+        marker.write_text(owner + "\n")
+        source = DEPLOY.read_text().split("maintenance_touch() {", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+        original = os.utime
+        def replace_marker(descriptor, times):
+            self.assertIsInstance(descriptor, int)
+            marker.unlink()
+            marker.write_text("foreign owner")
+            original(marker, (123, 123))
+            original(descriptor, times)
+        with patch("sys.argv", ["refresh", str(marker), owner]), patch.object(os, "utime", replace_marker), self.assertRaises(SystemExit):
+            exec(compile(source, str(DEPLOY), "exec"), {})
+        self.assertEqual(marker.read_text(), "foreign owner")
+        self.assertEqual(marker.stat().st_mtime_ns, 123000000000)
+
+    def test_rollback_preserves_unknown_legacy_maintenance_owner(self):
+        maintenance = self.folder / "state/maintenance"
+        maintenance.parent.mkdir()
+        maintenance.write_text("")
+        result = subprocess.run(["bash", str(DEPLOY), "rollback"], env=self.env, capture_output=True, text=True, timeout=3)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(maintenance.read_text(), "")
+        self.assertIn("unrecognized maintenance owner", result.stderr)
+        self.assertFalse(self.trace.exists())
+
+    def test_restore_failure_names_retained_backup_and_does_not_claim_success(self):
+        command = self.bin / "install"
+        command.write_text('#!/bin/sh\ncase "$*" in *unit-backups*) exit 7;; esac\nexec /usr/bin/install "$@"\n')
+        command.chmod(0o700)
+        self.env["TEST_HEALTH_EXIT"] = "22"
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("restore failed", result.stderr)
+        self.assertIn(str(self.folder / "state/unit-backups"), result.stderr)
+        self.assertNotIn("rolled back to the previous files", result.stderr)
+        self.assertEqual(len(self.trace.read_text().splitlines()), 1)
+
+    def test_failed_restart_after_restore_is_reported_explicitly(self):
+        systemctl = self.bin / "systemctl"
+        systemctl.write_text(systemctl.read_text() + "\nraise SystemExit(7)\n")
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("previous files restored but restart failed", result.stderr)
+        self.assertEqual((self.app / "adapter.py").read_text(), self.old)
+        self.assertEqual(len(self.trace.read_text().splitlines()), 2)
+
+    def test_upgrade_installs_dependency_before_first_restart(self):
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        restarts = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual(restarts, [{"adapter": self.new, "cache": "VERSION = 'new cache'\n",
+            "imported_cache": "new cache"}])
+
+    def test_equal_size_same_mtime_dependency_deploy_uses_new_code(self):
+        self.fixed_install_clock()
+        sentinel = self.app / "__pycache__/other_module.cpython-fixture.pyc"
+        sentinel.parent.mkdir()
+        sentinel.write_bytes(b"unrelated bytecode")
+        for version in ("one", "two"):
+            (self.source / "announcement_cache.py").write_text(f"VERSION = '{version}'\n")
+            result = self.deploy()
+            self.assertEqual(result.returncode, 0, result.stderr)
+        restarts = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual([item["imported_cache"] for item in restarts], ["one", "two"])
+        self.assertEqual(sentinel.read_bytes(), b"unrelated bytecode")
+
+    def test_concurrent_deployment_cannot_replace_active_owner_files(self):
+        hold, release = self.folder / "restart-hold", self.folder / "restart-release"
+        env = {**self.env, "TEST_RESTART_HOLD": str(hold), "TEST_RESTART_RELEASE": str(release)}
+        first = subprocess.Popen(["bash", str(DEPLOY), "unit", "adapter", str(self.source / "adapter.py")],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 3
+            while not hold.exists() and first.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(hold.exists())
+            (self.source / "announcement_cache.py").write_text("VERSION = 'competing cache'\n")
+            result = self.deploy()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((self.app / "announcement_cache.py").read_text(), "VERSION = 'new cache'\n")
+        finally:
+            release.touch()
+            stdout, stderr = first.communicate(timeout=5)
+        self.assertEqual(first.returncode, 0, stderr)
+
+    def test_abandoned_owned_marker_recovers_after_process_lock_release(self):
+        maintenance = self.folder / "state/maintenance"
+        maintenance.parent.mkdir()
+        maintenance.write_text("aisis-deployment-lock-v1:12345:.maintenance.fixture\n")
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(maintenance.exists())
+
+    def test_unknown_legacy_marker_is_preserved_even_when_old(self):
+        maintenance = self.folder / "state/maintenance"
+        maintenance.parent.mkdir()
+        maintenance.write_text("unknown operator maintenance")
+        os.utime(maintenance, (1, 1))
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(maintenance.read_text(), "unknown operator maintenance")
+        self.assertFalse(self.trace.exists())
+
+    def test_process_owned_lock_preserves_another_active_deployment(self):
+        state = self.folder / "state"
+        state.mkdir()
+        # The other process has acquired its lock but not published a marker yet.
+        with (state / "maintenance.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.trace.exists())
+        self.assertEqual((self.app / "adapter.py").read_text(), self.old)
+
+    def test_missing_dependency_is_rejected_before_live_changes(self):
+        (self.source / "announcement_cache.py").unlink()
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.app / "adapter.py").read_text(), self.old)
+        self.assertFalse(self.trace.exists())
+
+    def test_declared_non_utf8_adapter_still_requires_its_companion(self):
+        (self.source / "adapter.py").write_bytes(
+            b"# coding: latin-1\nimport announcement_cache\nCOMMENT = 'caf\xe9'\n")
+        (self.source / "announcement_cache.py").unlink()
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.trace.exists())
+        self.assertEqual((self.app / "adapter.py").read_text(), self.old)
+
+    def test_dependency_inspector_failure_aborts_before_live_changes(self):
+        command = self.bin / "python3"
+        command.write_text('#!/bin/sh\nif [ "$1" = - ]; then exit 2; fi\nexec '
+            + sys.executable + ' "$@"\n')
+        command.chmod(0o700)
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.trace.exists())
+        self.assertEqual((self.app / "adapter.py").read_text(), self.old)
+
+    def test_existing_maintenance_owner_is_preserved(self):
+        maintenance = self.folder / "state/maintenance"
+        maintenance.parent.mkdir()
+        maintenance.write_text("other deployment")
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(maintenance.read_text(), "other deployment")
+        self.assertFalse(self.trace.exists())
+        self.assertEqual((self.app / "adapter.py").read_text(), self.old)
+
+    def test_failed_health_restores_both_original_files(self):
+        self.fixed_install_clock()
+        for existing in (False, True):
+            with self.subTest(existing_cache=existing):
+                cache = self.app / "announcement_cache.py"
+                if existing:
+                    cache.write_text("VERSION = 'old cache'\n")
+                self.trace.unlink(missing_ok=True)
+                self.env["TEST_HEALTH_EXIT"] = "22"
+                result = self.deploy()
+                self.assertNotEqual(result.returncode, 0)
+                restarts = [json.loads(line) for line in self.trace.read_text().splitlines()]
+                self.assertEqual(restarts[0], {"adapter": self.new, "cache": "VERSION = 'new cache'\n",
+                    "imported_cache": "new cache"})
+                self.assertEqual(restarts[-1], {"adapter": self.old,
+                    "cache": "VERSION = 'old cache'\n" if existing else None,
+                    "imported_cache": "old cache" if existing else None})
+                self.assertFalse((self.folder / "state/maintenance").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

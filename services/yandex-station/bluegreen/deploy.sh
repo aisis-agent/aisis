@@ -27,8 +27,61 @@ die() { log "ABORT: $*"; exit 1; }
 upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 
 # Tells failover.py not to act while a deploy deliberately restarts things.
-maintenance_on() { mkdir -p "$state_dir"; touch "$state_dir/maintenance"; trap 'rm -f "$state_dir/maintenance"' EXIT; }
-maintenance_touch() { touch "$state_dir/maintenance"; }
+maintenance_off() {
+  if [[ -f $state_dir/maintenance && $(<"$state_dir/maintenance") == "$maintenance_owner" ]]; then
+    rm -f -- "$state_dir/maintenance"
+  fi
+}
+
+maintenance_on() {
+  local previous temporary
+  mkdir -p "$state_dir"
+  # flock ownership ends with the process, including SIGKILL or a host reboot.
+  exec {maintenance_lock_fd}>"$state_dir/maintenance.lock"
+  flock -n "$maintenance_lock_fd" || die "another deployment holds the process lock"
+  if [[ -e $state_dir/maintenance ]]; then
+    previous=$(<"$state_dir/maintenance")
+    # Only this protocol's abandoned markers are reclaimable. Unknown operator or
+    # legacy maintenance remains protected regardless of the file's age.
+    [[ $previous =~ ^aisis-deployment-lock-v1:[0-9]+:\.maintenance\.[a-zA-Z0-9]+$ ]] \
+      || die "unrecognized maintenance owner; preserve it for operator coordination"
+  fi
+  temporary=$(mktemp "$state_dir/.maintenance.XXXXXX")
+  maintenance_owner="aisis-deployment-lock-v1:$BASHPID:${temporary##*/}"
+  printf '%s\n' "$maintenance_owner" >"$temporary"
+  mv -- "$temporary" "$state_dir/maintenance"
+  trap maintenance_off EXIT
+}
+maintenance_touch() {
+  # Refresh the owned inode only. A concurrent replacement cannot be touched or
+  # recreated, even between the owner check and the timestamp update.
+  if ! python3 - "$state_dir/maintenance" "$maintenance_owner" <<'PY'
+import os
+import stat
+import sys
+path, owner = sys.argv[1:]
+try:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError:
+    raise SystemExit(1) from None
+try:
+    inode = os.fstat(descriptor)
+    if not stat.S_ISREG(inode.st_mode) or os.read(descriptor, 4096) != (owner + "\n").encode():
+        raise SystemExit(1)
+    if not os.path.samestat(inode, os.stat(path, follow_symlinks=False)):
+        raise SystemExit(1)
+    os.utime(descriptor, None)
+    if not os.path.samestat(inode, os.stat(path, follow_symlinks=False)):
+        raise SystemExit(1)
+except OSError:
+    raise SystemExit(1) from None
+finally:
+    os.close(descriptor)
+PY
+  then
+    die "maintenance ownership changed; preserve the marker and coordinate"
+  fi
+}
 
 ensure_state() {
   [[ -f "$state_dir/state.env" ]] && return 0
@@ -230,9 +283,50 @@ cmd_adopt() {
   log "adopted; legacy container $legacy is stopped and kept (docker rm $legacy when no longer needed)"
 }
 
-# unit NAME [FILE]: back up, optionally replace the installed file, restart, wait for health, else restore.
+adapter_needs_cache() {
+  python3 - "$1" <<'PY'
+import ast
+import sys
+import tokenize
+with tokenize.open(sys.argv[1]) as source:
+    tree = ast.parse(source.read())
+needed = any(
+    (isinstance(node, ast.Import) and any(item.name == "announcement_cache" for item in node.names))
+    or (isinstance(node, ast.ImportFrom) and node.module == "announcement_cache")
+    for node in ast.walk(tree)
+)
+print("required" if needed else "none")
+PY
+}
+
+unit_invalidate_cache_bytecode() {
+  # Only the companion belongs to this update; preserve all other module caches.
+  rm -f -- "$app_dir/announcement_cache.pyc" "$app_dir"/__pycache__/announcement_cache.*.pyc
+}
+
+unit_install_file() {
+  local source=$1 target=$app_dir/$2 mode=644
+  [[ ! -f $target ]] || mode=$(stat -c %a "$target")
+  install -m "$mode" "$source" "$target" || return 1
+  if [[ $2 == announcement_cache.py ]]; then unit_invalidate_cache_bytecode; fi
+}
+
+unit_restore_files() {
+  local backup_dir=$1 file
+  shift
+  for file in "$@"; do
+    if [[ -f $backup_dir/$file ]]; then
+      install -m "$(stat -c %a "$backup_dir/$file")" "$backup_dir/$file" "$app_dir/$file" || return 1
+    else
+      rm -f -- "$app_dir/$file" || return 1
+    fi
+    if [[ $file == announcement_cache.py ]]; then unit_invalidate_cache_bytecode || return 1; fi
+  done
+}
+
+# unit NAME [FILE]: install adapter and its cache module together; restore both on failure.
 cmd_unit() {
-  local name=${1:?unit name} newfile=${2:-} file unit url body
+  local name=${1:?unit name} newfile=${2:-} file unit url cache_source="" backup_dir cache_needed
   case $name in
     adapter) file=adapter.py unit=aisis-station-adapter.service url=http://127.0.0.1:31117/healthz ;;
     stt)     file=stt_wyoming.py unit=aisis-station-stt.service url=http://127.0.0.1:31121/healthz ;;
@@ -240,25 +334,51 @@ cmd_unit() {
     pm)      file=pm_cdp_server.py unit=aisis-station-pm.service url=http://127.0.0.1:31118/health ;;
     *) die "unknown unit $name (adapter|stt|ha-cli|pm)" ;;
   esac
-  maintenance_on
-  local target=$app_dir/$file backup=$state_dir/unit-backups/$file.$(date +%Y%m%d-%H%M%S)
-  mkdir -p "$state_dir/unit-backups"
-  cp -p "$target" "$backup"
+  local -a files=("$file")
+  [[ -f $app_dir/$file ]] || die "installed file missing: $file"
   if [[ -n $newfile ]]; then
     python3 -m py_compile "$newfile" || die "$newfile does not compile"
-    install -m "$(stat -c %a "$target")" "$newfile" "$target"
+    if [[ $name == adapter ]]; then
+      cache_needed=$(adapter_needs_cache "$newfile") || die "cannot inspect adapter dependencies"
+      if [[ $cache_needed == required ]]; then
+        cache_source=$(dirname -- "$newfile")/announcement_cache.py
+        [[ -f $cache_source ]] || die "announcement_cache.py must accompany the new adapter"
+        python3 -m py_compile "$cache_source" || die "announcement_cache.py does not compile"
+        files+=(announcement_cache.py)
+      fi
+    fi
   fi
-  systemctl --user restart "$unit"
-  local i
-  for i in $(seq 1 30); do
-    if curl -fsS -m2 "$url" >/dev/null 2>&1; then log "$name healthy after ${i}s"; return 0; fi
-    sleep 1
+  maintenance_on
+  mkdir -p "$state_dir/unit-backups"
+  backup_dir=$(mktemp -d "$state_dir/unit-backups/$name.XXXXXX")
+  for file in "${files[@]}"; do
+    [[ ! -f $app_dir/$file ]] || cp -p "$app_dir/$file" "$backup_dir/$file"
   done
-  log "$name unhealthy after restart; restoring $backup"
-  install -m "$(stat -c %a "$backup")" "$backup" "$target"
-  systemctl --user restart "$unit"
-  die "$name rolled back to the previous file"
+  if [[ -n $cache_source ]] && ! unit_install_file "$cache_source" announcement_cache.py; then
+    unit_restore_files "$backup_dir" "${files[@]}" \
+      || die "restore failed; recover manually from $backup_dir"
+    die "cache module installation failed; previous files restored"
+  fi
+  if [[ -n $newfile ]] && ! unit_install_file "$newfile" "${files[0]}"; then
+    unit_restore_files "$backup_dir" "${files[@]}" \
+      || die "restore failed; recover manually from $backup_dir"
+    die "unit installation failed; previous files restored"
+  fi
+  local i
+  if systemctl --user restart "$unit"; then
+    for i in $(seq 1 30); do
+      if curl -fsS -m2 "$url" >/dev/null 2>&1; then log "$name healthy after ${i}s"; return 0; fi
+      sleep 1
+    done
+  fi
+  log "$name unhealthy after restart; restoring $backup_dir"
+  unit_restore_files "$backup_dir" "${files[@]}" \
+    || die "restore failed; recover manually from $backup_dir"
+  systemctl --user restart "$unit" \
+    || die "$name previous files restored but restart failed; recover from $backup_dir"
+  die "$name rolled back to the previous files"
 }
+
 
 cmd_status() { bg status; }
 
