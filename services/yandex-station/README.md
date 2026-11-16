@@ -132,8 +132,9 @@ The adapter accepts the five prepared Bracho labels through its existing,
 authenticated `POST /v1/audio/speech` endpoint. A control marker has the exact form
 `[ha-remote:<64 lowercase hexadecimal characters>]`. A missing, corrupt or
 malformed marker returns HTTP 503; it never falls back to Fish or Alice synthesis.
-Whitespace or a BOM before a marker is also rejected rather than spoken. Ordinary
-speech retains its selected provider and existing fallback behavior.
+Leading Unicode whitespace, format characters (including a BOM), and case variants
+of the reserved prefix are also rejected rather than spoken. The accepted marker
+format remains exact. Ordinary speech retains its selected provider and fallback.
 
 Prepare the cache once after the Home Assistant `remote_announcements` component
 has generated its five clips:
@@ -170,8 +171,11 @@ operation, not a per-announcement job or an automatic recurring cleanup.
 returns only capability metadata. `installed: true` means that this adapter has
 the cache extension; `ready: true` additionally means that all five current clips
 were validated. It returns the voice ID and fixed clip keys, never credentials or
-configuration. A readiness response does not prove actual speaker latency or
-music ducking; those require a coordinated live check.
+configuration. During an exclusive cache publication, speech returns HTTP 503 and
+status returns `ready: false` promptly instead of waiting in a request worker.
+Import preparation still waits for the normal publication lock when reusing clips.
+A readiness response does not prove actual speaker latency or music ducking; those
+require a coordinated live check.
 
 ### Installing the adapter and its companion
 

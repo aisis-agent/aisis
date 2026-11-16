@@ -57,6 +57,80 @@ def populate(module, folder):
 
 
 class CacheTests(unittest.TestCase):
+    def test_unicode_and_case_near_markers_are_classified_but_never_accepted(self):
+        module = load_module()
+        marker = "[ha-remote:" + "a" * 64 + "]"
+        prefixes = ("\u00a0", "\u2028", "\u3000", "\x1c", "\x85", "\u200b", "\u2060", "\ufeff \u200b")
+        with tempfile.TemporaryDirectory() as folder:
+            for value in [prefix + marker for prefix in prefixes] + [marker.upper()]:
+                with self.subTest(marker=value):
+                    self.assertTrue(module.is_marker(value))
+                    with self.assertRaises(module.CacheNotReady):
+                        module.read_clip(value, Path(folder))
+
+    def test_non_audio_ogg_stream_is_rejected(self):
+        module = load_module()
+        audio = subprocess.run([os.environ.get("FFMPEG", "ffmpeg"), "-v", "error",
+            "-f", "lavfi", "-i", "sine=duration=0.5:sample_rate=48000",
+            "-f", "lavfi", "-i", "color=c=black:s=16x16:r=2:d=0.5",
+            "-map", "0:a", "-map", "1:v", "-c:a", "libopus", "-c:v", "libtheora",
+            "-f", "ogg", "pipe:1"], capture_output=True, check=True, timeout=5).stdout
+        self.assertIn(b"OpusHead", audio[:256])
+        self.assertLess(len(audio), 65536)
+        info = {"sha256": hashlib.sha256(audio).hexdigest(), "duration": 0.5}
+        with self.assertRaises(module.CacheNotReady):
+            module.validate_audio(audio, info)
+
+    def test_runtime_read_does_not_wait_for_an_import_lock(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as folder, ThreadPoolExecutor(max_workers=1) as pool:
+            path = Path(folder)
+            manifest = populate(module, path)
+            marker = module.PREFIX + manifest["clips"]["tv"]["key"] + "]"
+            with module.cache_lock(path, exclusive=True):
+                result = pool.submit(module.read_clip, marker, path)
+                with self.assertRaises(module.CacheNotReady):
+                    result.result(timeout=0.2)
+            self.assertEqual(module.read_clip(marker, path), audio_fixture("tv"))
+
+    def test_runtime_status_does_not_wait_for_an_import_lock(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as folder, ThreadPoolExecutor(max_workers=1) as pool:
+            path = Path(folder)
+            populate(module, path)
+            with module.cache_lock(path, exclusive=True):
+                result = pool.submit(module.status, path)
+                self.assertFalse(result.result(timeout=0.2)["ready"])
+            self.assertTrue(module.status(path)["ready"])
+
+    def test_cleanup_failure_never_replaces_the_staging_failure(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)
+            failure = OSError(errno.ENOSPC, "injected staging disk exhaustion")
+            cleanup = OSError(errno.EACCES, "injected cleanup denial")
+            with patch.object(module, "atomic_write", side_effect=failure), \
+                    patch.object(module.shutil, "rmtree", side_effect=cleanup), \
+                    self.assertRaises(OSError) as raised:
+                module.publish_generation(path, {}, {}, {})
+            self.assertIs(raised.exception, failure)
+            self.assertEqual(failure.__notes__, [module.CLEANUP_NOTE + str(errno.EACCES) + ")"])
+            self.assertFalse((path / "current").exists())
+
+    def test_atomic_file_cleanup_preserves_its_original_sync_failure(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "clip.ogg"
+            target.write_bytes(b"previous")
+            failure = OSError(errno.ENOSPC, "injected sync failure")
+            with patch.object(module.os, "fsync", side_effect=failure), \
+                    patch.object(Path, "unlink", side_effect=OSError(errno.EACCES, "cleanup denial")), \
+                    self.assertRaises(OSError) as raised:
+                module.atomic_write(target, b"next")
+            self.assertIs(raised.exception, failure)
+            self.assertEqual(target.read_bytes(), b"previous")
+            self.assertEqual(failure.__notes__, [module.CLEANUP_NOTE + str(errno.EACCES) + ")"])
+
     def test_import_source_rejects_all_userinfo_before_any_request(self):
         module = load_module()
         for source in ("http://:secret@ha.local", "https://user@ha.local", "http://@ha.local"):
@@ -407,11 +481,14 @@ class CacheTests(unittest.TestCase):
 
     def test_import_logs_actionable_reasons_without_transport_details(self):
         module = load_module()
+        filesystem_error = OSError(errno.ENOSPC, "fixture-sensitive-detail")
+        filesystem_error.add_note(module.CLEANUP_NOTE + str(errno.EACCES) + ")")
         failures = [
             (module.CacheValidationError("Use a Home Assistant base URL without credentials or query"), "base URL"),
             (module.CacheNotReady("announcement checksum mismatch"), "checksum mismatch"),
             (HTTPError("http://ha.invalid/?private=fixture-sensitive-detail", 503,
                 "fixture-sensitive-detail", None, None), "HTTP 503"),
+            (filesystem_error, "errno 28"),
         ]
         real_mkstemp = tempfile.mkstemp
         previous_umask = os.umask(0o077)
@@ -430,6 +507,7 @@ class CacheTests(unittest.TestCase):
                 for log in Path(folder).glob("*.log"):
                     self.assertIn("Import failed:", log.read_text())
                     self.assertNotIn("fixture-sensitive-detail", log.read_text())
+                self.assertTrue(any(module.CLEANUP_NOTE in log.read_text() for log in Path(folder).glob("*.log")))
         finally:
             os.umask(previous_umask)
 
@@ -499,8 +577,8 @@ class CacheTests(unittest.TestCase):
         original_lock = module.cache_lock
 
         @contextmanager
-        def lock(folder, *, exclusive=False):
-            with original_lock(folder, exclusive=exclusive):
+        def lock(folder, *, exclusive=False, blocking=True):
+            with original_lock(folder, exclusive=exclusive, blocking=blocking):
                 yield
             if exclusive and getattr(owner, "first", False):
                 first_switched.set()

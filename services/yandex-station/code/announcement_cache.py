@@ -16,8 +16,10 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
+import unicodedata
 from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
@@ -29,6 +31,7 @@ KEY = re.compile(r"^[0-9a-f]{64}$")
 GENERATION = re.compile(r"^generation-[a-z0-9_]+$")
 TARGETS = {"chromecast", "tv", "kodi", "projector", "speaker"}
 DEFAULT_FOLDER = Path.home() / ".cache/aisis/remote-announcements"
+CLEANUP_NOTE = "Announcement staging cleanup also failed (errno "
 
 
 class CacheNotReady(Exception):
@@ -41,7 +44,11 @@ class CacheValidationError(ValueError):
 
 def is_marker(text: str) -> bool:
     # Near-miss control markers must fail closed, never enter a voice provider.
-    return text.lstrip("\ufeff \t\r\n\v\f").startswith(PREFIX)
+    # Classification is permissive; MARKER.fullmatch still accepts canonical input only.
+    for index, character in enumerate(text):
+        if not character.isspace() and unicodedata.category(character) != "Cf":
+            return text[index:index + len(PREFIX)].lower() == PREFIX
+    return False
 
 
 def valid_hash(value) -> bool:
@@ -73,10 +80,11 @@ def manifest_clips(manifest):
 
 
 @contextmanager
-def cache_lock(folder, *, exclusive=False):
+def cache_lock(folder, *, exclusive=False, blocking=True):
     descriptor = os.open(folder / ".import.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(descriptor, operation if blocking else operation | fcntl.LOCK_NB)
         yield
     finally:
         os.close(descriptor)
@@ -87,8 +95,8 @@ def decoded_duration(audio: bytes) -> float:
     """Validate all streams through a single-audio-stream PCM muxer and cache bytes."""
     try:
         result = subprocess.run([os.environ.get("FFMPEG", "ffmpeg"), "-v", "error", "-xerror",
-            "-nostdin", "-f", "ogg", "-c:a", "opus", "-i", "pipe:0", "-map", "0:a",
-            "-vn", "-ac", "1", "-ar", "8000", "-t", "2.1", "-c:a", "pcm_s16le",
+            "-nostdin", "-f", "ogg", "-c:a", "opus", "-i", "pipe:0", "-map", "0",
+            "-ac", "1", "-ar", "8000", "-t", "2.1", "-c:a", "pcm_s16le",
             "-f", "s16le", "pipe:1"], input=audio, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, timeout=3)
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -166,10 +174,10 @@ def retained_clip(text, folder, expected_sha):
     raise CacheNotReady("announcement cache unavailable")
 
 
-def read_clip(text: str, folder: Path | None = None, *, expected_sha=None) -> bytes:
+def read_clip(text: str, folder: Path | None = None, *, expected_sha=None, wait=False) -> bytes:
     folder = DEFAULT_FOLDER if folder is None else Path(folder)
     try:
-        with cache_lock(folder):
+        with cache_lock(folder, blocking=wait):
             return retained_clip(text, folder, expected_sha)
     except (OSError, UnicodeError) as error:
         raise CacheNotReady("announcement cache unavailable") from error
@@ -188,7 +196,7 @@ def status(folder: Path | None = None) -> dict:
     """Only nonprivate capability metadata for a read-only deployment check."""
     folder = DEFAULT_FOLDER if folder is None else Path(folder)
     try:
-        with cache_lock(folder):
+        with cache_lock(folder, blocking=False):
             return _status(current_folder(folder))
     except (OSError, KeyError, TypeError, ValueError, CacheNotReady):
         return {"installed": True, "ready": False, "voice_id": VOICE_ID, "keys": []}
@@ -206,7 +214,7 @@ def atomic_write(path: Path, content: bytes):
         temporary.replace(path)
         sync_directory(path.parent)
     finally:
-        temporary.unlink(missing_ok=True)
+        cleanup_operation(lambda: temporary.unlink(missing_ok=True), sys.exception())
 
 
 def sync_directory(folder):
@@ -240,7 +248,7 @@ def prepare_import(base, clips, folder, progress=None):
         report_progress(progress, "Preparing " + target)
         key = info["key"]
         try:
-            audio = read_clip(PREFIX + key + "]", folder, expected_sha=info["sha256"])
+            audio = read_clip(PREFIX + key + "]", folder, expected_sha=info["sha256"], wait=True)
         except CacheNotReady:
             report_progress(progress, "Downloading " + target)
             with urlopen(base + "/api/remote_announcements/audio/" + key + ".ogg", timeout=10) as response:
@@ -250,6 +258,16 @@ def prepare_import(base, clips, folder, progress=None):
         validate_audio(audio, info)
         prepared[key] = audio
     return prepared
+
+
+def cleanup_operation(operation, primary):
+    """Retain the original error and a nonprivate secondary cleanup diagnostic."""
+    try:
+        operation()
+    except OSError as error:
+        if primary is None:
+            raise
+        primary.add_note(CLEANUP_NOTE + str(error.errno) + ")")
 
 
 def publish_generation(folder, manifest, clips, prepared):
@@ -275,11 +293,12 @@ def publish_generation(folder, manifest, clips, prepared):
             sync_directory(folder)
         return result
     finally:
-        pointer.unlink(missing_ok=True)
+        primary = sys.exception()
+        cleanup_operation(lambda: pointer.unlink(missing_ok=True), primary)
         # A failed write, validation or switch never changes the playable generation.
         # Retain published generations for rollback; only discard our unpublished data.
         if not published:
-            shutil.rmtree(generation)
+            cleanup_operation(lambda: shutil.rmtree(generation), primary)
 
 
 def install(source: str, folder: Path | None = None, *, progress=None) -> dict:
@@ -328,6 +347,9 @@ def main():
         except Exception as error:
             output = "Import failed: " + failure_reason(error)
             progress(output)
+            for note in getattr(error, "__notes__", ()):
+                if note.startswith(CLEANUP_NOTE):
+                    progress(note)
             print(output)
             raise SystemExit(1) from None
         finally:
