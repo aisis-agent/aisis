@@ -1,0 +1,205 @@
+--- a/backend/ha-intents.ts
++++ b/backend/ha-intents.ts
+@@ -32,6 +32,7 @@
+ import { type MediaAction, parseMediaControl } from './music-parse'
+ import { shadowClassify } from './semantic-shadow'
+ import { DEFAULT_VOLUME_STEP_PCT, doneText, failureText, findSetting, getSettings, getValue, matchSettingQuery, postValue, queryAnswer, refreshSettings, volumeLevels, volumeStepPct } from './settings-voice'
++import { speakerArea } from './speaker-room'
+ import { ActionRecord, latestAction, latestTurn, parseRepeat, recordTurn, RepeatTarget, Turn, TurnOrigin } from './turn-memory'
+ 
+ export type FastIntentResult =
+@@ -130,6 +131,8 @@
+   { area: 'Второй этаж', declined: 'наверху', keywords: ['второй этаж', 'втором этаж', 'наверх'] }
+ ]
+ 
++// A phrase without a room means the room of the speaker that heard it (speaker-room.ts); this is only the answer
++// for a station Home Assistant does not place in a known room (and for the corpus runner, which has no station).
+ const DEFAULT_AREA = 'Гостиная'
+ const ROOM_DEFAULT_SCORE = 0.95
+ const FUZZY_ENTITY_SCORE = 0.8
+@@ -605,23 +608,25 @@
+   return hasQueryWord && hasStateWord
+ }
+ 
+-function resolveCommand (s: string, tokens: string[], reg: HaRegistry): ScoredIntent | null {
++function resolveCommand (s: string, tokens: string[], reg: HaRegistry, defaultArea: string): ScoredIntent | null {
+   const commands = tokens.filter(token => !isNarrativeVerbForm(token))
+   const on = commands.some(token => ON_VERBS.some(verb => token.startsWith(verb)))
+   const off = commands.some(token => OFF_VERBS.some(verb => token.startsWith(verb)))
+   if (!on && !off) return null
+   const kind: 'on' | 'off' = on ? 'on' : 'off'
+ 
+-  // AC resolves by room: kondei_1 — Гостиная, kondei_2 — Второй этаж.
++  // AC resolves by room: kondei_1 — Гостиная, kondei_2 — Второй этаж. Without a room in the phrase: the AC of the
++  // speaker's own room, else the first one.
+   if (/(кондиционер|кондей|конде|сплит)/.test(s)) {
+     const usable = ['climate.kondei_1', 'climate.kondei_2'].filter(id => {
+       const state = reg.entities.get(id)?.state
+       return state !== undefined && state !== 'unavailable' && state !== 'unknown'
+     })
+     const areas = mentionedRoomAreas(s)
++    const inSpeakerRoom = usable.filter(id => entityArea(reg, id) === defaultArea)
+     const targets = areas.length > 0
+       ? usable.filter(id => areas.includes(entityArea(reg, id) ?? ''))
+-      : usable.slice(0, 1)
++      : inSpeakerRoom.length > 0 ? inSpeakerRoom : usable.slice(0, 1)
+     if (targets.length > 0) {
+       return { kind: 'command', score: 1, device: { kind, label: 'кондиционер', targets } }
+     }
+@@ -664,7 +669,7 @@
+       return { kind: 'command', score: 1 * entityScore * 1, device: { kind, label, targets, wholeDomain: 'light' } }
+     }
+     const areas = mentionedRoomAreas(s)
+-    const effectiveAreas = areas.length > 0 ? areas : [DEFAULT_AREA]
++    const effectiveAreas = areas.length > 0 ? areas : [defaultArea]
+     targets = roomLights(reg, effectiveAreas)
+     if (targets.length === 0) return null
+     label = lightLabel(effectiveAreas)
+@@ -679,7 +684,7 @@
+   }
+ }
+ 
+-export function scoreIntent (rawText: string, reg: HaRegistry): null | ScoredIntent {
++export function scoreIntent (rawText: string, reg: HaRegistry, defaultArea: string = DEFAULT_AREA): null | ScoredIntent {
+   const s = normalize(rawText)
+   const tokens = tokenize(s) // sentence punctuation glued to a word («10.») must not hide the number
+   if (s === '') return null
+@@ -705,7 +710,7 @@
+     return { kind: 'state_query', score: 1, lightsOnly: /горит|свет/.test(s) }
+   }
+ 
+-  return resolveCommand(s, tokens, reg)
++  return resolveCommand(s, tokens, reg, defaultArea)
+ }
+ 
+ // ── Replies ──────────────────────────────────────────────────────────────────
+@@ -945,11 +950,12 @@
+ 
+ // The catalog sees the home only through this view, generated from the live
+ // registry: rooms, entity concepts that actually exist, light groups, the AC range.
+-function buildWorld (reg: HaRegistry): World {
++function buildWorld (reg: HaRegistry, defaultArea: string): World {
+   const acIds = ['climate.kondei_1', 'climate.kondei_2'].filter(id => isUsable(reg, id))
++  const acInSpeakerRoom = acIds.filter(id => entityArea(reg, id) === defaultArea)
+   const acTargets = (areas: string[]): string[] => areas.length > 0
+     ? acIds.filter(id => areas.includes(entityArea(reg, id) ?? ''))
+-    : acIds.slice(0, 1)
++    : acInSpeakerRoom.length > 0 ? acInSpeakerRoom : acIds.slice(0, 1)
+   const acAttrs = acIds.length > 0 ? reg.entities.get(acIds[0])?.attributes : undefined
+   return {
+     acLabel: areas => {
+@@ -964,7 +970,7 @@
+       stems: rule.stems,
+       targets: rule.targets(reg).filter(id => reg.entities.has(id))
+     })),
+-    defaultArea: DEFAULT_AREA,
++    defaultArea,
+     lightLabel,
+     lights: areas => areas === 'all'
+       ? [...reg.entities.keys()].filter(id => id.startsWith('light.') && !JUNK_LIGHT.test(id) && isUsable(reg, id))
+@@ -990,30 +996,30 @@
+ // corpus exercises the real routing, not a re-implementation of it). The ASR often
+ // appends chatter as a second sentence («Кромкость 10. Смотри, вот.»): a command in
+ // any one sentence counts, the other sentences must not dilute its score.
+-export function decideFastIntent (rawText: string, reg: HaRegistry): FastDecision {
++export function decideFastIntent (rawText: string, reg: HaRegistry, defaultArea: string = DEFAULT_AREA): FastDecision {
+   const sentences = splitSentences(rawText)
+   if (sentences.length > 1) {
+     for (const sentence of sentences) {
+-      const decision = decideSentence(sentence, reg)
++      const decision = decideSentence(sentence, reg, defaultArea)
+       if (decision.tier !== 'llm' && decision.tier !== 'math') return decision
+     }
+   }
+-  return decideSentence(rawText, reg)
++  return decideSentence(rawText, reg, defaultArea)
+ }
+ 
+ // «зажги свет в», «включи кондиционер на»: the end was cut off, so what would execute is not what was said (the lost
+ // word was the room). Ask again rather than act on the part that survived.
+-function decideSentence (rawText: string, reg: HaRegistry): FastDecision {
+-  const decision = decideSentenceUncut(rawText, reg)
++function decideSentence (rawText: string, reg: HaRegistry, defaultArea: string): FastDecision {
++  const decision = decideSentenceUncut(rawText, reg, defaultArea)
+   return decision.tier === 'execute' && endsMidPhrase(tokenize(normalize(rawText))) ? { reason: 'cut-off', tier: 'reprompt' } : decision
+ }
+ 
+-function decideSentenceUncut (rawText: string, reg: HaRegistry): FastDecision {
++function decideSentenceUncut (rawText: string, reg: HaRegistry, defaultArea: string): FastDecision {
+   // «какой шаг громкости», «что с озвучкой»: the question words would defeat the catalog, so a dashboard setting
+   // asked about is answered here (live value, read-only) before any command grammar sees the phrase.
+   const asked = matchSettingQuery(normalize(rawText), getSettings())
+   if (asked !== null) return { resolved: { id: asked.id, type: 'setting-query' }, tier: 'execute', trace: `setting-query ${asked.id}`, via: 'catalog' }
+-  const intent = scoreIntent(rawText, reg)
++  const intent = scoreIntent(rawText, reg, defaultArea)
+   if (intent !== null) {
+     if (intent.kind === 'math') return { tier: 'math' }
+     if (intent.kind === 'state_query') return { lightsOnly: intent.lightsOnly === true, query: 'state', tier: 'query' }
+@@ -1026,7 +1032,7 @@
+       if (intent.score >= EXECUTE_THRESHOLD && intent.ambiguous !== true) {
+         // «включи свет 50»: a spoken value means a set-point, not a bare switch-on.
+         if (parseNumbers(tokenize(normalize(rawText)), false).length > 0) {
+-          const withValue = catalogDecision(rawText, reg)
++          const withValue = catalogDecision(rawText, reg, defaultArea)
+           if ((withValue.tier === 'execute' || withValue.tier === 'confirm') &&
+             withValue.resolved.type === 'device' && withValue.resolved.device.kind === 'set') return withValue
+         }
+@@ -1042,7 +1048,7 @@
+       }
+     }
+   }
+-  const catalog = catalogDecision(rawText, reg)
++  const catalog = catalogDecision(rawText, reg, defaultArea)
+   if (catalog.tier !== 'llm') return catalog
+   // Last local resort before the brain: read-only questions about named entities
+   // («что со стрелицией», «какая температура на улице»). Never executes.
+@@ -1056,8 +1062,8 @@
+   return catalog
+ }
+ 
+-function catalogDecision (rawText: string, reg: HaRegistry): FastDecision {
+-  const decision = decideCatalog(normalize(rawText), buildWorld(reg))
++function catalogDecision (rawText: string, reg: HaRegistry, defaultArea: string): FastDecision {
++  const decision = decideCatalog(normalize(rawText), buildWorld(reg, defaultArea))
+   if (decision.tier === 'execute') return { resolved: decision.resolved, tier: 'execute', trace: decision.trace, via: 'catalog' }
+   if (decision.tier === 'confirm') {
+     return { declineToBrain: false, question: decision.question, resolved: decision.resolved, tier: 'confirm', trace: decision.trace, via: 'catalog' }
+@@ -1082,8 +1088,18 @@
+   speakerLevel?: null | number
+   // Where the turn came from: a spoken one wins when «повтори» looks for the last turn (turn-memory.ts).
+   origin?: TurnOrigin
++  // The station that heard the turn (StationInfo.duid): a phrase without a room means the room Home Assistant puts it in.
++  // Absent for callers that have no station (the corpus runner).
++  deviceId?: string
+ }
+ 
++// The room a phrase without one is about: the area Home Assistant gives the speaker that heard it, when that is one of the
++// home's rooms; otherwise the legacy default (living room).
++function roomOfSpeaker (reg: HaRegistry, deviceId: string | undefined): string {
++  const area = speakerArea(reg.areaByEntity, deviceId)
++  return area !== undefined && ROOMS.some(room => room.area === area) ? area : DEFAULT_AREA
++}
++
+ // Repair of a short phrase the fast layer could not decide on (asr-correct.ts). The corrected text meets every
+ // confirm/clarify rule a spoken phrase would. High confidence («act»): it is routed as if the owner had said it.
+ // Middle band («confirm»): a device action is offered back («Включи свет», верно?») and only a «да» runs it, because
+@@ -1096,7 +1112,7 @@
+   logger.info(describeCorrection(text, correction, mode))
+   if (mode === 'ignore') return null
+   if (mode === 'confirm') {
+-    const heard = decideFastIntent(correction.text, reg)
++    const heard = decideFastIntent(correction.text, reg, roomOfSpeaker(reg, options.deviceId))
+     const question = confirmationQuestion(correction.text)
+     if (heard.tier !== 'execute' || question === null) return null
+     pendingClarification = { declineToBrain: false, expiresAt: Date.now() + AMBIGUITY_TTL_MS, mode: 'confirm',
+@@ -1322,7 +1338,9 @@
+     }
+ 
+     const reg = await getRegistry(config)
+-    const decision = decideFastIntent(text, reg)
++    const area = roomOfSpeaker(reg, options.deviceId)
++    const decision = decideFastIntent(text, reg, area)
++    if (decision.tier !== 'llm') logger.info(`Fast intent room for '${s}': ${area} (station ${options.deviceId ?? 'unknown'})`)
+     if (decision.tier !== 'reprompt') lastRepromptAt = 0
+     logger.debug(`Fast intent decision '${s}': ${decision.tier} ${'trace' in decision ? decision.trace ?? '' : ''}`)
+ 

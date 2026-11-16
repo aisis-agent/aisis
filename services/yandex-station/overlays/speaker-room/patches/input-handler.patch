@@ -1,0 +1,20 @@
+--- a/routers/uniproxy/input-handler.ts
++++ b/routers/uniproxy/input-handler.ts
+@@ -298,7 +298,7 @@
+         // (e.g. «выключи свет» after a silent turn); run them through the same
+         // fast-intent layer as voice before giving up on the text.
+         const fastIntent = await matchFastIntent(input.data.text,
+-          { dialogActive: this.dialogActive(), origin: 'text', speakerLevel: speakerLevelOf(input.metadata.internal.deviceState) })
++          { deviceId: input.metadata.internal.deviceId, dialogActive: this.dialogActive(), origin: 'text', speakerLevel: speakerLevelOf(input.metadata.internal.deviceState) })
+         if (fastIntent !== null && fastIntent.kind !== 'llm') {
+           const listen = fastIntent.listen === true
+           this.noteResponse(fastIntent.text, listen)
+@@ -353,7 +353,7 @@
+     // the mic open for the answer. A clarified ambiguity reroutes the ORIGINAL
+     // phrase to the brain.
+     const fastIntent = await matchFastIntent(input.text,
+-      { dialogActive: this.dialogActive(), origin: 'voice', speakerLevel: speakerLevelOf(input.metadata.internal.deviceState) })
++      { deviceId: input.metadata.internal.deviceId, dialogActive: this.dialogActive(), origin: 'voice', speakerLevel: speakerLevelOf(input.metadata.internal.deviceState) })
+     let brainText = input.text
+     if (fastIntent !== null && fastIntent.kind === 'reply') {
+       const listen = fastIntent.listen === true

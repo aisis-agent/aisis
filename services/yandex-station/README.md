@@ -63,6 +63,19 @@ speaker. A heard phrase is tried in this order; the first layer that recognises 
    fragments from `~/.local/share/aisis/prompts/`) tells it what the speaker does and forbids the made-up
    «не могу, скажи штатной командой колонки».
 
+**Which room.** A phrase that names no room («включи свет», «яркость 30», «включи кондиционер») is about the room of
+the speaker that heard it. The fast-intent layer gets the station id of the connection (`StationInfo.duid`), finds
+the station's `media_player` in Home Assistant (its entity id ends in the station id in lower case:
+`media_player.aisis_speaker_<id>`, else `media_player.yandex_station_<id>`) and uses the HA area of that player's device (the
+area the registry reports for every entity, `area_name(device_id(entity))`). A room in
+the phrase wins («включи свет на кухне» from the Studio speaker lights the kitchen). A station HA does not place in
+one of the home's rooms keeps the old default (Гостиная). To move a speaker to another room change the area of its
+device in HA (an area set only on the player entity is not read); the registry cache refreshes within a minute. The code is the `overlays/speaker-room` source overlay
+(the quasar layer lives in the image, not in this repository): `overlays/speaker-room/prepare_overlay.py --baseline DIR
+--output-dir NEW` patches the exact production sources (`docker cp aisis-quasar-prod-<active>:/src/. DIR`, hash-checked)
+and `bluegreen/deploy.sh deploy --overlay NEW` ships it; `overlays/speaker-room/run_tests.sh` runs `tests/*.mts` against
+the overlay applied to the active image's sources, in scratch containers with no network.
+
 One-time setup on the host: `ln -s ~/xp/weather-cli/bin/weather ~/.local/bin/weather` (the adapter finds it
 on PATH or in `~/.local/bin` at call time; `AISIS_WEATHER_COMMAND='["/path/weather"]'` overrides). weather-cli
 reads Home Assistant through `aisis-ha-cli` (`WEATHER_HA_URL`, default `AISIS_HACLI_URL`); ha-cli forwards the
@@ -107,6 +120,11 @@ query string, which `weather.get_forecasts?return_response` needs.
   `ln -sf ~/xp/aisis/services/yandex-station/bin/clip-truth ~/.local/bin/clip-truth`).
   `clip-truth` re-pins the feed to its own session and topic; `clipfeed.py test`
   posts one synthetic clip to prove the path.
+  Commands the speaker recognises on the device itself (its commands spotter: «включи свет», «громче», «пауза») arrive
+  as text only, so the STT gateway never hears them. Quasar forwards the spotter-log recording the station uploads
+  next to each of them to the gateway (`POST /spotter-clip`, `spotter_clips.py`), which archives it as a clip with
+  `trigger='spotter'` (the transcript is the speaker's own recognition, not Whisper's) linked to the station's text
+  dialog; the feed posts it like any other utterance, captioned «распознано самой колонкой».
 - Containers keep their historical names (`aisis-yandex-postgres-1`,
   `aisis-yandex-network-{tls-voice,dns-relay}-1`, compose project `aisis-yandex`
   for postgres) — do not recreate them just to rename.
