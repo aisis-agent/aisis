@@ -123,8 +123,8 @@ query string, which `weather.get_forecasts?return_response` needs.
   Commands the speaker recognises on the device itself (its commands spotter: «включи свет», «громче», «пауза») arrive
   as text only, so the STT gateway never hears them. Quasar forwards the spotter-log recording the station uploads
   next to each of them to the gateway (`POST /spotter-clip`, `spotter_clips.py`), which archives it as a clip with
-  `trigger='spotter'` (the transcript is the speaker's own recognition, not Whisper's) linked to the station's text
-  dialog; the feed posts it like any other utterance, captioned «распознано самой колонкой».
+  `trigger='spotter'` (the transcript is the speaker's own recognition, not Whisper's) linked to the text dialog nearest in
+  time (one of the same station first); the feed posts it like any other utterance, captioned «распознано самой колонкой».
 - Containers keep their historical names (`aisis-yandex-postgres-1`,
   `aisis-yandex-network-{tls-voice,dns-relay}-1`, compose project `aisis-yandex`
   for postgres) — do not recreate them just to rename.

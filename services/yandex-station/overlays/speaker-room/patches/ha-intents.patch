@@ -6,12 +6,12 @@
  import { DEFAULT_VOLUME_STEP_PCT, doneText, failureText, findSetting, getSettings, getValue, matchSettingQuery, postValue, queryAnswer, refreshSettings, volumeLevels, volumeStepPct } from './settings-voice'
 +import { speakerArea } from './speaker-room'
  import { ActionRecord, latestAction, latestTurn, parseRepeat, recordTurn, RepeatTarget, Turn, TurnOrigin } from './turn-memory'
- 
+
  export type FastIntentResult =
 @@ -130,6 +131,8 @@
    { area: 'Второй этаж', declined: 'наверху', keywords: ['второй этаж', 'втором этаж', 'наверх'] }
  ]
- 
+
 +// A phrase without a room means the room of the speaker that heard it (speaker-room.ts); this is only the answer
 +// for a station Home Assistant does not place in a known room (and for the corpus runner, which has no station).
  const DEFAULT_AREA = 'Гостиная'
@@ -20,7 +20,7 @@
 @@ -605,23 +608,25 @@
    return hasQueryWord && hasStateWord
  }
- 
+
 -function resolveCommand (s: string, tokens: string[], reg: HaRegistry): ScoredIntent | null {
 +function resolveCommand (s: string, tokens: string[], reg: HaRegistry, defaultArea: string): ScoredIntent | null {
    const commands = tokens.filter(token => !isNarrativeVerbForm(token))
@@ -28,7 +28,7 @@
    const off = commands.some(token => OFF_VERBS.some(verb => token.startsWith(verb)))
    if (!on && !off) return null
    const kind: 'on' | 'off' = on ? 'on' : 'off'
- 
+
 -  // AC resolves by room: kondei_1 — Гостиная, kondei_2 — Второй этаж.
 +  // AC resolves by room: kondei_1 — Гостиная, kondei_2 — Второй этаж. Without a room in the phrase: the AC of the
 +  // speaker's own room, else the first one.
@@ -58,7 +58,7 @@
 @@ -679,7 +684,7 @@
    }
  }
- 
+
 -export function scoreIntent (rawText: string, reg: HaRegistry): null | ScoredIntent {
 +export function scoreIntent (rawText: string, reg: HaRegistry, defaultArea: string = DEFAULT_AREA): null | ScoredIntent {
    const s = normalize(rawText)
@@ -67,14 +67,14 @@
 @@ -705,7 +710,7 @@
      return { kind: 'state_query', score: 1, lightsOnly: /горит|свет/.test(s) }
    }
- 
+
 -  return resolveCommand(s, tokens, reg)
 +  return resolveCommand(s, tokens, reg, defaultArea)
  }
- 
+
  // ── Replies ──────────────────────────────────────────────────────────────────
 @@ -945,11 +950,12 @@
- 
+
  // The catalog sees the home only through this view, generated from the live
  // registry: rooms, entity concepts that actually exist, light groups, the AC range.
 -function buildWorld (reg: HaRegistry): World {
@@ -114,7 +114,7 @@
 -  return decideSentence(rawText, reg)
 +  return decideSentence(rawText, reg, defaultArea)
  }
- 
+
  // «зажги свет в», «включи кондиционер на»: the end was cut off, so what would execute is not what was said (the lost
  // word was the room). Ask again rather than act on the part that survived.
 -function decideSentence (rawText: string, reg: HaRegistry): FastDecision {
@@ -123,7 +123,7 @@
 +  const decision = decideSentenceUncut(rawText, reg, defaultArea)
    return decision.tier === 'execute' && endsMidPhrase(tokenize(normalize(rawText))) ? { reason: 'cut-off', tier: 'reprompt' } : decision
  }
- 
+
 -function decideSentenceUncut (rawText: string, reg: HaRegistry): FastDecision {
 +function decideSentenceUncut (rawText: string, reg: HaRegistry, defaultArea: string): FastDecision {
    // «какой шаг громкости», «что с озвучкой»: the question words would defeat the catalog, so a dashboard setting
@@ -156,7 +156,7 @@
 @@ -1056,8 +1062,8 @@
    return catalog
  }
- 
+
 -function catalogDecision (rawText: string, reg: HaRegistry): FastDecision {
 -  const decision = decideCatalog(normalize(rawText), buildWorld(reg))
 +function catalogDecision (rawText: string, reg: HaRegistry, defaultArea: string): FastDecision {
@@ -172,7 +172,7 @@
 +  // Absent for callers that have no station (the corpus runner).
 +  deviceId?: string
  }
- 
+
 +// The room a phrase without one is about: the area Home Assistant gives the speaker that heard it, when that is one of the
 +// home's rooms; otherwise the legacy default (living room).
 +function roomOfSpeaker (reg: HaRegistry, deviceId: string | undefined): string {
@@ -194,7 +194,7 @@
      pendingClarification = { declineToBrain: false, expiresAt: Date.now() + AMBIGUITY_TTL_MS, mode: 'confirm',
 @@ -1322,7 +1338,9 @@
      }
- 
+
      const reg = await getRegistry(config)
 -    const decision = decideFastIntent(text, reg)
 +    const area = roomOfSpeaker(reg, options.deviceId)
@@ -202,4 +202,4 @@
 +    if (decision.tier !== 'llm') logger.info(`Fast intent room for '${s}': ${area} (station ${options.deviceId ?? 'unknown'})`)
      if (decision.tier !== 'reprompt') lastRepromptAt = 0
      logger.debug(`Fast intent decision '${s}': ${decision.tier} ${'trace' in decision ? decision.trace ?? '' : ''}`)
- 
+
