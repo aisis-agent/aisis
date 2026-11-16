@@ -1,0 +1,696 @@
+{
+ "data": {
+  "backtest": {
+   "brain_labels": [
+    "CHITCHAT",
+    "KNOWLEDGE",
+    "ADVICE",
+    "FOLLOWUP",
+    "question",
+    "smalltalk"
+   ],
+   "holdout_percent": 20,
+   "unaddressed": {
+    "AMBIENT": "no_action",
+    "HALLUCINATION": "drop"
+   }
+  },
+  "gate": {
+   "max_false_triggers": 2,
+   "max_p95_us": 25000,
+   "max_wrong_actions": 6,
+   "min_coverage": {
+    "all/all": 0.15,
+    "real/all": 0.2,
+    "real/holdout": 0.15
+   }
+  },
+  "intents": [
+   {
+    "examples": [
+     "спасибо",
+     "Алиса, спасибо большое"
+    ],
+    "id": "dialog.thanks",
+    "labels": [
+     "THANKS"
+    ],
+    "patterns": [
+     "(спасибо|благодарю|спс|благодарствую) (большое|тебе|огромное)?"
+    ],
+    "reply": {
+     "kind": "canned",
+     "say": [
+      "Пожалуйста."
+     ]
+    },
+    "tier": "canned"
+   },
+   {
+    "action": {
+     "executor": "dialog.end"
+    },
+    "allow_negation": true,
+    "examples": [
+     "ничего",
+     "не надо",
+     "отбой"
+    ],
+    "id": "dialog.dismiss",
+    "labels": [
+     "YES_NO"
+    ],
+    "patterns": [
+     "(ничего|отбой|забудь|проехали|ладно)",
+     "не (надо|нужно)"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "executor": "dialog.repeat_last"
+    },
+    "examples": [
+     "повтори",
+     "еще раз",
+     "что ты сказал"
+    ],
+    "id": "dialog.repeat",
+    "labels": [
+     "REPEAT"
+    ],
+    "patterns": [
+     "(повтори|повторить) (еще раз)?",
+     "еще раз",
+     "что ты (сказала|сказал)",
+     "повтори (пожалуйста)?"
+    ],
+    "reply": {
+     "kind": "none"
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "key": "stop"
+     },
+     "executor": "media.key"
+    },
+    "examples": [
+     "стоп",
+     "хватит",
+     "остановись",
+     "замолчи"
+    ],
+    "id": "media.stop",
+    "labels": [
+     "MEDIA_STOP",
+     "media_control",
+     "media_partial"
+    ],
+    "patterns": [
+     "(стоп|стой|хватит|остановись|останови|замолчи|прекрати)",
+     "стоп (музыка|музыку)?"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "key": "pause"
+     },
+     "executor": "media.key"
+    },
+    "examples": [
+     "пауза",
+     "поставь на паузу"
+    ],
+    "id": "media.pause",
+    "labels": [
+     "MEDIA_PAUSE",
+     "media_control",
+     "media_partial"
+    ],
+    "patterns": [
+     "пауза",
+     "(поставь|поставить) на паузу",
+     "на паузу"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "key": "next"
+     },
+     "executor": "media.key"
+    },
+    "examples": [
+     "дальше",
+     "следующий трек",
+     "пропусти"
+    ],
+    "id": "media.next",
+    "labels": [
+     "MEDIA_NEXT",
+     "media_control",
+     "media_partial"
+    ],
+    "patterns": [
+     "(дальше|следующий|следующая|следующую|пропусти|скип|next)",
+     "(следующий|следующая|следующую) (трек|песня|песню|композиция|композицию)",
+     "(переключи|включи) (дальше|следующий трек|следующую песню)"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "key": "previous"
+     },
+     "executor": "media.key"
+    },
+    "examples": [
+     "назад",
+     "предыдущий трек"
+    ],
+    "id": "media.previous",
+    "labels": [
+     "MEDIA_PREVIOUS",
+     "media_control",
+     "media_partial"
+    ],
+    "patterns": [
+     "(назад|предыдущий|предыдущая|предыдущую)",
+     "(предыдущий|предыдущая|предыдущую) (трек|песня|песню|композиция|композицию)",
+     "(включи|вернись) (назад|к предыдущему|на предыдущий трек)"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "key": "resume"
+     },
+     "executor": "media.key"
+    },
+    "examples": [
+     "продолжи",
+     "продолжи воспроизведение"
+    ],
+    "guards": [
+     "not_question"
+    ],
+    "id": "media.resume",
+    "labels": [
+     "MEDIA_RESUME",
+     "media_control",
+     "media_partial"
+    ],
+    "negatives": [
+     "Продолжить воспроизведение?"
+    ],
+    "patterns": [
+     "(продолжи|продолжай|продолжить|возобнови|играй|играть) (дальше|воспроизведение)?"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "executor": "music.play"
+    },
+    "examples": [
+     "включи музыку",
+     "поставь что-нибудь",
+     "включи песню"
+    ],
+    "id": "music.generic",
+    "labels": [
+     "MUSIC_PLAY",
+     "music"
+    ],
+    "negatives": [
+     "не включай музыку",
+     "Поставь."
+    ],
+    "patterns": [
+     "{on_verb} (какую-нибудь|какую-то|мою)? (музыку|музыка|музон|песню|песенку|что-нибудь)",
+     "(поставь|сыграй|играй) (какую-нибудь|что-нибудь)? (музыку|музыка|песню|песенку|что-нибудь)"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "step": 1
+     },
+     "executor": "speaker.volume"
+    },
+    "examples": [
+     "громче",
+     "сделай погромче",
+     "прибавь звук"
+    ],
+    "id": "volume.up",
+    "labels": [
+     "VOLUME",
+     "volume"
+    ],
+    "negatives": [
+     "громкость музыки в клипе",
+     "не делай громче",
+     "громковато",
+     "Подними."
+    ],
+    "patterns": [
+     "{set_verb}? (громче|погромче|еще громче)",
+     "(прибавь|увеличь) (звук|громкость|громкости)?",
+     "(добавь|подними) (звук|громкость|громкости)",
+     "(звук|громкость) (больше|громче|выше)"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "step": -1
+     },
+     "executor": "speaker.volume"
+    },
+    "examples": [
+     "тише",
+     "сделай потише",
+     "убавь звук",
+     "громковато",
+     "убери громкость"
+    ],
+    "id": "volume.down",
+    "labels": [
+     "VOLUME",
+     "volume"
+    ],
+    "negatives": [
+     "Убери."
+    ],
+    "patterns": [
+     "{set_verb}? (тише|потише|тихо)",
+     "громковато",
+     "(убавь|уменьши|понизь|снизь) (звук|громкость|громкости)?",
+     "убери (звук|громкость|громкости)",
+     "(звук|громкость) (меньше|тише|ниже)"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "level": "$level"
+     },
+     "executor": "speaker.volume"
+    },
+    "examples": [
+     {
+      "say": "громкость на пять",
+      "slots": {
+       "level": 5
+      }
+     },
+     {
+      "say": "сделай громкость семь",
+      "slots": {
+       "level": 7
+      }
+     }
+    ],
+    "id": "volume.set",
+    "labels": [
+     "VOLUME",
+     "volume",
+     "volume_partial"
+    ],
+    "negatives": [
+     "громкость 150",
+     "громкость 50",
+     "громкость -5",
+     "не делай громкость пять"
+    ],
+    "patterns": [
+     "{set_verb}? громкост* (на|до)? {level}",
+     "{set_verb}? звук (на|до)? {level}",
+     "{level} громкость"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "slots": {
+     "level": {
+      "range": [
+       0,
+       10
+      ],
+      "type": "number"
+     }
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "percent": "$percent"
+     },
+     "executor": "speaker.volume"
+    },
+    "examples": [
+     {
+      "say": "громкость 50%",
+      "slots": {
+       "percent": 50
+      }
+     },
+     {
+      "say": "громкость 10%",
+      "slots": {
+       "percent": 10
+      }
+     },
+     {
+      "say": "сделай звук на десять процентов",
+      "slots": {
+       "percent": 10
+      }
+     }
+    ],
+    "id": "volume.percent",
+    "labels": [
+     "VOLUME",
+     "volume",
+     "volume_partial"
+    ],
+    "negatives": [
+     "громкость 150%"
+    ],
+    "patterns": [
+     "{set_verb}? громкост* (на|до)? {percent} процент*",
+     "{set_verb}? звук (на|до)? {percent} процент*",
+     "{percent} процент* громкость"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "slots": {
+     "percent": {
+      "range": [
+       0,
+       100
+      ],
+      "type": "number"
+     }
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "level": 10
+     },
+     "executor": "speaker.volume"
+    },
+    "examples": [
+     "громкость на максимум",
+     "сделай на полную",
+     "поставь на полную громкость"
+    ],
+    "id": "volume.max",
+    "labels": [
+     "VOLUME",
+     "volume"
+    ],
+    "negatives": [
+     "полный",
+     "полная",
+     "полно"
+    ],
+    "patterns": [
+     "{set_verb}? (громкость|звук)? (на|до)? (максимум|максимальную|максимальная)",
+     "{set_verb}? (громкость|звук)? на =полную (громкость)?"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "executor": "speaker.volume_query"
+    },
+    "examples": [
+     "какая громкость",
+     "какая сейчас громкость"
+    ],
+    "id": "volume.query",
+    "labels": [
+     "VOLUME",
+     "volume"
+    ],
+    "patterns": [
+     "(какая|какой|сколько) (сейчас|у тебя)? (громкость|звук|громкости)",
+     "(какая|скажи) громкость"
+    ],
+    "reply": {
+     "kind": "template",
+     "say": "Громкость {level}."
+    },
+    "tier": "query"
+   },
+   {
+    "action": {
+     "args": {
+      "room": "$room",
+      "state": "on"
+     },
+     "executor": "ha.light"
+    },
+    "examples": [
+     {
+      "say": "включи свет",
+      "slots": {}
+     },
+     {
+      "say": "включи свет на кухне",
+      "slots": {
+       "room": "kitchen"
+      }
+     }
+    ],
+    "guards": [
+     "not_question"
+    ],
+    "id": "light.on",
+    "labels": [
+     "LIGHT_CMD",
+     "light"
+    ],
+    "negatives": [
+     "не включай свет",
+     "я включил свет",
+     "включил свет?",
+     "Включить свет?"
+    ],
+    "patterns": [
+     "{on_verb} (свет|освещение|лампу|лампочку|люстру)",
+     "{on_verb} (свет|освещение|лампу|лампочку|люстру) (в|на)? {room}",
+     "{on_verb} (в|на)? {room} (свет|освещение|лампу|лампочку|люстру)"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "slots": {
+     "room": {
+      "type": "rooms"
+     }
+    },
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "room": "$room",
+      "state": "off"
+     },
+     "executor": "ha.light"
+    },
+    "examples": [
+     {
+      "say": "выключи свет",
+      "slots": {}
+     },
+     {
+      "say": "выключи свет в спальне",
+      "slots": {
+       "room": "bedroom"
+      }
+     }
+    ],
+    "guards": [
+     "not_question"
+    ],
+    "id": "light.off",
+    "labels": [
+     "LIGHT_CMD",
+     "light"
+    ],
+    "negatives": [
+     "не выключай свет",
+     "выключил свет?",
+     "Выключить свет?"
+    ],
+    "patterns": [
+     "{off_verb} (свет|освещение|лампу|лампочку|люстру)",
+     "{off_verb} (свет|освещение|лампу|лампочку|люстру) (в|на)? {room}",
+     "{off_verb} (в|на)? {room} (свет|освещение|лампу|лампочку|люстру)"
+    ],
+    "reply": {
+     "kind": "earcon"
+    },
+    "slots": {
+     "room": {
+      "type": "rooms"
+     }
+    },
+    "tier": "execute"
+   }
+  ],
+  "lexicon": {
+   "connectors": [
+    "и",
+    "потом",
+    "затем",
+    "а потом"
+   ],
+   "fillers": [
+    "пожалуйста",
+    "пожалуйста",
+    "вот",
+    "же",
+    "там",
+    "плиз"
+   ],
+   "lead_in": [
+    "а",
+    "ну",
+    "слушай",
+    "эй",
+    "давай",
+    "скажи"
+   ],
+   "negation": [
+    "не",
+    "нельзя",
+    "ни",
+    "никогда"
+   ],
+   "off_verb": [
+    "выключи",
+    "выключай",
+    "выключить",
+    "погаси",
+    "потуши",
+    "вырубить",
+    "вырубай",
+    "отключи"
+   ],
+   "on_verb": [
+    "включи",
+    "включай",
+    "включить",
+    "зажги",
+    "засвети",
+    "вруби",
+    "запусти",
+    "запускай"
+   ],
+   "question_words": [
+    "что",
+    "какой",
+    "какая",
+    "какое",
+    "какие",
+    "сколько",
+    "почему",
+    "зачем",
+    "когда",
+    "где",
+    "как",
+    "кто",
+    "ли"
+   ],
+   "rooms": {
+    "bedroom": [
+     "спальн*"
+    ],
+    "hall": [
+     "прихож*"
+    ],
+    "kitchen": [
+     "кухн*"
+    ],
+    "living": [
+     "гостин*",
+     "зал"
+    ],
+    "studio": [
+     "студи*"
+    ],
+    "upstairs": [
+     "второй этаж",
+     "наверху",
+     "наверх"
+    ]
+   },
+   "set_verb": [
+    "сделай",
+    "поставь",
+    "установи",
+    "выставь",
+    "поменяй",
+    "переключи"
+   ],
+   "wake": [
+    "алиса",
+    "яндекс",
+    "брачо"
+   ]
+  },
+  "locale": "ru",
+  "version": 1
+ },
+ "source_sha256": "ffd0b9c90aa4ce721655cb7d488b18e69eed8fde38a7bca7af05dee83e0b8709"
+}

@@ -1,0 +1,215 @@
+# AISIS speaker intent grammar (Russian). Schema and pattern syntax: ../README.md.
+# Phase 1 seed: the intents the quasar fast layer already serves (volume, media keys, light, repeat, thanks,
+# nameless music), ported into data so the back-test harness has a measured baseline. Executors are names the
+# caller resolves; nothing here talks to hardware.
+version: 1
+locale: ru
+
+lexicon:
+  wake: [алиса, яндекс, брачо]
+  lead_in: [а, ну, слушай, эй, давай, скажи]
+  fillers: [пожалуйста, пожалуйста, вот, же, там, плиз]
+  negation: [не, нельзя, ни, никогда]
+  question_words: [что, какой, какая, какое, какие, сколько, почему, зачем, когда, где, как, кто, ли]
+  connectors: [и, потом, затем, а потом]
+  rooms:
+    living: [гостин*, зал]
+    kitchen: [кухн*]
+    bedroom: [спальн*]
+    studio: [студи*]
+    hall: [прихож*]
+    upstairs: [второй этаж, наверху, наверх]
+  set_verb: [сделай, поставь, установи, выставь, поменяй, переключи]
+  on_verb: [включи, включай, включить, зажги, засвети, вруби, запусти, запускай]
+  off_verb: [выключи, выключай, выключить, погаси, потуши, вырубить, вырубай, отключи]
+
+intents:
+  # ── dialogue ────────────────────────────────────────────────────────────
+  - id: dialog.thanks
+    tier: canned
+    labels: [THANKS]
+    patterns: ["(спасибо|благодарю|спс|благодарствую) (большое|тебе|огромное)?"]
+    reply: {kind: canned, say: ["Пожалуйста."]}
+    examples: [спасибо, "Алиса, спасибо большое"]
+  - id: dialog.dismiss
+    tier: execute
+    allow_negation: true
+    labels: [YES_NO]
+    patterns: ["(ничего|отбой|забудь|проехали|ладно)", "не (надо|нужно)"]
+    action: {executor: dialog.end}
+    reply: {kind: earcon}
+    examples: [ничего, не надо, отбой]
+  - id: dialog.repeat
+    tier: execute
+    labels: [REPEAT]
+    patterns: ["(повтори|повторить) (еще раз)?", "еще раз", "что ты (сказала|сказал)", "повтори (пожалуйста)?"]
+    action: {executor: dialog.repeat_last}
+    reply: {kind: none}
+    examples: [повтори, еще раз, "что ты сказал"]
+
+  # ── media keys ──────────────────────────────────────────────────────────
+  - id: media.stop
+    tier: execute
+    labels: [MEDIA_STOP, media_control, media_partial]
+    patterns: ["(стоп|стой|хватит|остановись|останови|замолчи|прекрати)", "стоп (музыка|музыку)?"]
+    action: {executor: media.key, args: {key: stop}}
+    reply: {kind: earcon}
+    examples: [стоп, хватит, остановись, замолчи]
+  - id: media.pause
+    tier: execute
+    labels: [MEDIA_PAUSE, media_control, media_partial]
+    patterns: ["пауза", "(поставь|поставить) на паузу", "на паузу"]
+    action: {executor: media.key, args: {key: pause}}
+    reply: {kind: earcon}
+    examples: [пауза, "поставь на паузу"]
+  - id: media.next
+    tier: execute
+    labels: [MEDIA_NEXT, media_control, media_partial]
+    patterns: ["(дальше|следующий|следующая|следующую|пропусти|скип|next)", "(следующий|следующая|следующую) (трек|песня|песню|композиция|композицию)",
+               "(переключи|включи) (дальше|следующий трек|следующую песню)"]
+    action: {executor: media.key, args: {key: next}}
+    reply: {kind: earcon}
+    examples: [дальше, "следующий трек", пропусти]
+  - id: media.previous
+    tier: execute
+    labels: [MEDIA_PREVIOUS, media_control, media_partial]
+    patterns: ["(назад|предыдущий|предыдущая|предыдущую)", "(предыдущий|предыдущая|предыдущую) (трек|песня|песню|композиция|композицию)",
+               "(включи|вернись) (назад|к предыдущему|на предыдущий трек)"]
+    action: {executor: media.key, args: {key: previous}}
+    reply: {kind: earcon}
+    examples: [назад, "предыдущий трек"]
+  - id: media.resume
+    tier: execute
+    labels: [MEDIA_RESUME, media_control, media_partial]
+    guards: [not_question]    # «Продолжить воспроизведение?» was a recorded hallucination (docs/research/intent-coverage-audit-2026-11.md)
+    patterns: ["(продолжи|продолжай|продолжить|возобнови|играй|играть) (дальше|воспроизведение)?"]
+    action: {executor: media.key, args: {key: resume}}
+    reply: {kind: earcon}
+    examples: [продолжи, "продолжи воспроизведение"]
+    negatives: ["Продолжить воспроизведение?"]
+  - id: music.generic
+    tier: execute
+    labels: [MUSIC_PLAY, music]
+    # the object is required: a bare «Поставь.» is a cut-off sentence, not a request for music
+    patterns: ["{on_verb} (какую-нибудь|какую-то|мою)? (музыку|музыка|музон|песню|песенку|что-нибудь)",
+               "(поставь|сыграй|играй) (какую-нибудь|что-нибудь)? (музыку|музыка|песню|песенку|что-нибудь)"]
+    action: {executor: music.play}
+    reply: {kind: earcon}
+    examples: ["включи музыку", "поставь что-нибудь", "включи песню"]
+    negatives: ["не включай музыку", "Поставь."]
+
+  # ── volume ──────────────────────────────────────────────────────────────
+  # Action args contract (executor speaker.volume): exactly one of `step` (+1/-1, relative), `level` (a plain number
+  # on the speaker's own 0..10 scale) or `percent` (0..100). A bare number is a level; a percent needs its unit
+  # («50%», «пятьдесят процентов»). The grammar never guesses a unit from the size of the number.
+  - id: volume.up
+    tier: execute
+    labels: [VOLUME, volume]
+    # «добавь» / «подними» alone are cut-off sentences (add what? raise what?): they need the object
+    patterns: ["{set_verb}? (громче|погромче|еще громче)", "(прибавь|увеличь) (звук|громкость|громкости)?",
+               "(добавь|подними) (звук|громкость|громкости)", "(звук|громкость) (больше|громче|выше)"]
+    action: {executor: speaker.volume, args: {step: 1}}
+    reply: {kind: earcon}
+    examples: [громче, "сделай погромче", "прибавь звук"]
+    negatives: ["громкость музыки в клипе", "не делай громче", "громковато", "Подними."]
+  - id: volume.down
+    tier: execute
+    labels: [VOLUME, volume]
+    # «громковато» is a complaint that it is too loud; «убери» alone is a cut-off sentence (remove what?)
+    patterns: ["{set_verb}? (тише|потише|тихо)", "громковато", "(убавь|уменьши|понизь|снизь) (звук|громкость|громкости)?",
+               "убери (звук|громкость|громкости)", "(звук|громкость) (меньше|тише|ниже)"]
+    action: {executor: speaker.volume, args: {step: -1}}
+    reply: {kind: earcon}
+    examples: [тише, "сделай потише", "убавь звук", громковато, "убери громкость"]
+    negatives: ["Убери."]
+  - id: volume.set
+    tier: execute
+    labels: [VOLUME, volume, volume_partial]
+    slots:
+      level: {type: number, range: [0, 10]}
+    patterns: ["{set_verb}? громкост* (на|до)? {level}", "{set_verb}? звук (на|до)? {level}", "{level} громкость"]
+    action: {executor: speaker.volume, args: {level: "$level"}}
+    reply: {kind: earcon}
+    examples:
+      - {say: "громкость на пять", slots: {level: 5}}
+      - {say: "сделай громкость семь", slots: {level: 7}}
+    negatives: ["громкость 150", "громкость 50", "громкость -5", "не делай громкость пять"]
+  - id: volume.percent
+    tier: execute
+    labels: [VOLUME, volume, volume_partial]
+    slots:
+      percent: {type: number, range: [0, 100]}
+    patterns: ["{set_verb}? громкост* (на|до)? {percent} процент*", "{set_verb}? звук (на|до)? {percent} процент*",
+               "{percent} процент* громкость"]
+    action: {executor: speaker.volume, args: {percent: "$percent"}}
+    reply: {kind: earcon}
+    examples:
+      - {say: "громкость 50%", slots: {percent: 50}}
+      - {say: "громкость 10%", slots: {percent: 10}}
+      - {say: "сделай звук на десять процентов", slots: {percent: 10}}
+    negatives: ["громкость 150%"]
+  - id: volume.max
+    tier: execute
+    labels: [VOLUME, volume]
+    # «полный» / «полная» / «полно» alone are not a request: «на полную» needs its preposition
+    patterns: ["{set_verb}? (громкость|звук)? (на|до)? (максимум|максимальную|максимальная)",
+               "{set_verb}? (громкость|звук)? на =полную (громкость)?"]
+    action: {executor: speaker.volume, args: {level: 10}}
+    reply: {kind: earcon}
+    examples: ["громкость на максимум", "сделай на полную", "поставь на полную громкость"]
+    negatives: [полный, полная, полно]
+  - id: volume.query
+    tier: query
+    labels: [VOLUME, volume]
+    patterns: ["(какая|какой|сколько) (сейчас|у тебя)? (громкость|звук|громкости)", "(какая|скажи) громкость"]
+    action: {executor: speaker.volume_query}
+    # the level is read by the executor: speak it with `say(decision, values={"level": ...})`; without it no reply
+    reply: {kind: template, say: "Громкость {level}."}
+    examples: ["какая громкость", "какая сейчас громкость"]
+
+  # ── light ───────────────────────────────────────────────────────────────
+  - id: light.on
+    tier: execute
+    labels: [LIGHT_CMD, light]
+    guards: [not_question]    # «Включить свет?» asks about the state or the plan; the past tense never matches (stemmer)
+    slots:
+      room: {type: rooms}
+    patterns: ["{on_verb} (свет|освещение|лампу|лампочку|люстру)", "{on_verb} (свет|освещение|лампу|лампочку|люстру) (в|на)? {room}",
+               "{on_verb} (в|на)? {room} (свет|освещение|лампу|лампочку|люстру)"]
+    action: {executor: ha.light, args: {state: "on", room: "$room"}}
+    reply: {kind: earcon}
+    examples:
+      - {say: "включи свет", slots: {}}
+      - {say: "включи свет на кухне", slots: {room: kitchen}}
+    negatives: ["не включай свет", "я включил свет", "включил свет?", "Включить свет?"]
+  - id: light.off
+    tier: execute
+    labels: [LIGHT_CMD, light]
+    guards: [not_question]
+    slots:
+      room: {type: rooms}
+    patterns: ["{off_verb} (свет|освещение|лампу|лампочку|люстру)", "{off_verb} (свет|освещение|лампу|лампочку|люстру) (в|на)? {room}",
+               "{off_verb} (в|на)? {room} (свет|освещение|лампу|лампочку|люстру)"]
+    action: {executor: ha.light, args: {state: "off", room: "$room"}}
+    reply: {kind: earcon}
+    examples:
+      - {say: "выключи свет", slots: {}}
+      - {say: "выключи свет в спальне", slots: {room: bedroom}}
+    negatives: ["не выключай свет", "выключил свет?", "Выключить свет?"]
+
+backtest:
+  # Corpus labels that only a language model answers (the back-test expects abstain on these).
+  brain_labels: [CHITCHAT, KNOWLEDGE, ADVICE, FOLLOWUP, question, smalltalk]
+  # Speech not addressed to the speaker: what a correct decision is for each label.
+  unaddressed: {HALLUCINATION: drop, AMBIENT: no_action}
+  holdout_percent: 20
+
+# KPI gate of `backtest --gate`. The limits are totals over the whole corpus (already the Phase 2 values). The
+# coverage floors are what this seed grammar meets today (about 0.17 over everything, 0.25 on real rows); they rise
+# with the grammar towards the Phase 2 targets {real/holdout: 0.85, real/all: 0.80, all/all: 0.85}. A floor whose
+# split is missing or has nothing addressed fails.
+gate:
+  max_false_triggers: 2
+  max_wrong_actions: 6
+  max_p95_us: 25000
+  min_coverage: {real/holdout: 0.15, real/all: 0.20, all/all: 0.15}
