@@ -45,6 +45,8 @@ Voice identification: speaker identification (voice accounts) yields `SpeakerCon
 
 Voice authority: a voice turn authorizes nothing sensitive (spec 020, Confirmation policy). Tools with risk `sensitive`, `destructive` or `external_write`, finance mutations and payments, lock/alarm/garage/door actions, and messages sent as the user never execute on voice alone. A spoken «да» on the speaker is not a confirmation: the action becomes an approval request on an authenticated surface (Telegram or web), and the speaker says where to approve it. TV audio, guests and replayed recordings can pass the wake chain, which confirms a phrase, not a person.
 
+Room: a phrase that names no room addresses the room of the speaker that heard it, read from the Home Assistant area of that speaker's own device (the paired `device_id`), never from a global default. A room named in the phrase overrides it. A speaker whose device has no area in a known room falls back to the household default room. The speaker identity selects the room; the voice never does.
+
 ## Audio pipeline
 
 1. Capture 6-channel 16 kHz from the ReSpeaker; ch0 is the primary stream, ch1-4 feed DOA/energy, ch5 is the reference for what the array itself played.

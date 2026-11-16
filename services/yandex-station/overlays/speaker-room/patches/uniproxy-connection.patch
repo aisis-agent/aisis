@@ -1,0 +1,57 @@
+--- a/routers/uniproxy/uniproxy-connection.ts
++++ b/routers/uniproxy/uniproxy-connection.ts
+@@ -19,6 +19,7 @@
+ import { OggOpusStreamStitcher } from '../../codecs/ogg-stitcher'
+  import { AlarmMetadata, InputHandler, InputMetadata, InputResult, TextInput, TimerMetadata } from './input-handler'
+ import { splitSentencesForTts } from './sentence-splitter'
++import { SpotterClipRecorder } from './spotter-clips'
+  import { VoiceInputHandler } from './voice-input-handler'
+
+ type TServerMessage = proto.NAlice.NAliceApi.ITServerMessage
+@@ -91,11 +92,13 @@
+
+   private voiceInputStreamId: Long | number = -1
+   private readonly otherStreams = new Map<number, { frames: number, bytes: number }>()
++  private readonly spotterClips: SpotterClipRecorder
+
+   constructor (private readonly webSocket: WebSocket,
+     private readonly deviceId: string,
+     private readonly platform: string,
+     private readonly parameters: UniProxyConnectionParameters) {
++    this.spotterClips = new SpotterClipRecorder(deviceId)
+     this.voiceInputHandler = new VoiceInputHandler(parameters)
+     this.directiveFunctionProvider = getDirectiveFunctionProvider(platform)
+     this.inputHandler = new InputHandler({
+@@ -282,6 +285,7 @@
+   private noteOtherStream (streamId: number, audioData: Buffer): void {
+     if (this.otherStreams.size > 64) this.otherStreams.clear()
+     const key = Number(streamId)
++    this.spotterClips.addAudio(key, audioData)
+     const seen = this.otherStreams.get(key) ?? { frames: 0, bytes: 0 }
+     seen.frames += 1
+     seen.bytes += audioData.length
+@@ -361,6 +365,7 @@
+     this.inputHandler.closeSession()
+     this.closeDialog(CloseDialogReason.WEBSOCKET_CLOSE)
+     this.voiceInputHandler.close()
++    this.spotterClips.flush()
+   }
+
+   private async handleLogSpotterEvent (clientMessage: TClientMessage): Promise<void> {
+@@ -370,6 +375,8 @@
+     this.logger.info(`LogSpotter: format=${spotter.Format ?? ''} source=${spotter.Source ?? ''} ` +
+       `rawData=${spotter.IsServiceRawData ?? false} streamId=${String(clientMessage.Event!.Header?.StreamId ?? '-')} ` +
+       `duration=${spotter.Extra?.Payload?.DurationMs ?? '-'}ms transcript=${JSON.stringify(spotter.Transcript ?? '')}`)
++    this.spotterClips.announce(Number(String(clientMessage.Event!.Header?.StreamId ?? -1)),
++      { source: spotter.Source ?? '', transcript: spotter.Transcript ?? '' })
+     await this.sendServerMessage({
+       Event: {
+         Header: {
+@@ -812,6 +819,7 @@
+     return {
+       internal: {
+         alarms,
++        deviceId: this.deviceId,
+         deviceState,
+         environmentState,
+         info: deviceInfo,
