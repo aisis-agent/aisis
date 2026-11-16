@@ -60,7 +60,7 @@
 {"id": "R18", "text": "Урок из", "label": "reprompt", "tag": "incomplete"}
 {"id": "R19", "text": "Что первая встреча", "label": "reprompt", "tag": "noise"}
 {"id": "R20", "text": "Алиса", "label": "reprompt", "tag": "wake_only"}
-{"id": "E01", "text": "Какая погода завтра в Белграде?", "label": "escalate", "tag": "fact"}
+{"id": "E01", "text": "Какая погода завтра в Белграде?", "label": "deterministic", "tag": "weather"}
 {"id": "E02", "text": "Что нового в мире сегодня?", "label": "escalate", "tag": "fact"}
 {"id": "E03", "text": "Какие сегодня новости?", "label": "escalate", "tag": "fact"}
 {"id": "E04", "text": "Сколько стоит биткоин?", "label": "escalate", "tag": "fact"}
@@ -76,7 +76,7 @@
 {"id": "E14", "text": "Кто написал Войну и мир?", "label": "escalate", "tag": "fact"}
 {"id": "E15", "text": "В каком году началась вторая мировая война?", "label": "escalate", "tag": "fact"}
 {"id": "E16", "text": "Сколько километров от Белграда до Москвы?", "label": "escalate", "tag": "fact"}
-{"id": "E17", "text": "Который час?", "label": "escalate", "tag": "fact"}
+{"id": "E17", "text": "Который час?", "label": "deterministic", "tag": "time"}
 {"id": "E18", "text": "Какое сегодня число?", "label": "escalate", "tag": "fact"}
 {"id": "E19", "text": "Какой сегодня день недели?", "label": "escalate", "tag": "fact"}
 {"id": "E20", "text": "Когда восход солнца завтра?", "label": "escalate", "tag": "fact"}
@@ -87,7 +87,7 @@
 {"id": "E25", "text": "Кто такой Илон Маск?", "label": "escalate", "tag": "fact"}
 {"id": "E26", "text": "Что случилось с курсом рубля?", "label": "escalate", "tag": "fact"}
 {"id": "E27", "text": "Какой счёт в матче Реал Барселона?", "label": "escalate", "tag": "fact"}
-{"id": "E28", "text": "Сколько сейчас градусов на улице?", "label": "escalate", "tag": "fact"}
+{"id": "E28", "text": "Сколько сейчас градусов на улице?", "label": "deterministic", "tag": "weather"}
 {"id": "E29", "text": "Будет ли завтра дождь?", "label": "escalate", "tag": "fact"}
 {"id": "E30", "text": "Что идёт в кино сегодня вечером?", "label": "escalate", "tag": "fact"}
 {"id": "E31", "text": "Когда выйдет новый айфон?", "label": "escalate", "tag": "fact"}
@@ -120,16 +120,16 @@
 {"id": "E58", "text": "Включи свет и расскажи, что сегодня в новостях", "label": "escalate", "tag": "complex"}
 {"id": "E59", "text": "Что ты думаешь о войне?", "label": "escalate", "tag": "complex"}
 {"id": "E60", "text": "Расскажи про Путина", "label": "escalate", "tag": "complex"}
-{"id": "E61", "text": "Привет, какая завтра погода?", "label": "escalate", "tag": "trap"}
+{"id": "E61", "text": "Привет, какая завтра погода?", "label": "deterministic", "tag": "weather"}
 {"id": "E62", "text": "Спасибо, а сколько стоит биткоин?", "label": "escalate", "tag": "trap"}
 {"id": "E63", "text": "Как дела у Дурова?", "label": "escalate", "tag": "trap"}
 {"id": "E64", "text": "Ты знаешь, кто сейчас президент США?", "label": "escalate", "tag": "trap"}
 {"id": "E65", "text": "Да, и ещё скажи курс доллара", "label": "escalate", "tag": "trap"}
 {"id": "E66", "text": "Ну окей, а что в новостях?", "label": "escalate", "tag": "trap"}
-{"id": "E67", "text": "Ты слышишь, сколько сейчас времени?", "label": "escalate", "tag": "trap"}
+{"id": "E67", "text": "Ты слышишь, сколько сейчас времени?", "label": "deterministic", "tag": "time"}
 {"id": "E68", "text": "Как тебя зовут и какая сегодня дата?", "label": "escalate", "tag": "trap"}
 {"id": "E69", "text": "Мне грустно, расскажи, что случилось в мире", "label": "escalate", "tag": "trap"}
-{"id": "E70", "text": "Как дела в Белграде с погодой?", "label": "escalate", "tag": "trap"}
+{"id": "E70", "text": "Как дела в Белграде с погодой?", "label": "deterministic", "tag": "weather"}
 {"id": "E71", "text": "Спокойной ночи, во сколько завтра встаёт солнце?", "label": "escalate", "tag": "trap"}
 {"id": "E72", "text": "А почему так?", "label": "escalate", "tag": "followup", "prev": "escalate"}
 {"id": "R21", "text": "Таймер на", "label": "reprompt", "tag": "incomplete"}
