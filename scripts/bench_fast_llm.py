@@ -30,11 +30,13 @@ import json
 import math
 import os
 import random
+import fcntl
 import re
 import socket
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -117,6 +119,7 @@ PRICES = {  # USD per 1M tokens (in, out): Cerebras per docs/research/fast-llm-r
     "qwen": (0.99, 1.49), "gptoss": (0.35, 0.75), "sonnet": (2.0, 10.0), "haiku": (0.1, 0.5),
 }
 JUDGE_MODEL = "anthropic/claude-mythos-5-2"
+OMP_DEADLINE_S = 120  # kill an omp child that has not finished by then
 
 LATIN = re.compile(r"[A-Za-z]")
 REPEAT_REQ = re.compile(r"повтор|переспрос|не расслыш|не поня|ещё раз|еще раз|не услыш|не разобр|не рассл|скажи(те)? иначе", re.I)
@@ -160,9 +163,15 @@ def first_json(text: str) -> tuple[object | None, bool]:
 
 
 def env_key(*names: str) -> str | None:
+    """The first set variable among `names`. A key with whitespace or control characters is refused by name only
+    (its value is never printed): http.client escapes such characters in its errors, which would defeat redaction."""
     for n in names:
-        if os.environ.get(n):
-            return os.environ[n]
+        value = os.environ.get(n)
+        if value:
+            value = value.strip()
+            if not re.fullmatch(r"[\x21-\x7e]+", value):
+                sys.exit(f"{n} contains whitespace or non-printable characters; fix the variable")
+            return value
     return None
 
 
@@ -215,6 +224,7 @@ class OpenAICompat:
                     out["error"] = f"HTTP {resp.status}: {err}"
                     return out
                 out.update(text="", reasoning="", ttft_ms=None, ttft_any_ms=None)
+                complete = False
                 while True:
                     line = resp.readline()
                     if not line:
@@ -224,9 +234,13 @@ class OpenAICompat:
                         continue
                     data = line[5:].strip()
                     if data == b"[DONE]":
+                        complete = True
                         break
                     ev = json.loads(data)
                     now = (time.perf_counter() - t0) * 1000
+                    if ev.get("error"):
+                        out["error"] = f"stream error: {json.dumps(ev['error'], ensure_ascii=False)[:200]}".replace(self.key, "<redacted>")
+                        break
                     if ev.get("usage"):
                         out["in_tok"], out["out_tok"] = ev["usage"].get("prompt_tokens"), ev["usage"].get("completion_tokens")
                     for ch in ev.get("choices") or []:
@@ -243,6 +257,8 @@ class OpenAICompat:
                         if ch.get("finish_reason"):
                             out["finish"] = ch["finish_reason"]
                 out["total_ms"] = (time.perf_counter() - t0) * 1000
+                if not complete and not out["error"]:
+                    out["error"] = "stream ended before [DONE]"
                 resp.read()
                 return out
             except (http.client.HTTPException, OSError, ValueError) as e:
@@ -273,10 +289,13 @@ class OmpBackend:
                "--system-prompt", system or "Ты помощник.", user]
         out = {"text": "", "reasoning": "", "ttft_ms": None, "ttft_any_ms": None, "total_ms": None, "in_tok": None,
                "out_tok": None, "finish": None, "error": None, "retries": 0, "decode_ms": None}
-        t_user = None
-        t_first = t_last = None
+        t_user = t_first = t_last = t_end = None
+        p = None
+        timer = None
         try:
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
+            timer = threading.Timer(OMP_DEADLINE_S, p.kill)  # a stalled child must not hang the run: closing its pipe ends the read
+            timer.start()
             for line in p.stdout:
                 now = time.time() * 1000
                 try:
@@ -303,15 +322,23 @@ class OmpBackend:
                     if m.get("errorMessage"):
                         out["error"] = str(m["errorMessage"])[:200]
                     t_end = now
-            p.wait(timeout=120)
-            if t_user is not None and t_first is not None:
+            p.wait(timeout=10)
+            if p.returncode and not out["error"]:
+                out["error"] = f"omp exited with status {p.returncode}"
+            if t_user is not None and t_first is not None and t_end is not None:
                 out["ttft_ms"] = out["ttft_any_ms"] = t_first - t_user
                 out["total_ms"] = t_end - t_user
                 out["decode_ms"] = t_last - t_first
             elif not out["error"]:
-                out["error"] = "no output"
-        except (OSError, subprocess.SubprocessError) as e:
+                out["error"] = "omp produced no complete turn"
+        except (OSError, subprocess.SubprocessError, KeyError, TypeError) as e:
             out["error"] = f"{type(e).__name__}: {str(e)[:150]}"
+        finally:
+            if timer is not None:
+                timer.cancel()
+            if p is not None:
+                p.kill()
+                p.wait()
         return out
 
 
@@ -352,6 +379,7 @@ class AnthropicDirect:
                     out["error"] = f"HTTP {resp.status}: {err}"
                     return out
                 out.update(text="", ttft_ms=None, ttft_any_ms=None)
+                complete = False
                 while True:
                     line = resp.readline()
                     if not line:
@@ -361,6 +389,9 @@ class AnthropicDirect:
                     ev = json.loads(line[5:])
                     now = (time.perf_counter() - t0) * 1000
                     typ = ev.get("type")
+                    if typ == "error":
+                        out["error"] = f"stream error: {json.dumps(ev.get('error'), ensure_ascii=False)[:200]}".replace(self.key, "<redacted>")
+                        break
                     if typ == "message_start":
                         out["in_tok"] = (ev.get("message") or {}).get("usage", {}).get("input_tokens")
                     elif typ == "content_block_delta" and (ev.get("delta") or {}).get("type") == "text_delta":
@@ -371,8 +402,11 @@ class AnthropicDirect:
                         out["out_tok"] = (ev.get("usage") or {}).get("output_tokens")
                         out["finish"] = (ev.get("delta") or {}).get("stop_reason")
                     elif typ == "message_stop":
+                        complete = True
                         break
                 out["total_ms"] = (time.perf_counter() - t0) * 1000
+                if not complete and not out["error"]:
+                    out["error"] = "stream ended before message_stop"
                 resp.read()
                 return out
             except (http.client.HTTPException, OSError, ValueError) as e:
@@ -627,6 +661,20 @@ LLM_PASSES = {"route": lambda be, items: pass_route(be, items), "pipe": lambda b
               "lat": lambda be, items: pass_lat(be), "tps": lambda be, items: pass_tps(be)}
 
 
+def save_pass(out_path: Path, model: str, meta: dict, name: str, records: list) -> None:
+    """Merge one finished pass into the model file under a lock: concurrent runs of different passes both survive."""
+    with open(str(out_path) + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        res = json.loads(out_path.read_text()) if out_path.exists() else {"model": model, "passes": {}, "pass_meta": {}}
+        res.setdefault("pass_meta", {})
+        res["passes"][name] = records
+        res["pass_meta"][name] = meta
+        res["meta"] = meta
+        tmp = out_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(res, ensure_ascii=False))
+        os.replace(tmp, out_path)
+
+
 def cmd_run(a):
     be = make_backend(a.model, a.claude_via, a.mock)
     items = eval_items()
@@ -634,18 +682,21 @@ def cmd_run(a):
     passes = a.passes.split(",") if a.passes else (["classify", "classify_route"] if classifier else list(LLM_PASSES))
     out_path = Path(a.out_dir) / f"{a.model}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    res = json.loads(out_path.read_text()) if out_path.exists() else {"model": a.model, "passes": {}}
-    res["meta"] = {"date": time.strftime("%Y-%m-%d %H:%M:%S"), "host": socket.gethostname(), "mock": a.mock,
-                   "backend": type(be).__name__, "claude_via": a.claude_via if a.model in ("sonnet", "haiku") else None}
+    if out_path.exists():
+        earlier = json.loads(out_path.read_text()).get("pass_meta", {})
+        if any(m.get("mock") != a.mock for m in earlier.values()):
+            sys.exit(f"{out_path} already holds {'real' if a.mock else 'mock'} results; use another --out-dir for a {'mock' if a.mock else 'real'} run")
     be.warm()
+    meta = {"date": time.strftime("%Y-%m-%d %H:%M:%S"), "host": socket.gethostname(), "mock": a.mock,
+            "backend": type(be).__name__, "claude_via": a.claude_via if a.model in ("sonnet", "haiku") else None}
     if isinstance(be, OmpBackend):
-        res["meta"]["prefix_tokens"] = be.prefix_tokens
+        meta["prefix_tokens"] = be.prefix_tokens
     for p in passes:
         t0 = time.time()
-        res["passes"][p] = (pass_classify(be, items, "type" if p == "classify" else "route") if p.startswith("classify") else LLM_PASSES[p](be, items))
-        errs = sum(1 for r in res["passes"][p] if (r.get("error") or (r.get("cls") or {}).get("error") or (r.get("gen") or {}).get("error")))
-        print(f"{a.model}/{p}: {len(res['passes'][p])} records, {errs} with errors, {time.time() - t0:.0f}s", flush=True)
-        out_path.write_text(json.dumps(res, ensure_ascii=False))
+        records = (pass_classify(be, items, "type" if p == "classify" else "route") if p.startswith("classify") else LLM_PASSES[p](be, items))
+        errs = sum(1 for r in records if (r.get("error") or (r.get("cls") or {}).get("error") or (r.get("gen") or {}).get("error")))
+        print(f"{a.model}/{p}: {len(records)} records, {errs} with errors, {time.time() - t0:.0f}s", flush=True)
+        save_pass(out_path, a.model, meta, p, records)
     return 0
 
 
@@ -663,21 +714,42 @@ SXS = """Ты сравниваешь две реплики голосового 
 Верни строго JSON без пояснений: {"winner":"A"|"B"|"tie","reason":"<одна фраза>"}"""
 
 
-def judge_call(system, user, mock):
+def judge_call(system, user, mock, schema_ok):
+    """One judge call; returns the parsed answer only when `schema_ok` accepts it, else None (failures are counted, not hidden)."""
     if mock:
-        return {"A": {"grammar": 2, "natural": 2, "persona": 2, "fit": 2}, "winner": "A"}
-    p = subprocess.run(["omp", "-p", "--mode", "json", "--model", JUDGE_MODEL, "--thinking", "low", "--no-tools", "--no-skills",
-                        "--no-rules", "--no-context-files", "--no-extensions", "--no-lsp", "--no-session", "--no-title",
-                        "--system-prompt", system, user], capture_output=True, text=True, encoding="utf-8", timeout=300)
-    text = ""
-    for line in p.stdout.splitlines():
+        return {"A": {"grammar": 2, "natural": 2, "persona": 2, "fit": 2}, "B": {"grammar": 2, "natural": 2, "persona": 2, "fit": 2},
+                "C": {"grammar": 2, "natural": 2, "persona": 2, "fit": 2}, "D": {"grammar": 2, "natural": 2, "persona": 2, "fit": 2},
+                "winner": "A"}
+    for _ in range(2):
         try:
-            ev = json.loads(line)
-        except ValueError:
+            p = subprocess.run(["omp", "-p", "--mode", "json", "--model", JUDGE_MODEL, "--thinking", "low", "--no-tools", "--no-skills",
+                                "--no-rules", "--no-context-files", "--no-extensions", "--no-lsp", "--no-session", "--no-title",
+                                "--system-prompt", system, user], capture_output=True, text=True, encoding="utf-8", timeout=300)
+        except subprocess.SubprocessError:
             continue
-        if ev.get("type") == "turn_end":
-            text = "".join(c.get("text", "") for c in ev["message"].get("content", []) if c.get("type") == "text")
-    return first_json(text)[0] or {}
+        text = ""
+        for line in p.stdout.splitlines():
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") == "turn_end":
+                text = "".join(c.get("text", "") for c in ev["message"].get("content", []) if c.get("type") == "text")
+        obj = first_json(text)[0]
+        if p.returncode == 0 and isinstance(obj, dict) and schema_ok(obj):
+            return obj
+    return None
+
+
+def rubric_ok(letters):
+    def check(obj):
+        return all(isinstance(obj.get(l), dict) and all(isinstance(obj[l].get(k), int) and 0 <= obj[l][k] <= 2
+                                                         for k in ("grammar", "natural", "persona", "fit")) for l in letters)
+    return check
+
+
+def sxs_ok(obj):
+    return obj.get("winner") in ("A", "B", "tie")
 
 
 def cmd_judge(a):
@@ -686,31 +758,38 @@ def cmd_judge(a):
     talk = {m: {r["id"]: r for r in json.loads((d / f"{m}.json").read_text())["passes"].get("talk", [])} for m in models}
     prompts = jload(DATA / "smalltalk.jsonl")
     rng = random.Random(20261116)
-    rubric, sxs = [], []
+    rubric, sxs, failed = [], [], 0
     for pr in prompts:
-        avail = [m for m in models if (talk[m].get(pr["id"]) or {}).get("text") and norm(talk[m][pr["id"]]["text"]) != "escalate"]
+        avail = [m for m in models if (talk[m].get(pr["id"]) or {}).get("text") and not is_refusal(talk[m][pr["id"]]["text"])]
         order = avail[:]
         rng.shuffle(order)
         letters = "ABCD"[: len(order)]
+        if not letters:
+            continue
         body = f"Фраза пользователя: «{pr['text']}»\n" + "\n".join(f"{l}: {talk[m][pr['id']]['text'].strip()}" for l, m in zip(letters, order))
         j = judge_call(RUBRIC.replace('"A":{"grammar":n,"natural":n,"persona":n,"fit":n},"B":{...}', ", ".join(f'"{l}":{{...}}' for l in letters)),
-                       body, a.mock)
+                       body, a.mock, rubric_ok(letters))
+        failed += j is None
         rubric.append({"id": pr["id"], "order": dict(zip(letters, order)), "scores": j})
     pair = ("qwen", "gptoss")
-    for pass_no, swap in ((1, False), (2, True)):
-        for pr in prompts:
-            ra, rb = (talk[m].get(pr["id"]) or {} for m in pair)
-            if not (ra.get("text") and rb.get("text")) or "ESCALATE" in (ra["text"] + rb["text"]).upper():
-                sxs.append({"pass": pass_no, "id": pr["id"], "skipped": True})
-                continue
-            first, second = (pair[1], pair[0]) if swap else pair
-            body = (f"Фраза пользователя: «{pr['text']}»\nA: {talk[first][pr['id']]['text'].strip()}\nB: {talk[second][pr['id']]['text'].strip()}")
-            j = judge_call(SXS, body, a.mock)
-            w = {"A": first, "B": second}.get(j.get("winner"), "tie" if j.get("winner") == "tie" else None)
-            sxs.append({"pass": pass_no, "id": pr["id"], "A": first, "B": second, "winner": w, "reason": j.get("reason")})
-    (d / "judge.json").write_text(json.dumps({"judge_model": JUDGE_MODEL, "rubric": rubric, "sxs": sxs}, ensure_ascii=False))
-    print(f"judge: {len(rubric)} rubric, {len(sxs)} side-by-side records")
-    return 0
+    if all(m in talk for m in pair):
+        for pass_no, swap in ((1, False), (2, True)):
+            for pr in prompts:
+                ra, rb = (talk[m].get(pr["id"]) or {} for m in pair)
+                if not (ra.get("text") and rb.get("text")) or is_refusal(ra["text"]) or is_refusal(rb["text"]):
+                    sxs.append({"pass": pass_no, "id": pr["id"], "skipped": True})
+                    continue
+                first, second = (pair[1], pair[0]) if swap else pair
+                body = (f"Фраза пользователя: «{pr['text']}»\nA: {talk[first][pr['id']]['text'].strip()}\nB: {talk[second][pr['id']]['text'].strip()}")
+                j = judge_call(SXS, body, a.mock, sxs_ok)
+                failed += j is None
+                w = None if j is None else {"A": first, "B": second}.get(j["winner"], "tie")
+                sxs.append({"pass": pass_no, "id": pr["id"], "A": first, "B": second, "winner": w, "reason": (j or {}).get("reason")})
+    else:
+        print("side-by-side skipped: it needs both qwen and gptoss results")
+    (d / "judge.json").write_text(json.dumps({"judge_model": JUDGE_MODEL, "rubric": rubric, "sxs": sxs, "failed_calls": failed}, ensure_ascii=False))
+    print(f"judge: {len(rubric)} rubric, {len(sxs)} side-by-side records, {failed} failed judge calls")
+    return 1 if failed else 0
 
 
 # ---------------------------------------------------------------------------------------------
@@ -720,12 +799,95 @@ def llm_text(r: dict) -> str:
     return (r.get("text") or "").strip()
 
 
+def is_refusal(text: str) -> bool:
+    """The generator's refusal is exactly the token ESCALATE; a reply that merely mentions it is an answer."""
+    return norm(text).strip(" .,!?…\"'`«»*") == "escalate"
+
+
 def valid_reply(text: str) -> bool:
     """Design section 6.2 post-validator (code, not model)."""
     t = text.strip()
     sentences = [s for s in re.split(r"[.!?…]+", t) if s.strip()]
     return (bool(t) and len(t) <= 220 and len(sentences) <= 2 and len(t.split()) <= 30 and not re.search(r"\d", t)
             and not re.search(r"https?://|www\.", t) and not LATIN.search(t) and "escalate" not in t.lower())
+
+
+WORD_NUMBERS = {w: i for i, w in enumerate(
+    "ноль один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать тринадцать четырнадцать пятнадцать "
+    "шестнадцать семнадцать восемнадцать девятнадцать".split())}
+WORD_NUMBERS.update({"нуль": 0, "одна": 1, "одно": 1, "две": 2, "двадцать": 20, "тридцать": 30, "сорок": 40, "пятьдесят": 50,
+                     "шестьдесят": 60, "семьдесят": 70, "восемьдесят": 80, "девяносто": 90, "сто": 100, "двести": 200,
+                     "триста": 300, "четыреста": 400, "пятьсот": 500, "шестьсот": 600, "семьсот": 700, "восемьсот": 800,
+                     "девятьсот": 900, "нуле": 0, "нулю": 0, "двух": 2, "трех": 3, "четырех": 4, "пяти": 5, "шести": 6,
+                     "семи": 7, "восьми": 8, "девяти": 9, "десяти": 10})
+
+
+def number_spans(text: str) -> tuple[list[str], list[tuple[int, int, int]]]:
+    """Tokens and the numbers in them as (signed value, first token, token after the last): digits and Russian number
+    words, compounds such as «сто двадцать пять» summed, «минус»/«-» negating."""
+    toks = re.findall(r"-?\d+|[а-яa-z]+|°", norm(text))
+    spans: list[tuple[int, int, int]] = []
+    cur = start = None
+    sign, pending = 1, 1
+
+    def flush(end):
+        nonlocal cur, start, sign
+        if cur is not None:
+            spans.append((sign * cur, start, end))
+            cur, sign = None, 1
+
+    for i, tok in enumerate(toks):
+        if re.fullmatch(r"-?\d+", tok):
+            flush(i)
+            spans.append((int(tok) if tok.startswith("-") else pending * int(tok), i, i + 1))
+            pending = 1
+        elif tok in ("минус", "плюс"):
+            flush(i)
+            pending = -1 if tok == "минус" else 1
+        elif tok in WORD_NUMBERS:
+            v = WORD_NUMBERS[tok]
+            if cur is None:
+                cur, start, sign, pending = v, i, pending, 1
+            elif (cur % 100 == 0 and v < 100) or (cur % 10 == 0 and cur % 100 != 0 and v < 10):
+                cur += v
+            else:
+                flush(i)
+                cur, start = v, i
+        else:
+            flush(i)
+            pending = 1
+    flush(len(toks))
+    return toks, spans
+
+
+def matches_answer(kind: str, alts: list[str], reply: str) -> bool:
+    """A number alternative must equal a number of the reply (exact value: «1391» is not «391», «сорок пять» is not «сорок»;
+    a reply that lists several numbers can still pass). A text alternative must start a word of the reply."""
+    t = norm(reply)
+    values = [v for v, _, _ in number_spans(reply)[1]]
+    for alt in alts:
+        a = norm(alt)
+        gold = [v for v, _, _ in number_spans(a)[1]]
+        if gold and re.fullmatch(r"[\d ]+|[а-я ]+", a):
+            if gold[0] in values:
+                return True
+        elif re.search(r"(?<![а-яa-z0-9])" + re.escape(a) + (r"(?![а-яa-z0-9])" if re.fullmatch(r"[a-z]{1,3}", a) else ""), t):
+            return True
+    return False
+
+
+def para_check(reply: str, item: dict) -> tuple[bool, bool]:
+    """(faithful, invented a number). Faithful: city and condition named, and the signed temperature stated as the
+    temperature (next to «градус»/°, or after «температура»); a swapped temperature and wind or a lost sign fails."""
+    facts = item["facts"]
+    t = norm(reply)
+    toks, spans = number_spans(reply)
+    named = all(any(norm(alt) in t for alt in x.split("|")) for i, x in enumerate(item["must"]) if i != 1)
+    temp = facts["temp_c"]
+    temp_ok = any(v == temp and (any(w.startswith("градус") or w == "°" for w in toks[e:e + 3])
+                                 or any(w.startswith("температур") for w in toks[max(0, s - 4):s])) for v, s, e in spans)
+    extra = {abs(v) for v, _, _ in spans} - {abs(temp), facts["wind_ms"]}
+    return named and temp_ok and not extra, bool(extra)
 
 
 def lat_stats(values: list[float]) -> dict:
@@ -744,7 +906,7 @@ def metrics_llm(model: str, res: dict, items: list[dict]) -> dict:
         for r in rs:
             obj, is_strict = first_json(llm_text(r))
             t = obj.get("type") if isinstance(obj, dict) else None
-            pred[r["id"]] = t if t in TYPES else None
+            pred[r["id"]] = t if isinstance(t, str) and t in TYPES else None
             valid += pred[r["id"]] is not None
             strict += bool(is_strict and pred[r["id"]] is not None and llm_text(r).startswith("{"))
         n = len(rs)
@@ -783,7 +945,7 @@ def metrics_llm(model: str, res: dict, items: list[dict]) -> dict:
             cls_json += cls_route is not None
             cls_strict += bool(cls_route and is_strict)
             g = llm_text(r["gen"])
-            content = bool(g) and "escalate" not in g.lower()
+            content = bool(g) and not is_refusal(g)
             ok_validator = content and valid_reply(g)
             fast_ok = cls_route == "fast" and ok_validator
             expect_fast = it["route"] == "fast"
@@ -852,22 +1014,18 @@ def metrics_llm(model: str, res: dict, items: list[dict]) -> dict:
     if "talk" in P:
         rs = P["talk"]
         texts = [llm_text(r) for r in rs]
-        m["talk"] = {"n": len(rs), "escalated": sum("escalate" in t.lower() for t in texts),
-                     "validator_pass": sum(valid_reply(t) for t in texts if "escalate" not in t.lower()),
+        m["talk"] = {"n": len(rs), "escalated": sum(is_refusal(t) for t in texts),
+                     "validator_pass": sum(valid_reply(t) for t in texts if not is_refusal(t)),
                      "lat": lat_stats([r["total_ms"] for r in rs]), "mean_chars": statistics.fmean([len(t) for t in texts])}
     if "para" in P:
         facts = {p["id"]: p for p in jload(DATA / "paraphrase.jsonl")}
-        faithful = extra_digits = 0
+        faithful = extra_numbers = 0
         for r in P["para"]:
-            t = norm(llm_text(r))
-            f = facts[r["id"]]
-            has = all(any(norm(alt) in t for alt in x.split("|")) for x in f["must"])
-            allowed = set(re.findall(r"\d+", json.dumps(f["facts"])))
-            extra = set(re.findall(r"\d+", t)) - allowed
-            faithful += has and not extra
-            extra_digits += bool(extra)
+            ok, extra = para_check(llm_text(r), facts[r["id"]])
+            faithful += ok
+            extra_numbers += extra
         n = len(P["para"])
-        m["para"] = {"n": n, "faithful": faithful / n, "extra_number_rate": extra_digits / n,
+        m["para"] = {"n": n, "faithful": faithful / n, "extra_number_rate": extra_numbers / n,
                      "lat": lat_stats([r["total_ms"] for r in P["para"]])}
     if "know" in P:
         kn = {k["id"]: k for k in jload(DATA / "knowledge.jsonl")}
@@ -875,8 +1033,10 @@ def metrics_llm(model: str, res: dict, items: list[dict]) -> dict:
         cnt = collections.Counter()
         for r in P["know"]:
             k = kn[r["id"]]
-            t = norm(llm_text(r))
-            acc[k["kind"]] += any(norm(a) in t for a in k["answers"])
+            text = llm_text(r)
+            groups = k.get("all") or [k["answers"]]
+            kind = k["kind"] if not k.get("all") else "fact"
+            acc[k["kind"]] += all(matches_answer(kind, g, text) for g in groups)
             cnt[k["kind"]] += 1
         m["know"] = {kind: {"acc": acc[kind] / cnt[kind], "n": cnt[kind]} for kind in cnt}
         m["know"]["lat"] = lat_stats([r["total_ms"] for r in P["know"]])
@@ -917,9 +1077,11 @@ def metrics_classifier(res: dict, items: list[dict], pass_name: str = "classify"
         return out
     pred = {}
     for r in ok:
-        a = r["answers"].get(key) or {}
-        pred[r["id"]] = (a.get("choice") if key == "type" else ROUTE_TO_TYPE.get(a.get("choice")),
-                         max((a.get("probabilities") or {0: 0}).values()) if a.get("probabilities") else None)
+        a = r["answers"].get(key)
+        a = a if isinstance(a, dict) else {}
+        choice = a.get("choice") if isinstance(a.get("choice"), str) else None
+        probs = [v for v in (a.get("probabilities") or {}).values() if isinstance(v, (int, float))] if isinstance(a.get("probabilities"), dict) else []
+        pred[r["id"]] = (choice if key == "type" else ROUTE_TO_TYPE.get(choice), max(probs) if probs else None)
     esc = [i for i in pred if by_id[i]["route"] == "escalate"]
 
     def at(tau):
@@ -948,22 +1110,62 @@ def metrics_classifier(res: dict, items: list[dict], pass_name: str = "classify"
     return out
 
 
+def sum_percentiles(stages: list[list[float]]) -> dict:
+    """Percentiles of a sum of independent stages, from every combination of the measured samples (not a sum of percentiles)."""
+    sums = [0.0]
+    for samples in stages:
+        sums = [s + x for s in sums for x in samples]
+    return {"n": len(sums), "p50": pct(sums, 0.5), "p95": pct(sums, 0.95)}
+
+
+def stage_samples(d: Path) -> dict:
+    """Measured per-call latencies (ms) of the stages that make up the pipelines of the report."""
+    def load(m):
+        return json.loads((d / f"{m}.json").read_text()) if (d / f"{m}.json").exists() else None
+    out = {}
+    q, s, j = load("qwen"), load("sonnet"), load("jev")
+    if q and "pipe" in q["passes"]:
+        out["qwen_classifier"] = [r["cls"]["total_ms"] for r in q["passes"]["pipe"] if r["cls"].get("total_ms") is not None and not r["cls"].get("error")]
+    if q and "lat" in q["passes"]:
+        out["qwen_generator"] = [r["total_ms"] for r in q["passes"]["lat"] if not r.get("warmup") and not r.get("error") and r.get("total_ms") is not None]
+    if s and "lat" in s["passes"]:
+        out["sonnet_short_answer"] = [r["total_ms"] for r in s["passes"]["lat"] if not r.get("warmup") and not r.get("error") and r.get("total_ms") is not None]
+    if j and "classify_route" in j["passes"]:
+        out["jev_route"] = [r["total_ms"] for r in j["passes"]["classify_route"] if not r.get("error")]
+    return out
+
+
+PIPELINES = {
+    "rules + Qwen classifier + Qwen generator (design)": ["qwen_classifier", "qwen_generator"],
+    "rules + Qwen generator only": ["qwen_generator"],
+    "Jev + Qwen generator": ["jev_route", "qwen_generator"],
+    "Jev + Sonnet short answer (escalate)": ["jev_route", "sonnet_short_answer"],
+    "rules + Sonnet short answer (escalate)": ["sonnet_short_answer"],
+}
+
+
 def fmt_ms(x):
     return "-" if x is None else f"{x:,.0f}"
+
+
+def run_is_mock(res: dict) -> bool:
+    return any(m.get("mock") for m in (res.get("pass_meta") or {"all": res.get("meta") or {}}).values())
 
 
 def cmd_report(a):
     d = Path(a.out_dir)
     items = eval_items()
-    report: dict = {"models": {}, "classifiers": {}}
+    report: dict = {"models": {}, "classifiers": {}, "mock": False}
     for m in ("qwen", "gptoss", "sonnet", "haiku"):
         if (d / f"{m}.json").exists():
             res = json.loads((d / f"{m}.json").read_text())
+            report["mock"] |= run_is_mock(res)
             report["models"][m] = {"meta": res.get("meta"), **metrics_llm(m, res, items)}
     report["classifiers_route"] = {}
     for m in ("laya", "laya_en", "jev"):
         if (d / f"{m}.json").exists():
             res = json.loads((d / f"{m}.json").read_text())
+            report["mock"] |= run_is_mock(res)
             for name, dest in (("classify", "classifiers"), ("classify_route", "classifiers_route")):
                 if name in res["passes"]:
                     report[dest][m] = {"meta": res.get("meta"), **metrics_classifier(res, items, name)}
@@ -978,7 +1180,11 @@ def cmd_report(a):
         wins = collections.Counter(r["winner"] for r in j["sxs"] if not r.get("skipped") and r.get("winner"))
         report["judge"] = {"judge_model": j["judge_model"], "rubric_mean_of_8": {m: statistics.fmean(v) for m, v in scores.items()},
                            "rubric_n": {m: len(v) for m, v in scores.items()}, "sxs_wins": dict(wins),
-                           "sxs_n": sum(1 for r in j["sxs"] if not r.get("skipped"))}
+                           "sxs_n": sum(1 for r in j["sxs"] if not r.get("skipped") and r.get("winner")),
+                           "failed_calls": j.get("failed_calls", 0)}
+    samples = stage_samples(d)
+    report["pipelines"] = {name: sum_percentiles([samples[s] for s in stages]) for name, stages in PIPELINES.items()
+                           if all(samples.get(s) for s in stages)}
     out_json = Path(a.json_out) if a.json_out else d / "report.json"
     out_json.write_text(json.dumps(report, ensure_ascii=False, indent=1))
     print(f"wrote {out_json}")
@@ -1056,6 +1262,11 @@ def render_md(rep: dict) -> str:
         for m, v in src.items():
             if v.get("errors"):
                 out.append(f"\n{MODEL_LABEL[m]} ({title[:20]}...): {v['errors']}/{v['n']} calls failed; first error: `{v.get('first_error')}`")
+    if rep.get("pipelines"):
+        table("Full-pipeline latency, ms (independent stages: percentiles of all combinations of the measured calls)", ["path", "p50", "p95"],
+              [(name, f(v["p50"]), f(v["p95"])) for name, v in rep["pipelines"].items()])
+    if rep.get("mock"):
+        out.insert(0, "\n**MOCK DATA: at least one pass was produced by the offline oracle, not a real model.**\n")
     return "\n".join(out) + "\n"
 
 

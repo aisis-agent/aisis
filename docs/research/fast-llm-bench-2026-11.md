@@ -45,7 +45,9 @@ The **generator** system prompt and the **classifier** instruction are the desig
 - **Latency**: TTFT = request sent to first answer token; total = to last token; 50 timed runs after 2 warm-ups, six short banter prompts, connection kept alive; sequential, one model at a time. tok/s = (output tokens - 1) / decode time, 20 runs of a story prompt capped at 150 tokens for Cerebras (omp cannot cap, Claude wrote about 600 to 1,000 tokens). First token "incl. reasoning" counts gpt-oss reasoning deltas.
 - **Route accuracy**: type accuracy (7 labels) and route accuracy (4 routes). **Wrong fast answer**: the model returns anything other than `ESCALATE` to an escalate-labelled utterance (generator alone), after the design's code validator, and through the full classifier + generator + validator pipeline.
 - **Slots**: exact match after case/ё folding; an invented slot is a non-null value where gold is null.
-- **Paraphrase**: reply must contain city and temperature (digits or words) and no digit that is not in the tool data. Word-numbers are not checked for invention.
+- **Paraphrase**: the reply names the city and the condition, states the signed temperature right next to «градус»/° or after «температура» (digits or Russian number words; a lost minus or a temperature swapped with the wind fails), and contains no number beyond the temperature and the wind. Declined number words beyond a short list are not parsed.
+- **Knowledge sanity**: a number answer must equal a number in the reply exactly (digits or Russian number words, «сорок пять» is not «сорок»); text answers must start a word of the reply; the quadratic needs both roots. A reply listing several numbers can still pass; ordinal forms such as «тысяча девятьсот девяносто первый» are not parsed.
+- **Refusal**: the generator reply is a refusal only when it is exactly `ESCALATE` (punctuation aside); a reply that mentions the token is scored as an answer.
 - **Russian quality**: blind rubric by the judge, 0-2 each for grammar, naturalness, persona rules (1-2 short sentences, no lists/digits/facts/promises), fit/warmth, total 0-8, over answered replies only (counts differ per model); plus two blind side-by-side passes Qwen vs gpt-oss (positions swapped between passes) over the 16 prompts both answered = 32 judgements.
 - **JSON adherence**: output is exactly one JSON object with a valid label, no prose or fences.
 - **Cost**: measured average tokens (reasoning included) x list price.
@@ -142,17 +144,21 @@ Readings from the tables:
 ### 4.1 Is a separate classifier call needed?
 On this corpus the generator alone, with the ESCALATE rule, produced zero wrong replies for every model. The classifier call costs about 250 to 300 ms (Qwen 276 ms p50) and about the same money again. It is a defence in depth that this set cannot show to be necessary; a larger adversarial set (the design's ≥300 shadow turns) is what decides it.
 
-### 4.2 Latency of the full pipeline (banter turn, sum of measured p50 / sum of p95, an upper bound for p95)
+### 4.2 Latency of the full pipeline (banter and escalate turns)
 
-| Path | Stages | p50 / p95 ms |
-|---|---|---|
-| Deterministic-first, then design pipeline | rules (<1 ms, design target, not measured) + Qwen classifier 276 / 602 + Qwen generator 238 / 607 | 514 / 1,209 |
-| Deterministic-first, generator only | rules + Qwen generator | 238 / 607 |
-| Jev first | Jev 246 / 292 + Qwen generator 238 / 607 | 484 / 899 |
-| Jev first, escalate | Jev 246 / 292 + Sonnet short answer via omp 2,320 / 2,909 (about 1.5 s direct, published) | 2,566 / 3,201 |
-| Deterministic-first, escalate | rules + Sonnet | 2,320 / 2,909 |
+Percentiles of the summed stages, computed from every combination of the measured calls of each stage (the `Full-pipeline latency` table `report` prints; a sum of per-stage percentiles is not the percentile of the sum). Rules are under 1 ms by the design's target and not measured here.
 
-Jev in front costs one network call before any model, roughly what a Qwen classifier call costs, and it cannot be skipped for the deterministic skills the way a regex can: for weather/time/conversion, rules-first answers in about a millisecond plus the tool, Jev-first adds 246 ms.
+| Path | p50 / p95 ms |
+|---|---|
+| Rules, then the design pipeline: Qwen classifier + Qwen generator | 538 / 3,068 |
+| Rules, then Qwen generator only | 238 / 607 |
+| Jev first, then Qwen generator | 488 / 986 |
+| Jev first, escalate: Jev + Sonnet short answer via omp (about 1.5 s direct, published) | 2,570 / 3,215 |
+| Rules, escalate: Sonnet short answer | 2,320 / 2,909 |
+
+The design pipeline's p95 is 3.1 s because Qwen's tail (31 of 514 calls over 1 s) hits either of its two calls; Jev's tight tail (p95 292 ms) gives 986 ms in front of the same generator.
+
+Jev in front costs one network call before any model, about what a Qwen classifier call costs at p50. It cannot be skipped for the deterministic skills the way a regex can: for weather, time and conversion, rules-first answers in about a millisecond plus the tool, and Jev-first adds 246 ms.
 
 ## 5. Jev and Laya as task-type classifiers
 

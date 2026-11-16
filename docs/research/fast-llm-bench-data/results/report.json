@@ -1504,6 +1504,7 @@
    }
   }
  },
+ "mock": false,
  "classifiers_route": {
   "laya": {
    "meta": {
@@ -1707,6 +1708,34 @@
    "qwen": 23,
    "gptoss": 9
   },
-  "sxs_n": 32
+  "sxs_n": 32,
+  "failed_calls": 0
+ },
+ "pipelines": {
+  "rules + Qwen classifier + Qwen generator (design)": {
+   "n": 7450,
+   "p50": 538.0781400308479,
+   "p95": 3067.9372677084757
+  },
+  "rules + Qwen generator only": {
+   "n": 50,
+   "p50": 238.29521500738338,
+   "p95": 607.0412621367714
+  },
+  "Jev + Qwen generator": {
+   "n": 7450,
+   "p50": 488.05323903798126,
+   "p95": 986.2733766291057
+  },
+  "Jev + Sonnet short answer (escalate)": {
+   "n": 7450,
+   "p50": 2570.0984637972433,
+   "p95": 3214.7504444197284
+  },
+  "rules + Sonnet short answer (escalate)": {
+   "n": 50,
+   "p50": 2320.1044921875,
+   "p95": 2908.7008178710935
+  }
  }
 }
