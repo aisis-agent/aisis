@@ -86,13 +86,18 @@ CLIP_FIELDS = ("id", "ts", "dur", "transcript", "status", "reason", "peak", "rms
                "asr_ms", "final_ms", "trigger", "engine")
 
 def attach_clips(dialogs):
-    """Archived utterances (voiceclips) onto each voice dialog as `clips`; never fails the page."""
+    """Archived utterances (voiceclips) onto each voice or text dialog as `clips` (a command the speaker recognised on the device
+    arrives as a text dialog); never fails the page."""
+    try:
+        voiceclips.link_dialogs(dialogstore.DB_PATH)  # once per page, not once per dialog
+    except Exception:
+        pass
     for d in dialogs:
         d["clips"] = []
-        if d.get("kind") != "voice":
+        if d.get("kind") not in ("voice", "text"):
             continue
         try:
-            d["clips"] = [{k: c[k] for k in CLIP_FIELDS} for c in voiceclips.clips_for_dialog(dialogstore.DB_PATH, d["id"])]
+            d["clips"] = [{k: c[k] for k in CLIP_FIELDS} for c in voiceclips.clips_for_dialog(dialogstore.DB_PATH, d["id"], link=False)]
             cliptruth.annotate(dialogstore.DB_PATH, d["clips"])
         except Exception:
             pass

@@ -295,7 +295,7 @@ def set_reference(db_path: str, clip_id: str, text: str, source: str = "human") 
 def summary(db_path: str) -> dict:
     conn = connect(db_path)
     conn.row_factory = sqlite3.Row
-    clips = {r["id"]: r for r in conn.execute("SELECT id, status, transcript, voiced_ms FROM voice_clips")}
+    clips = {r["id"]: r for r in conn.execute("SELECT id, status, transcript, voiced_ms, trigger FROM voice_clips")}
     refs = {r["clip_id"]: r["text"] for r in conn.execute("SELECT clip_id, text FROM asr_reference")}
     rows = conn.execute("SELECT clip_id, engine, text, ms, dur, empty, pattern, loop, err FROM asr_bench").fetchall()
     last = conn.execute("SELECT ts, engines, done, skipped, seconds FROM asr_bench_runs ORDER BY ts DESC LIMIT 1").fetchone()
@@ -326,7 +326,9 @@ def summary(db_path: str) -> dict:
             s["text_on_gated"] += 0 if r["empty"] else 1
         if r["clip_id"] in refs and refs[r["clip_id"]]:
             s["ref"].append(wer(refs[r["clip_id"]], r["text"] or ""))
-        live = (clips[r["clip_id"]]["transcript"] if r["clip_id"] in clips else None) or ""
+        # «live» is the disagreement with what the live Whisper heard; a command the speaker recognised itself has no such text
+        known = clips.get(r["clip_id"])
+        live = (known["transcript"] if known is not None and known["trigger"] != voiceclips.SPOTTER_TRIGGER else None) or ""
         if live and r["text"]:
             s["live"].append(wer(live, r["text"]))
 

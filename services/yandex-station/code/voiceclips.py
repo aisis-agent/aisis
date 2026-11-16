@@ -10,6 +10,7 @@ back-fills `dialog_id` from the `dialogs` time window.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -32,7 +33,7 @@ SCHEMA = (
     "id TEXT PRIMARY KEY, ts REAL NOT NULL, dialog_id TEXT, path TEXT NOT NULL, dur REAL, rate INTEGER, bytes INTEGER, "
     "rms INTEGER, peak INTEGER, voiced_ms INTEGER, floor_rms INTEGER, contrast REAL, "
     "engine TEXT, trigger TEXT, status TEXT NOT NULL, reason TEXT, transcript TEXT, asr_ms INTEGER, "
-    "silence_ms INTEGER, final_ms INTEGER)",
+    "silence_ms INTEGER, final_ms INTEGER, station TEXT)",
     "CREATE INDEX IF NOT EXISTS voice_clips_ts ON voice_clips(ts)",
     "CREATE INDEX IF NOT EXISTS voice_clips_dialog ON voice_clips(dialog_id)",
     # Processed copies of an archived clip (e.g. the enhanced "studio" voice). A sibling table, not rows of voice_clips:
@@ -41,7 +42,11 @@ SCHEMA = (
     "bytes INTEGER, ts REAL NOT NULL, engine TEXT, ms INTEGER, PRIMARY KEY(clip_id, variant))",
 )
 COLUMNS = ("id", "ts", "dialog_id", "path", "dur", "rate", "bytes", "rms", "peak", "voiced_ms", "floor_rms", "contrast",
-           "engine", "trigger", "status", "reason", "transcript", "asr_ms", "silence_ms", "final_ms")
+           "engine", "trigger", "status", "reason", "transcript", "asr_ms", "silence_ms", "final_ms", "station")
+# Clips of commands the speaker recognised on the device (spotter_clips.py): `trigger` and `engine` mark them, because their
+# transcript is the speaker's own recognition and must not count as Whisper's in the recognizer-quality numbers.
+SPOTTER_TRIGGER = "spotter"
+SPOTTER_ENGINE = "колонка сама (споттер команд)"
 
 
 def root() -> Path:
@@ -60,6 +65,11 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     for statement in SCHEMA:
         conn.execute(statement)
+    if "station" not in {row[1] for row in conn.execute("PRAGMA table_info(voice_clips)")}:  # archives made before the column
+        try:
+            conn.execute("ALTER TABLE voice_clips ADD COLUMN station TEXT")
+        except sqlite3.OperationalError:  # another process migrated first
+            pass
     return conn
 
 
@@ -156,25 +166,62 @@ def _rows(conn: sqlite3.Connection, where: str, args: tuple) -> list[dict]:
     return [dict(row) for row in conn.execute("SELECT %s FROM voice_clips WHERE %s ORDER BY ts" % (",".join(COLUMNS), where), args)]
 
 
+def _words(text) -> str:
+    return " ".join(re.findall(r"\w+", str(text or "").lower().replace("ё", "е")))
+
+
+def _asks(actions_json, transcript) -> bool:
+    """Does a text dialog's request log hold the command the speaker recognised («Fast intent for text '<command>'»)?"""
+    try:
+        requests = json.loads(actions_json or "[]")
+    except ValueError:
+        return False
+    wanted = _words(transcript)
+    return wanted != "" and any(isinstance(r, dict) and r.get("kind") == "запрос" and _words(r.get("text")) == wanted for r in requests)
+
+
 def link_dialogs(db_path: str) -> int:
-    """Attach unlinked clips (older than 30 s, so the dialog row has settled) to the dialog whose window holds them."""
+    """Attach unlinked clips (older than 30 s, so the dialog row has settled) to the dialog whose window holds them.
+    A clip the gateway cut belongs to a voice dialog (the latest one that started before it). One the speaker recognised on
+    the device (trigger `spotter`) belongs to the text dialog that asked the same words and started closest to it, preferring
+    one of its own station (a command the device ran alone stays unlinked rather than join a neighbour's dialog):
+    commands are said in quick succession and carry no wake word, so «the latest» would hand the first one to the second's
+    dialog. The station is a preference, not a filter: dialogs imported from the quasar log all carry the default station.
+    Picked per clip, not in one UPDATE: older SQLite cannot see the outer row from a subquery's ORDER BY."""
     conn = connect(db_path)
     try:
-        cur = conn.execute(
-            "UPDATE voice_clips SET dialog_id=(SELECT d.id FROM dialogs d WHERE d.kind='voice' AND d.ts_start-5<=voice_clips.ts "
-            "AND voice_clips.ts<=COALESCE(d.ts_end, d.ts_start+3600)+15 ORDER BY d.ts_start DESC LIMIT 1) "
-            "WHERE dialog_id IS NULL AND ts<?", (time.time() - 30,))
+        clips = conn.execute("SELECT id, ts, trigger, station, transcript FROM voice_clips WHERE dialog_id IS NULL AND ts<?",
+                             (time.time() - 30,)).fetchall()
+        linked = 0
+        for clip_id, ts, trigger, station, transcript in clips:
+            spotter = trigger == SPOTTER_TRIGGER
+            dialogs = conn.execute(
+                "SELECT id, station, ts_start, actions FROM dialogs WHERE kind=? AND ts_start-5<=? AND ?<=COALESCE(ts_end, ts_start+3600)+15",
+                ("text" if spotter else "voice", ts, ts)).fetchall()
+            if spotter:  # only the dialog of the same words: a command the device ran alone has no dialog, never a neighbour's
+                dialogs = [d for d in dialogs if _asks(d[3], transcript)]
+            if not dialogs:
+                continue
+            if spotter:
+                best = min(dialogs, key=lambda d: (station is not None and d[1] != station, abs(d[2] - ts)))
+            else:
+                best = max(dialogs, key=lambda d: d[2])
+            # Conditional: another linker (the feed, a dashboard request) may have linked this clip since the SELECT.
+            linked += conn.execute("UPDATE voice_clips SET dialog_id=? WHERE id=? AND dialog_id IS NULL", (best[0], clip_id)).rowcount
         conn.commit()
-        return cur.rowcount
-    except sqlite3.OperationalError:  # dialogs table not created yet
+        return linked
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc) and "locked" not in str(exc):  # the dialogs table is created later; a busy archive retries
+            raise
         return 0
     finally:
         conn.close()
 
 
-def clips_for_dialog(db_path: str, dialog_id: str) -> list[dict]:
-    """Clips of one dialog, oldest first (back-fills the link first)."""
-    link_dialogs(db_path)
+def clips_for_dialog(db_path: str, dialog_id: str, link: bool = True) -> list[dict]:
+    """Clips of one dialog, oldest first (back-fills the link first unless the caller linked the whole page already)."""
+    if link:
+        link_dialogs(db_path)
     conn = connect(db_path)
     try:
         return _rows(conn, "dialog_id=?", (dialog_id,))

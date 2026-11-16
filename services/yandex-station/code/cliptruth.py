@@ -310,7 +310,9 @@ def annotate(db_path: str, clips: list[dict]) -> None:
 
 
 def stats(db_path: str) -> dict:
-    """Totals and recognizer quality over every judged clip, overall and per engine."""
+    """Totals and recognizer quality over every judged clip, overall and per engine. The commands the speaker recognised on the
+    device count as judged clips and have an engine row of their own, but stay out of the headline numbers: their text is
+    not what the recognizer heard."""
     conn = connect(db_path)
     try:
         rows = conn.execute(
@@ -337,13 +339,14 @@ def stats(db_path: str) -> dict:
         engines[name] = {"n": s["n"], "speech": s["speech"], "noise": s["noise"], "text_on_noise": s["text_on_noise"],
                          "wer": round(s["wer_sum"] / s["speech"], 4) if s["speech"] else None,
                          "exact": round(s["exact"] / s["speech"], 4) if s["speech"] else None}
-    speech = sum(s["speech"] for s in by_engine.values())
-    wer_sum = sum(s["wer_sum"] for s in by_engine.values())
-    exact = sum(s["exact"] for s in by_engine.values())
+    recognizers = [s for name, s in by_engine.items() if name != voiceclips.SPOTTER_ENGINE]
+    speech = sum(s["speech"] for s in recognizers)
+    wer_sum = sum(s["wer_sum"] for s in recognizers)
+    exact = sum(s["exact"] for s in recognizers)
     return {"judged": len(rows), "labels": labels, "fed": fed, "speech": speech,
             "wer": round(wer_sum / speech, 4) if speech else None,
             "exact": round(exact / speech, 4) if speech else None,
-            "text_on_noise": sum(s["text_on_noise"] for s in by_engine.values()),
+            "text_on_noise": sum(s["text_on_noise"] for s in recognizers),
             "engines": engines}
 
 
