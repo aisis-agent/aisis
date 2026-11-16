@@ -171,7 +171,7 @@ def parse_clock(tokens: list[str], start: int = 0) -> list[tuple[int, dict[str, 
         return [(start + 1, _clock(0, 0, None, twelve=False))]
 
     # «половина седьмого», «пол седьмого», «полседьмого» -> 6:30
-    if token in ("половина", "половину", "пол") and start + 1 < len(tokens):
+    if token in ("половина", "половину", "половине", "пол") and start + 1 < len(tokens):
         for end, hour in _hour_before(tokens, start + 1):
             end2, part = _with_part(tokens, end)
             readings.append((end2, _before_hour(hour, 30, part)))
@@ -226,7 +226,7 @@ def parse_clock(tokens: list[str], start: int = 0) -> list[tuple[int, dict[str, 
     return sorted(best.items(), key=lambda r: -r[0])
 
 
-def _plural(count: int, one: str, few: str, many: str) -> str:
+def plural(count: int, one: str, few: str, many: str) -> str:
     if count % 100 in (11, 12, 13, 14) or count % 10 in (0, 5, 6, 7, 8, 9):
         return many
     return one if count % 10 == 1 else few
@@ -240,5 +240,5 @@ def duration_ru(seconds: int) -> str:
                                  (60, "минута", "минуты", "минут"), (1, "секунда", "секунды", "секунд")):
         count, seconds = divmod(seconds, size)
         if count:
-            parts.append(f"{count} {_plural(count, one, few, many)}")
+            parts.append(f"{count} {plural(count, one, few, many)}")
     return " ".join(parts) or "0 секунд"

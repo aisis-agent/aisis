@@ -20,7 +20,7 @@ from . import backtest
 from .grammar import Grammar, GrammarError, compile_bundle, load
 
 DEFAULT_GRAMMAR_PATH = Path(__file__).parent / "grammar" / "ru.yaml"
-ENV_GRAMMAR = "AISIS_INTENT_GRAMMAR"
+ENV_GRAMMAR = "AISIS_INTENT_GRAMMAR_FILE"   # not AISIS_INTENT_GRAMMAR: that one is the adapter's on|shadow|off switch
 
 
 def _grammar(path: str | None) -> Grammar:
@@ -95,20 +95,44 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         print(f"no labelled rows under {corpus}", file=sys.stderr)
         return 2
     previous_path = Path(args.previous).expanduser() if args.previous else None
-    destination = Path(args.out).expanduser() if args.out else backtest.archive_path(corpus)
+    if previous_path is not None and not previous_path.exists():
+        print(f"--previous {previous_path} does not exist", file=sys.stderr)
+        return 2
+    decide = None
+    if args.route != "grammar":
+        import intent_route  # the adapter's own route (grammar + arithmetic + weather skills); lives in code/
+        decide = intent_route.measured_route(intent_route.IntentRouter(grammar), mode=args.route)
+    destination = Path(args.out).expanduser() if args.out else backtest.archive_path()
     # compare -> save -> promote is one step under the baseline lock, so two runs cannot interleave their baselines
-    with contextlib.nullcontext() if args.no_latest else backtest.baseline_lock(corpus):
-        previous = backtest.load_previous(previous_path, corpus)
-        report = backtest.build_report(grammar, rows, manifest, include_text=not args.no_text, previous=previous)
+    with contextlib.nullcontext() if args.no_latest else backtest.baseline_lock():
+        previous = backtest.load_previous(previous_path)
+        report = backtest.build_report(grammar, rows, manifest, include_text=not args.no_text, previous=previous,
+                                       decide=decide, route=args.route, require_baseline=args.gate and not args.init_baseline)
+        if args.init_baseline:
+            if report["baseline"]["usable"]:
+                print("--init-baseline refused: a compatible baseline exists; every row is compared with it", file=sys.stderr)
+                return 2
+            # an explicit start (first run of a route) or rebaseline: absolute checks only, the reason travels with the report
+            report = backtest.build_report(grammar, rows, manifest, include_text=not args.no_text, previous=None,
+                                           decide=decide, route=args.route)
+            report["baseline"]["init_reason"] = args.init_baseline
         promote = not args.no_latest and report["gate"]["ok"]
-        backtest.save_report(report, destination, latest=backtest.reports_dir(corpus) / "latest.json" if promote else None)
+        backtest.save_report(report, destination, latest=backtest.reports_dir() / "latest.json" if promote else None)
     for line in backtest.summary_lines(report):
         print(line)
+    goal = report.get("goal")
+    if goal:
+        for part in ("all", "holdout"):
+            entry = goal.get(part)
+            if entry:
+                cells = ", ".join(f"{key} {entry[key]['value']:.3f} (95% {entry[key]['ci95'][0]:.2f}-{entry[key]['ci95'][1]:.2f}, gap {entry[key]['gap']:+.3f})"
+                                  for key in ("coverage", "correct") if key in entry)
+                print(f"goal {goal['split'].split('/')[0]}/{part} n={entry['addressed']}: {cells}  target {goal['target']} {'MET' if all(entry[k]['met'] for k in goal['target'] if k in entry) else 'not met'}")
     if args.misses:
         for miss in report["dev_misses"]:
             print(f"  {miss['outcome']:13} {miss['truth']:18} {miss.get('text', miss['id'])!r} -> {miss['intent']}")
     if not args.no_latest and not promote:
-        print("baseline not updated: the gate failed, reports/latest.json stays the last passing report")
+        print("baseline not updated: the gate failed, latest.json stays the last passing report")
     print(f"report: {destination}")
     return 0 if report["gate"]["ok"] or not args.gate else 1
 
@@ -126,13 +150,20 @@ def build_parser() -> argparse.ArgumentParser:
     match.set_defaults(run=cmd_match)
     bt = sub.add_parser("backtest", help="run the labelled corpora")
     bt.add_argument("--corpus", help=f"corpus directory (default: ${backtest.ENV_CORPUS_DIR} or {backtest.DEFAULT_CORPUS_DIR})")
-    bt.add_argument("--out", help="report file (default: <corpus>/reports/backtest-<time>-<ns>-<pid>.json)")
-    bt.add_argument("--previous", help="report to compare with (default: <corpus>/reports/latest.json)")
+    bt.add_argument("--out", help=f"report file (default: ${backtest.ENV_REPORT_DIR} or ~/.local/share/aisis/intent-reports, backtest-<time>-<ns>-<pid>.json)")
+    bt.add_argument("--previous", help="report to compare with (default: latest.json in the report directory)")
+    bt.add_argument("--route", choices=("grammar", "adapter", "quasar", "combined"), default="grammar",
+                    help="what to measure: the bare grammar; the adapter route (grammar + arithmetic + weather skills); "
+                         "quasar (only what the quasar container answered before: the baseline); or combined: "
+                         "pre-phase grammar, then the quasar container, then the rest (the production route)")
     bt.add_argument("--no-latest", action="store_true",
-                    help="never update reports/latest.json (it is only updated by a run whose gate held)")
+                    help="never update latest.json in the report directory (only a run whose gate held updates it)")
     bt.add_argument("--no-text", action="store_true", help="leave utterance texts out of the report")
     bt.add_argument("--misses", action="store_true", help="print the dev-split rows the grammar does not handle")
-    bt.add_argument("--gate", action="store_true", help="exit 1 when the KPI gate or a regression check fails")
+    bt.add_argument("--gate", action="store_true", help="exit 1 when the KPI gate or a regression check fails; with no usable baseline "
+                    "(none yet, other route or split definition) that is itself a failure unless --init-baseline is given")
+    bt.add_argument("--init-baseline", metavar="REASON", help="the reason for starting without a previous report (the first run of a route, "
+                    "or an explicit rebaseline); recorded in the report, refused when a compatible latest.json exists")
     bt.set_defaults(run=cmd_backtest)
     return parser
 

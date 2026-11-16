@@ -98,6 +98,13 @@ class Normalised:
     woke: bool = False
     negated: bool = False
     question: bool = False
+    repaired: bool = False     # a typo of the command vocabulary was corrected: the reading is a fuzzy one
+
+    def core_text(self) -> str:
+        """The part of the raw utterance between the first and the last kept word: «Алиса, 12+12.» -> «12+12»."""
+        if not self.spans:
+            return ""
+        return self.raw[self.spans[0][0]:self.spans[-1][1]]
 
     @property
     def text(self) -> str:
@@ -107,7 +114,7 @@ class Normalised:
         """A sub-utterance (token range), used to match one clause of a compound command."""
         tokens = self.tokens[start:end]
         part = Normalised(self.raw, tokens, self.spans[start:end], self.stems[start:end], [], self.woke,
-                          self.negated, self.question)
+                          self.negated, self.question, self.repaired)
         return part
 
 
@@ -173,17 +180,26 @@ def normalise(raw: str, canon: Canon = Canon()) -> Normalised:
     else:
         tokens, spans = tokens[lo:hi], spans[lo:hi]
 
+    repaired = False
     if canon.typo_vocabulary:
-        tokens = [repair_typo(t, canon.typo_vocabulary) for t in tokens]
+        fixed = [repair_typo(t, canon.typo_vocabulary) for t in tokens]
+        repaired = fixed != tokens
+        tokens = fixed
 
     negated = any(t in canon.negation for t in tokens)
     question = any(t in canon.question_words for t in tokens) or raw.rstrip().endswith("?")
-    return Normalised(raw, tokens, spans, [stem(t) for t in tokens], stripped, woke, negated, question)
+    return Normalised(raw, tokens, spans, [stem(t) for t in tokens], stripped, woke, negated, question, repaired)
+
+
+# The past tense of a verb (-ал -ял -ил -ел, feminine/neuter/plural -а -о -и after it).
+_PAST_TENSE = re.compile(r"(ал|ял|ил|ел)[аои]?$")
 
 
 def repair_typo(token: str, vocabulary: tuple[str, ...]) -> str:
     """Single-edit repair against a fixed vocabulary, only when exactly one word is that close (abstain over guess)."""
     if len(token) < 5 or token in vocabulary:
         return token
+    if _PAST_TENSE.search(token):
+        return token   # «включил» is a report, no command: never repaired into the imperative «включи» (or «включай»)
     near = [word for word in vocabulary if abs(len(word) - len(token)) <= 1 and edit_distance_le1(token, word)]
     return near[0] if len(near) == 1 else token

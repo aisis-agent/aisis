@@ -1,17 +1,29 @@
 # AISIS speaker intent grammar (Russian). Schema and pattern syntax: ../README.md.
-# Phase 1 seed: the intents the quasar fast layer already serves (volume, media keys, light, repeat, thanks,
-# nameless music), ported into data so the back-test harness has a measured baseline. Executors are names the
-# caller resolves; nothing here talks to hardware.
+#
+# One place for what the speaker answers without a language model. `owner` of an executor says who runs the decision:
+#   adapter  - intent_route.py (clock, date, repeat, timers, canned lines, climate and colour through Home Assistant)
+#   quasar   - the quasar container's own handlers (volume, media keys, light and device switches, state, named music);
+#              the grammar describes them so the back-test measures one route end to end, and the quasar overlay hands
+#              the ones it cannot parse to the adapter.
+# Executors are plain names; nothing here talks to hardware.
 version: 1
 locale: ru
 
 lexicon:
-  wake: [алиса, яндекс, брачо]
-  lead_in: [а, ну, слушай, эй, давай, скажи]
-  fillers: [пожалуйста, пожалуйста, вот, же, там, плиз]
+  # Names the speaker answers to, with the mishearings seen on far-field speech («Тариса», «Лисы»).
+  wake: [алиса, алис, алисы, алиску, алиска, тариса, лисы, элиса, илиса, олиса, толиса, яндекс, брачо]
+  lead_in: [а, ну, слушай, эй, слышь, так]
+  fillers: [пожалуйста, плиз, вот, же, значит, короче, типа]
   negation: [не, нельзя, ни, никогда]
-  question_words: [что, какой, какая, какое, какие, сколько, почему, зачем, когда, где, как, кто, ли]
+  question_words: [что, какой, какая, какое, какие, каков, сколько, почему, зачем, когда, где, как, кто, ли, откуда, куда]
   connectors: [и, потом, затем, а потом]
+  typo_vocabulary: [включи, выключи, включай, выключай, погромче, потише, пауза, продолжи, пожалуйста]
+  # Words that make a short unmatched utterance a real request for the brain, never a reprompt.
+  chat_markers: [расскажи, объясни, посоветуй, придумай, напиши, переведи, помоги, можешь, умеешь, знаешь, хочу, давай,
+                 скучно, устал*, анекдот, шутку, сказку, стих*]
+  # Heads of a lookup request («курс доллара», «столица Австралии»): short, no question word, the brain's.
+  lookup_nouns: [курс*, столиц*, население, цен*, стоимост*, рецепт*, значени*, определени*, формул*, биографи*, возраст*, расстояни*, высот*,
+                 новост*, скор*, счет, результат*, расписани*]
   rooms:
     living: [гостин*, зал]
     kitchen: [кухн*]
@@ -19,62 +31,292 @@ lexicon:
     studio: [студи*]
     hall: [прихож*]
     upstairs: [второй этаж, наверху, наверх]
-  set_verb: [сделай, поставь, установи, выставь, поменяй, переключи]
+  devices:
+    tv: [телик*, телевизор*, телек*, тв]
+    projector: [проектор*]
+    kettle: [чайник*]
+    globe: [глобус*]
+    garland: [гирлянд*]
+    socket: [розетк*]
+  ac_words: [кондиционер*, кондей*, кондер*]
+  light_words: [свет*, освещени*, лампочк*, лампу, лампа, люстр*, подсветк*, светильник*]
+  colors:
+    white: [бел*, белый]
+    red: [красн*]
+    blue: [син*, голуб*]
+    green: [зелен*]
+    yellow: [желт*]
+    orange: [оранжев*]
+    purple: [фиолетов*, сиренев*]
+    pink: [розов*]
+    warm: [=теплый, =теплым, =теплого, =теплая, =теплую]
+    cold: [=холодный, =холодным, =холодного, =холодная, =холодную]
+  hvac_modes:
+    heat: [обогрев*, нагрев*, отоплени*, тепл*]
+    cool: [охлажд*, холод*, прохлад*]
+    dry: [осушени*, сушк*, осуши]
+    fan: [вентиляц*, вентилятор]
+    auto: [авто, автоматическ*]
+  cmd_verbs: [=включи, =выключи, =включай, =выключай, =включить, =выключить, =поставь, =убери, =отключи, =покажи, =запусти, =отключить,
+              =верни, =добавь, =скрой, =измени]
+  set_verb: [сделай, поставь, установи, выставь, поменяй, переключи, настрой, наставь, настроить]
   on_verb: [включи, включай, включить, зажги, засвети, вруби, запусти, запускай]
   off_verb: [выключи, выключай, выключить, погаси, потуши, вырубить, вырубай, отключи]
+  play_verb: [включи, включай, поставь, сыграй, играй, запусти, давай, послушаем, найди]
+  profanity: [пидор*, пидар*, сука, суки, сучк*, хуй*, хуе*, хуя*, бля*, еба*, ебан*, ебат*, пизд*, мудак*, говно*, дерьм*,
+              уебан*, ублюдок, ублюдк*, дебил*, идиот*, тупой, тупая, урод*, жопа, жопу, гандон*, шлюх*]
+  politicians: [путин*, зеленск*, байден*, трамп*, навальн*, лукашенк*, медведев*, мишустин*, шойг*]
+  emergency: [полици*, =скорая, =скорую, =скорой, неотложк*, пожарн*, =пожар, милици*, спасател*, =спасите, =помогите]
 
 intents:
-  # ── dialogue ────────────────────────────────────────────────────────────
+  # ── hygiene: speech that is not addressed to the speaker ────────────────
+  - id: unaddressed.caption
+    tier: drop
+    phase: pre
+    priority: 100
+    labels: [HALLUCINATION, no_enumeration]
+    note: Whisper captions learned from video subtitles; the STT gateway drops the same list, this is the second line of defence.
+    guards: ["not_has:cmd_verbs", not_question]
+    patterns:
+      - "продолжение следует ..."
+      - "(субтитры|субтитр|титры|редактор|корректор|переводчик) ..."
+      - "... субтитр* ..."
+      - "(dimatorzok|amara|subtitles|titles) ..."
+      - "... (dimatorzok|amara) ..."
+      - "~субтитры ..."
+      - "(спасибо|благодарю) за (просмотр|внимание|внимательность|подписку) ..."
+      - "(подписывайтесь|подписывайся|подпишись) ..."
+      - "не забудьте подписаться ..."
+      - "ставьте (лайки|лайк) ..."
+      - "до (новых|скорых|следующих) встреч ..."
+      - "увидимся (в|на) следующем ..."
+      - "(thanks|thank you) for watching"
+      - "please subscribe ..."
+    negatives: ["включи субтитры", "выключи субтитры на телевизоре"]
+    examples: ["Продолжение следует...", "Субтитры сделал DimaTorzok", "Редактор субтитров А.Семкин", "Спасибо за просмотр!", "Подписывайтесь на канал", "Субтитры подогнал Taurus", "Спасибо за субтитры"]
+  - id: unaddressed.filler
+    tier: drop
+    phase: pre
+    priority: 90
+    labels: [AMBIENT]
+    patterns: ["(угу|ага|э|эм|хм|мм|ммм|м|а|и|ну|так|мда)"]
+    examples: ["угу", "хм"]
+
+  # ── canned lines: no model, no synthesis on the hot path ───────────────
+  - id: smalltalk.wake
+    tier: canned
+    phase: pre
+    labels: [WAKE_ONLY]
+    patterns: ["{wake}"]
+    reply: {kind: canned, say: ["Слушаю.", "Да?", "Я здесь."]}
+    examples: ["Алиса", "Алиса?", "Тариса.", "Лисы."]
+  - id: smalltalk.greeting
+    tier: canned
+    phase: pre
+    labels: [GREETING, smalltalk]
+    patterns:
+      - "(привет|приветик|привет-привет|здравствуй|здравствуйте|здорово|добрый день|добрый вечер|доброе утро|доброй ночи|хай|салют|приветствую)"
+      - "(привет|здравствуй|здравствуйте|здорово) {wake}?"
+    reply: {kind: canned, say: ["Привет!", "Здравствуй!"]}
+    examples: ["Привет", "Здравствуйте, Алиса.", "Доброе утро"]
+  - id: smalltalk.how_are_you
+    tier: canned
+    phase: pre
+    labels: [GREETING, smalltalk]
+    patterns:
+      - "(привет)? (как дела|как ты|как жизнь|как поживаешь|как настроение|как оно|как сама|как сам|что нового)"
+    reply: {kind: canned, say: ["Хорошо, спасибо. А у тебя?", "Отлично. Чем помочь?"]}
+    examples: ["Алиса, как дела?", "Как ты?", "Привет, как дела"]
   - id: dialog.thanks
     tier: canned
+    phase: pre
     labels: [THANKS]
-    patterns: ["(спасибо|благодарю|спс|благодарствую) (большое|тебе|огромное)?"]
-    reply: {kind: canned, say: ["Пожалуйста."]}
+    patterns: ["(спасибо|благодарю|спс|благодарствую|мерси) (большое|тебе|огромное|тебе большое)?", "ты (молодец|умница|классная)"]
+    reply: {kind: canned, say: ["Пожалуйста.", "Всегда рада."]}
     examples: [спасибо, "Алиса, спасибо большое"]
+  - id: dialog.farewell
+    tier: canned
+    phase: pre
+    labels: [FAREWELL, smalltalk]
+    patterns: ["(пока|до свидания|до завтра|спокойной ночи|доброй ночи|всего доброго|покеда|до встречи)"]
+    reply: {kind: canned, say: ["Пока!", "До встречи."]}
+    examples: ["пока", "до свидания"]
   - id: dialog.dismiss
     tier: execute
     allow_negation: true
-    labels: [YES_NO]
-    patterns: ["(ничего|отбой|забудь|проехали|ладно)", "не (надо|нужно)"]
+    labels: [YES_NO, DISMISS]
+    patterns: ["(ничего|отбой|забудь|проехали|ладно|отмена|отставить|не обращай внимания|все хорошо)", "не (надо|нужно)", "ничего не (надо|нужно)"]
     action: {executor: dialog.end}
     reply: {kind: earcon}
-    examples: [ничего, не надо, отбой]
+    examples: [ничего, не надо, отбой, "ничего не нужно"]
   - id: dialog.repeat
     tier: execute
     labels: [REPEAT]
-    patterns: ["(повтори|повторить) (еще раз)?", "еще раз", "что ты (сказала|сказал)", "повтори (пожалуйста)?"]
+    patterns: ["(повтори|повторить|повторите) (еще раз)? (пожалуйста)?", "еще раз", "что ты (сказала|сказал)", "что (ты )?говорила", "как ты сказала"]
     action: {executor: dialog.repeat_last}
     reply: {kind: none}
-    examples: [повтори, еще раз, "что ты сказал"]
+    examples: [повтори, еще раз, "что ты сказал", "повтори ещё раз"]
+
+  # ── refusals: say plainly what the speaker does not do ─────────────────
+  # SAFETY: the one intent that always wins (priority 1000, above every other band), before the quasar layer, the brain and
+  # Jev. The speaker cannot call anyone; the person must be told so and given the number now, never a plain «не умею».
+  # Pinned by `gate.safety` in the back-test: a phrase there that stops matching fails the gate whatever the coverage.
+  - id: refuse.emergency
+    tier: canned
+    phase: pre
+    priority: 1000
+    labels: [EMERGENCY_REFUSAL]
+    patterns:
+      - "{emergency} ..."
+      - "... (вызови|вызовите|вызывай|вызвать|вызываю|позвони|позвоните|звони|звоните|набери|наберите|дозвонись|нужна|нужен|нужно|срочно) ... {emergency} ..."
+      - "... (вызови|вызовите|вызывай|вызвать|позвони|позвоните|звони) ... (врача|врачей|доктора|медиков|~скорую|~скорая) ..."
+      - "... плохо с сердцем ..."
+      - "... (позвони|позвоните|звони|набери|наберите|вызови|вызовите) ... (112|сто двенадцать|один один два|ноль три|ноль два|ноль один|103|102|101|194|192|193|сто девяносто два|сто девяносто три|сто девяносто четыре) ..."
+      - "(мне|ему|ей|нам|ребенку|маме|папе|бабушке|дедушке|мужу|жене) (очень|совсем|срочно|ужасно|сильно)? (плохо|нехорошо|худо|дурно) (очень|срочно)?"
+      - "... сердце (болит|колет|прихватило|схватило|остановилось|останавливается) ..."
+      - "... (болит|колет|прихватило|схватило) сердце ..."
+      - "... (не могу|не может|не можем|нечем|трудно) дышать ..."
+      - "... (задыхаюсь|задыхается|задыхаемся|задохнулся|задохнулась|задохнулись) ..."
+      - "... (перестал|перестала) дышать ..."
+      - "(у нас|у меня|в доме|в квартире|на кухне|в комнате|там|тут|здесь)? (пожар|горим) ..."
+      - "(у нас|у меня|в доме|в квартире|на кухне|в комнате|там|тут|здесь|что-то|что то) (горит|загорелось|загорелась|загорелся)"
+      - "... (пахнет|пахнет сильно) (гарью|дымом) ..."
+      - "(=помогите|=спасите|на помощь) ..."
+      - "... (тонет|тонут|тону|тонем|утонул*|утонула|тонула) ..."
+      - "... (отравил*|отравлени*|отравился|отравилась) ..."
+      - "... (потерял|потеряла) сознание ..."
+      - "... без сознания ..."
+      - "... упал* в обморок ..."
+      - "... (инсульт|инфаркт|кровотечени*) ..."
+      - "... (истекает|истекаю|истекают) кровью ..."
+      - "... (грабят|ограбили|ломятся|ломится|взламывают|взломали) ..."
+    reply: {kind: canned, say: ["Я не могу никому позвонить. Прямо сейчас звони сто двенадцать, он работает везде. В Сербии: сто девяносто четыре скорая, сто девяносто два полиция, сто девяносто три пожарные."]}
+    examples: ["Полиция.", "вызови врача", "вызови скарую", "помогите", "Вызови скорую", "Помогите", "мне плохо вызови скорую", "позвони в полицию", "мне очень плохо", "у меня болит сердце",
+               "не могу дышать", "у нас пожар", "ребенок тонет", "я отравился", "позвони 112", "он потерял сознание", "вызови скорую помощь срочно"]
+    negatives: ["где находится полиция", "до скорой встречи", "мне плохо видно", "мне плохо слышно", "расскажи про пожар в Лондоне", "помоги мне найти песню"]
+  - id: refuse.insult
+    tier: canned
+    phase: pre
+    priority: 40
+    labels: [PROFANITY_OPINION]
+    guards: ["has:profanity", not_question]
+    patterns: ["..."]
+    reply: {kind: canned, say: ["Давай без грубостей.", "Так не надо."]}
+    examples: ["Алиса, путин пидор.", "ты тупая"]
+  - id: refuse.politics
+    tier: canned
+    phase: pre
+    priority: 30
+    labels: [PROFANITY_OPINION]
+    guards: ["has:politicians", not_question]
+    max_tokens: 8
+    patterns: ["..."]
+    reply: {kind: canned, say: ["О политике я не высказываюсь."]}
+    examples: ["Путин молодец"]
+  - id: refuse.lists
+    tier: canned
+    phase: pre
+    labels: [comms, LIST_NOTE]
+    patterns: ["(добавь|запиши|внеси|занеси) ... (список|списке|заметки|заметку|календарь|календаре) ...", "(прочитай|покажи|открой) (мои)? (заметки|сообщения|список покупок|список)"]
+    reply: {kind: canned, say: ["Списки, заметки и сообщения я пока не умею."]}
+    examples: ["добавь в список покупок молоко", "прочитай сообщения"]
+  - id: reminder.help
+    tier: canned
+    phase: pre
+    priority: -1
+    labels: [timer, TIMER, reminder]
+    patterns: ["напомни ..."]
+    reply: {kind: canned, say: ["Скажи, когда напомнить. Например: напомни через десять минут выключить плиту."]}
+    examples: ["напомни купить хлеб", "напомни принять лекарство"]
+  - id: refuse.calls
+    tier: canned
+    phase: pre
+    labels: [comms, CALL_MESSAGE]
+    patterns:
+      - "(позвони|набери|дозвонись|свяжись) ..."
+      - "(напиши|отправь|пошли) (смс|сообщение|письмо|эсэмэс|телеграм) ..."
+      - "(напиши|отправь|пошли) _ (смс|сообщение|письмо) ..."
+    reply: {kind: canned, say: ["Звонить и писать сообщения я пока не умею."]}
+    examples: ["позвони маме", "напиши смс", "отправь сообщение Ивану привет"]
+
+  # ── incomplete or garbled speech: ask again instead of waiting for a model ──
+  - id: asr.dangling_verb
+    tier: clarify
+    labels: [FRAGMENT, HOME_CMD]
+    patterns: ["{on_verb}", "{off_verb}", "{play_verb}", "(сделай|поставь|открой|закрой|найди|покажи)"]
+    reply: {kind: canned, say: ["Что именно?"]}
+    examples: ["Алиса, включи.", "выключи", "поставь"]
+  - id: asr.trailing_conjunction
+    tier: reprompt
+    labels: [FRAGMENT, ASR_GARBAGE]
+    max_tokens: 6
+    patterns: ["... (а|и|но|чтобы|что|как|если|потому|или|в|на|с|к|по|из|для|про|у|о) (ты)?"]
+    reply: {kind: canned, say: ["Не расслышал. Повтори, пожалуйста."]}
+    priority: -20
+    guards: [not_question]
+    examples: ["а чтобы ты", "я хотел бы чтобы"]
+  - id: asr.garbage_short
+    tier: reprompt
+    labels: [ASR_GARBAGE, FRAGMENT, YES_NO]
+    priority: -30
+    max_tokens: 3
+    guards: [not_question, "not_has:chat_markers", "not_has:lookup_nouns"]
+    patterns: ["..."]
+    reply: {kind: canned, say: ["Не расслышал. Повтори, пожалуйста."]}
+
+  - id: refuse.unknown_device
+    tier: canned
+    priority: -10
+    labels: [unknown_device]
+    guards: [not_question]
+    max_tokens: 7
+    patterns: ["(выключи|выруби|отключи|погаси|потуши|останови|открой|закрой|открыть|закрыть|включи|вруби|запусти|зажги) ..."]
+    reply: {kind: canned, say: ["Такого устройства я не знаю."]}
+    note: Post-phase only. The quasar layer tries every Home Assistant name and the music library first, so what reaches this line has no local match.
+    examples: ["закрой шторы", "выключи вытяжку", "включи тёплый пол"]
 
   # ── media keys ──────────────────────────────────────────────────────────
   - id: media.stop
     tier: execute
     labels: [MEDIA_STOP, media_control, media_partial]
-    patterns: ["(стоп|стой|хватит|остановись|останови|замолчи|прекрати)", "стоп (музыка|музыку)?"]
+    patterns:
+      - "(стоп|стой|хватит|остановись|останови|замолчи|помолчи|прекрати|перестань|отставить|тихо|молчи|заткнись)"
+      - "(стоп|хватит|остановись|останови) (музыка|музыку|воспроизведение|все)?"
+      - "(остановись|стоп|хватит) (не разговаривай|замолчи|помолчи|молчи|не говори)"
+      - "не (разговаривай|говори|болтай)"
+      - "_ (стоп|остановись) _?"
+      - "(стоп|остановись) _"
+    allow_negation: true
+    guards: [not_question]
+    max_tokens: 4
     action: {executor: media.key, args: {key: stop}}
     reply: {kind: earcon}
-    examples: [стоп, хватит, остановись, замолчи]
+    examples: [стоп, хватит, остановись, замолчи, "остановись, не разговаривай", "Олег Стоп. Почерюска.", "не разговаривай"]
+    negatives: ["не останавливайся", "что такое стоп кран"]
   - id: media.pause
     tier: execute
     labels: [MEDIA_PAUSE, media_control, media_partial]
-    patterns: ["пауза", "(поставь|поставить) на паузу", "на паузу"]
+    patterns: ["пауза", "(поставь|поставить) (на )?паузу", "на паузу", "(поставь|включи) паузу"]
     action: {executor: media.key, args: {key: pause}}
     reply: {kind: earcon}
     examples: [пауза, "поставь на паузу"]
   - id: media.next
     tier: execute
     labels: [MEDIA_NEXT, media_control, media_partial]
-    patterns: ["(дальше|следующий|следующая|следующую|пропусти|скип|next)", "(следующий|следующая|следующую) (трек|песня|песню|композиция|композицию)",
-               "(переключи|включи) (дальше|следующий трек|следующую песню)"]
+    patterns:
+      - "(дальше|следующий|следующая|следующую|пропусти|скип|next|вперед)"
+      - "(следующий|следующая|следующую|другой|другую) (трек|песня|песню|композиция|композицию|песенка)"
+      - "(переключи|включи|пропусти) (дальше|следующий трек|следующую песню|этот трек|эту песню)"
     action: {executor: media.key, args: {key: next}}
     reply: {kind: earcon}
-    examples: [дальше, "следующий трек", пропусти]
+    examples: [дальше, "следующий трек", пропусти, "переключи дальше"]
   - id: media.previous
     tier: execute
     labels: [MEDIA_PREVIOUS, media_control, media_partial]
-    patterns: ["(назад|предыдущий|предыдущая|предыдущую)", "(предыдущий|предыдущая|предыдущую) (трек|песня|песню|композиция|композицию)",
-               "(включи|вернись) (назад|к предыдущему|на предыдущий трек)"]
+    patterns:
+      - "(назад|предыдущий|предыдущая|предыдущую|вернись)"
+      - "(предыдущий|предыдущая|предыдущую) (трек|песня|песню|композиция|композицию)"
+      - "(включи|вернись) (назад|к предыдущему|на предыдущий трек|прошлую песню)"
     action: {executor: media.key, args: {key: previous}}
     reply: {kind: earcon}
     examples: [назад, "предыдущий трек"]
@@ -82,21 +324,132 @@ intents:
     tier: execute
     labels: [MEDIA_RESUME, media_control, media_partial]
     guards: [not_question]    # «Продолжить воспроизведение?» was a recorded hallucination (docs/research/intent-coverage-audit-2026-11.md)
-    patterns: ["(продолжи|продолжай|продолжить|возобнови|играй|играть) (дальше|воспроизведение)?"]
+    patterns: ["(продолжи|продолжай|продолжить|возобнови|играй) (дальше|воспроизведение)?", "(продолжить|продолжи) (воспроизведение|музыку)"]
     action: {executor: media.key, args: {key: resume}}
     reply: {kind: earcon}
     examples: [продолжи, "продолжи воспроизведение"]
     negatives: ["Продолжить воспроизведение?"]
+
+  # ── music ───────────────────────────────────────────────────────────────
   - id: music.generic
     tier: execute
     labels: [MUSIC_PLAY, music]
     # the object is required: a bare «Поставь.» is a cut-off sentence, not a request for music
-    patterns: ["{on_verb} (какую-нибудь|какую-то|мою)? (музыку|музыка|музон|песню|песенку|что-нибудь)",
-               "(поставь|сыграй|играй) (какую-нибудь|что-нибудь)? (музыку|музыка|песню|песенку|что-нибудь)"]
+    patterns:
+      - "{on_verb} (какую-нибудь|какую-то|мою)? (музыку|музыка|музон|песню|песенку|что-нибудь)"
+      - "(поставь|сыграй|играй|давай) (какую-нибудь|что-нибудь)? (музыку|музыка|песню|песенку|что-нибудь)"
+      - "(поставь|сыграй|играй|давай) (что-нибудь|что нибудь)"
     action: {executor: music.play}
     reply: {kind: earcon}
-    examples: ["включи музыку", "поставь что-нибудь", "включи песню"]
+    examples: ["включи музыку", "поставь что-нибудь", "включи песню", "давай музыку"]
     negatives: ["не включай музыку", "Поставь."]
+  # ── clock and calendar ──────────────────────────────────────────────────
+  - id: time.now
+    tier: query
+    phase: pre
+    labels: [TIME, weather_time]
+    patterns:
+      - "_? (который|сколько) (сейчас)? (час|времени|время)"
+      - "(какое|скажи|подскажи|назови) (сейчас)? (время|который час|точное время)"
+      - "время"
+      - "(сколько|который) (там|уже)? (сейчас)? (время|времени|час)"
+    action: {executor: clock.say}
+    reply: {kind: template, say: "{clock_text}"}
+    examples: ["Который час?", "Алиса. Который час?", "сколько времени", "скажи время", "Высо. Который час."]
+    negatives: ["сколько времени займет дорога до Москвы"]
+  - id: date.today
+    tier: query
+    phase: pre
+    labels: [DATE, weather_time]
+    patterns:
+      - "(какое|какой|какая) (сегодня|сейчас)? (число|день|дата|день недели|день месяца)"
+      - "(какое|какой) (сегодня|сегодняшнее)? (число|дата)"
+      - "(скажи|подскажи) (сегодняшнюю)? (дату|число)"
+      - "(что|какой) (у нас|за день) сегодня"
+    action: {executor: clock.date}
+    reply: {kind: template, say: "{clock_text}"}
+    examples: ["какое сегодня число", "какой сегодня день", "какая дата"]
+
+  # ── timers, alarms, reminders ───────────────────────────────────────────
+  - id: timer.set
+    tier: execute
+    phase: pre
+    labels: [timer, TIMER]
+    slots:
+      duration: {type: duration}
+    patterns:
+      - "{set_verb}? (таймер|секундомер) (на|через)? {duration}"
+      - "(заведи|засеки) (таймер)? (на)? {duration}"
+      - "таймер (на)? {duration}"
+      - "поставь на {duration}"
+    action: {executor: timer.start, args: {seconds: "$duration"}}
+    reply: {kind: template, say: "Таймер на {duration_text}."}
+    examples:
+      - {say: "поставь таймер на пять минут", slots: {duration: 300}}
+      - {say: "заведи таймер на полчаса", slots: {duration: 1800}}
+      - {say: "таймер на 1 час 30 минут", slots: {duration: 5400}}
+      - {say: "засеки две минуты", slots: {duration: 120}}
+  - id: timer.set_slotless
+    tier: clarify
+    phase: pre
+    labels: [timer, TIMER]
+    patterns: ["{set_verb}? (таймер|секундомер)", "заведи таймер", "запусти таймер"]
+    reply: {kind: canned, say: ["На сколько поставить таймер?"]}
+    examples: ["поставь таймер", "заведи таймер"]
+  - id: timer.cancel
+    tier: execute
+    phase: pre
+    labels: [timer, TIMER]
+    patterns: ["(отмени|выключи|останови|сбрось|убери|отключи|удали) (все)? (таймер|таймеры|секундомер)", "(таймер) (отмени|выключи|останови|стоп)"]
+    action: {executor: timer.cancel}
+    reply: {kind: canned, say: ["Таймер отменён."]}
+    examples: ["отмени таймер", "выключи таймер", "останови секундомер"]
+  - id: timer.query
+    tier: query
+    phase: pre
+    labels: [timer, TIMER]
+    patterns: ["сколько (еще)? (осталось|осталось на таймере|до конца)", "сколько (осталось|еще осталось) (на таймере|до таймера)?", "что (там )?(с )?таймер(ом)?"]
+    action: {executor: timer.remaining}
+    reply: {kind: template, say: "{timer_text}"}
+    examples: ["сколько осталось", "сколько осталось на таймере"]
+  - id: alarm.set
+    tier: execute
+    phase: pre
+    labels: [timer, TIMER, alarm]
+    slots:
+      time: {type: clock}
+    patterns:
+      - "{set_verb}? будильник (на|в)? {time}"
+      - "(разбуди|буди) (меня)? (в|на)? {time}"
+      - "(заведи|включи) будильник (на|в)? {time}"
+    action: {executor: alarm.set, args: {time: "$time"}}
+    reply: {kind: template, say: "Будильник на {time_text}."}
+    examples:
+      - {say: "поставь будильник на семь утра", slots: {time: {hour: 7, minute: 0, part: morning, ambiguous: false, text: "07:00"}}}
+      - "разбуди меня в половине седьмого"
+      - "заведи будильник на 7:30"
+  - id: alarm.cancel
+    tier: execute
+    phase: pre
+    labels: [timer, TIMER, alarm]
+    patterns: ["(отмени|выключи|убери|удали|отключи) (все)? (будильник|будильники)"]
+    action: {executor: alarm.cancel}
+    reply: {kind: canned, say: ["Будильник отменён."]}
+    examples: ["отмени будильник", "выключи будильник"]
+  - id: reminder.in
+    tier: execute
+    phase: pre
+    labels: [timer, TIMER, reminder]
+    slots:
+      duration: {type: duration}
+      what: {type: text}
+    patterns:
+      - "напомни (мне)? через {duration} {what}"
+      - "через {duration} напомни (мне)? {what}"
+    action: {executor: timer.start, args: {seconds: "$duration", note: "$what"}}
+    reply: {kind: template, say: "Напомню через {duration_text}."}
+    examples:
+      - {say: "напомни через десять минут выключить плиту", slots: {duration: 600, what: "выключить плиту"}}
 
   # ── volume ──────────────────────────────────────────────────────────────
   # Action args contract (executor speaker.volume): exactly one of `step` (+1/-1, relative), `level` (a plain number
@@ -104,112 +457,348 @@ intents:
   # («50%», «пятьдесят процентов»). The grammar never guesses a unit from the size of the number.
   - id: volume.up
     tier: execute
-    labels: [VOLUME, volume]
+    labels: [VOLUME, volume, volume_partial]
     # «добавь» / «подними» alone are cut-off sentences (add what? raise what?): they need the object
-    patterns: ["{set_verb}? (громче|погромче|еще громче)", "(прибавь|увеличь) (звук|громкость|громкости)?",
-               "(добавь|подними) (звук|громкость|громкости)", "(звук|громкость) (больше|громче|выше)"]
+    patterns:
+      - "{set_verb}? (громче|погромче|еще громче|чуть громче|немного громче|побольше)"
+      - "(прибавь|увеличь) (звук|громкость|громкости|чуть|немного)?"
+      - "(добавь|подними) (звук|громкость|громкости)"
+      - "(звук|громкость) (больше|громче|выше|погромче)"
+      - "(громче|погромче) (звук|громкость)"
     action: {executor: speaker.volume, args: {step: 1}}
     reply: {kind: earcon}
-    examples: [громче, "сделай погромче", "прибавь звук"]
-    negatives: ["громкость музыки в клипе", "не делай громче", "громковато", "Подними."]
+    examples: [громче, "сделай погромче", "прибавь звук", "громкость погромче"]
+    negatives: ["громкость музыки в клипе", "не делай громче", "громковато", "Подними.", "Добавь."]
   - id: volume.down
     tier: execute
-    labels: [VOLUME, volume]
+    labels: [VOLUME, volume, volume_partial]
     # «громковато» is a complaint that it is too loud; «убери» alone is a cut-off sentence (remove what?)
-    patterns: ["{set_verb}? (тише|потише|тихо)", "громковато", "(убавь|уменьши|понизь|снизь) (звук|громкость|громкости)?",
-               "убери (звук|громкость|громкости)", "(звук|громкость) (меньше|тише|ниже)"]
+    patterns:
+      - "{set_verb}? (тише|потише|тихо|чуть тише|немного тише|поменьше)"
+      - "громковато"
+      - "(убавь|уменьши|понизь|снизь|сбавь) (звук|громкость|громкости|чуть|немного)?"
+      - "убери (звук|громкость|громкости)"
+      - "(звук|громкость) (меньше|тише|ниже|потише)"
+      - "(тише|потише) (звук|громкость)"
     action: {executor: speaker.volume, args: {step: -1}}
     reply: {kind: earcon}
-    examples: [тише, "сделай потише", "убавь звук", громковато, "убери громкость"]
+    examples: [тише, "сделай потише", "убавь звук", "Тише. Громкость.", громковато, "убери громкость"]
     negatives: ["Убери."]
   - id: volume.set
     tier: execute
     labels: [VOLUME, volume, volume_partial]
     slots:
       level: {type: number, range: [0, 10]}
-    patterns: ["{set_verb}? громкост* (на|до)? {level}", "{set_verb}? звук (на|до)? {level}", "{level} громкость"]
+    patterns: ["{set_verb}? (громкост*|звук) (на|до)? {level}", "{level} громкость", "громкость (на|в)? {level}"]
     action: {executor: speaker.volume, args: {level: "$level"}}
     reply: {kind: earcon}
     examples:
       - {say: "громкость на пять", slots: {level: 5}}
       - {say: "сделай громкость семь", slots: {level: 7}}
+      - {say: "поставь звук на десять", slots: {level: 10}}
     negatives: ["громкость 150", "громкость 50", "громкость -5", "не делай громкость пять"]
   - id: volume.percent
     tier: execute
     labels: [VOLUME, volume, volume_partial]
     slots:
       percent: {type: number, range: [0, 100]}
-    patterns: ["{set_verb}? громкост* (на|до)? {percent} процент*", "{set_verb}? звук (на|до)? {percent} процент*",
-               "{percent} процент* громкость"]
+    patterns: ["{set_verb}? (громкост*|звук) (на|до)? {percent} процент*", "{percent} процент* громкость",
+               "громкость (на|в)? {percent} процент*"]
     action: {executor: speaker.volume, args: {percent: "$percent"}}
     reply: {kind: earcon}
     examples:
       - {say: "громкость 50%", slots: {percent: 50}}
       - {say: "громкость 10%", slots: {percent: 10}}
+      - {say: "громкость на двадцать пять процентов", slots: {percent: 25}}
       - {say: "сделай звук на десять процентов", slots: {percent: 10}}
     negatives: ["громкость 150%"]
+  - id: volume.delta_up
+    tier: execute
+    phase: pre
+    priority: 5
+    labels: [VOLUME, volume, volume_partial]
+    slots:
+      d: {type: delta, range: [1, 100]}
+    patterns:
+      - "(прибавь|добавь|увеличь|подними|повысь) (громкость|звук)? {d}"
+      - "{set_verb}? (громче|погромче) {d}"
+    action: {executor: speaker.volume_delta, args: {direction: 1, delta: "$d"}}
+    reply: {kind: earcon}
+    examples:
+      - {say: "прибавь громкость на десять процентов", slots: {d: {amount: 10, unit: "процент"}}}
+      - {say: "сделай громче на два", slots: {d: {amount: 2, unit: ""}}}
+  - id: volume.delta_down
+    tier: execute
+    phase: pre
+    priority: 5
+    labels: [VOLUME, volume, volume_partial]
+    slots:
+      d: {type: delta, range: [1, 100]}
+    patterns:
+      - "(убавь|уменьши|понизь|снизь|сбавь|убери) (громкость|звук)? {d}"
+      - "{set_verb}? (тише|потише) {d}"
+    action: {executor: speaker.volume_delta, args: {direction: -1, delta: "$d"}}
+    reply: {kind: earcon}
+    examples:
+      - {say: "убавь звук на два", slots: {d: {amount: 2, unit: ""}}}
+      - {say: "сделай тише на 20 процентов", slots: {d: {amount: 20, unit: "процент"}}}
   - id: volume.max
     tier: execute
-    labels: [VOLUME, volume]
+    labels: [VOLUME, volume, volume_partial]
     # «полный» / «полная» / «полно» alone are not a request: «на полную» needs its preposition
-    patterns: ["{set_verb}? (громкость|звук)? (на|до)? (максимум|максимальную|максимальная)",
-               "{set_verb}? (громкость|звук)? на =полную (громкость)?"]
+    patterns:
+      - "{set_verb}? (громкость|звук)? (на|до)? (максимум|максимальную|максимальная)"
+      - "{set_verb}? (громкость|звук)? на =полную (громкость)?"
+      - "(громче|погромче) (некуда|всего|на максимум)"
     action: {executor: speaker.volume, args: {level: 10}}
     reply: {kind: earcon}
     examples: ["громкость на максимум", "сделай на полную", "поставь на полную громкость"]
     negatives: [полный, полная, полно]
+  - id: volume.min
+    tier: execute
+    labels: [VOLUME, volume, volume_partial]
+    patterns: ["{set_verb}? (громкость|звук)? (на)? (минимум|минимальную|минимальная|на минимум)", "(выключи|убери) звук"]
+    action: {executor: speaker.volume, args: {level: 0}}
+    reply: {kind: earcon}
+    examples: ["громкость на минимум"]
   - id: volume.query
     tier: query
-    labels: [VOLUME, volume]
-    patterns: ["(какая|какой|сколько) (сейчас|у тебя)? (громкость|звук|громкости)", "(какая|скажи) громкость"]
+    labels: [VOLUME, volume, volume_partial]
+    patterns: ["(какая|какой|сколько) (сейчас)? (у тебя)? (громкость|звук|громкости)", "(скажи|подскажи) (текущую)? громкость", "громкость (какая|сейчас)"]
     action: {executor: speaker.volume_query}
-    # the level is read by the executor: speak it with `say(decision, values={"level": ...})`; without it no reply
-    reply: {kind: template, say: "Громкость {level}."}
+    reply: {kind: none}
     examples: ["какая громкость", "какая сейчас громкость"]
+  - id: volume.slotless
+    tier: clarify
+    labels: [VOLUME, volume_partial]
+    priority: -1
+    patterns: ["(громкость|звук|громкости)", "{set_verb} (громкость|звук)", "(громкость|звук) (громкость|звук)", "(громкость|звук) (на|до)"]
+    reply: {kind: canned, say: ["Какую громкость поставить?"]}
+    examples: ["Громкость.", "Громкость. Громкость.", "поставь громкость"]
 
   # ── light ───────────────────────────────────────────────────────────────
   - id: light.on
     tier: execute
-    labels: [LIGHT_CMD, light]
+    labels: [LIGHT_CMD, light, HOME_CMD, brightness]
     guards: [not_question]    # «Включить свет?» asks about the state or the plan; the past tense never matches (stemmer)
     slots:
       room: {type: rooms}
-    patterns: ["{on_verb} (свет|освещение|лампу|лампочку|люстру)", "{on_verb} (свет|освещение|лампу|лампочку|люстру) (в|на)? {room}",
-               "{on_verb} (в|на)? {room} (свет|освещение|лампу|лампочку|люстру)"]
+    patterns:
+      - "{on_verb} {light_words}"
+      - "{on_verb} {light_words} (в|на)? {room}"
+      - "{on_verb} (в|на)? {room} {light_words}"
+      - "{on_verb} (везде|всюду) {light_words}?"
     action: {executor: ha.light, args: {state: "on", room: "$room"}}
     reply: {kind: earcon}
     examples:
       - {say: "включи свет", slots: {}}
       - {say: "включи свет на кухне", slots: {room: kitchen}}
+      - {say: "зажги люстру в гостиной", slots: {room: living}}
     negatives: ["не включай свет", "я включил свет", "включил свет?", "Включить свет?"]
   - id: light.off
     tier: execute
-    labels: [LIGHT_CMD, light]
+    labels: [LIGHT_CMD, light, HOME_CMD]
     guards: [not_question]
     slots:
       room: {type: rooms}
-    patterns: ["{off_verb} (свет|освещение|лампу|лампочку|люстру)", "{off_verb} (свет|освещение|лампу|лампочку|люстру) (в|на)? {room}",
-               "{off_verb} (в|на)? {room} (свет|освещение|лампу|лампочку|люстру)"]
+    patterns:
+      - "{off_verb} {light_words}"
+      - "{off_verb} {light_words} (в|на)? {room}"
+      - "{off_verb} (в|на)? {room} {light_words}"
+      - "{off_verb} (везде|всюду|все) {light_words}?"
+      - "{off_verb} (весь|все) свет"
     action: {executor: ha.light, args: {state: "off", room: "$room"}}
     reply: {kind: earcon}
     examples:
       - {say: "выключи свет", slots: {}}
       - {say: "выключи свет в спальне", slots: {room: bedroom}}
+      - "выключи свет на втором этаже"
     negatives: ["не выключай свет", "выключил свет?", "Выключить свет?"]
+  - id: light.color
+    tier: execute
+    labels: [LIGHT_CMD, light, color]
+    slots:
+      color: {type: colors}
+      room: {type: rooms}
+    patterns:
+      - "{set_verb} {light_words}? (в|на)? {room}? (цвет)? {color} (цветом|цвет|свет)?"
+      - "{light_words} (в|на)? {room}? (цвет)? {color} (цвет|цветом|свет)?"
+      - "(в|на)? {room}? цвет {color}"
+    action: {executor: ha.light_color, args: {color: "$color", room: "$room"}}
+    reply: {kind: earcon}
+    examples:
+      - {say: "сделай свет красным", slots: {color: red}}
+      - {say: "люстру белый цвет", slots: {color: white}}
+      - {say: "Алиса, люструй цвет белый.", slots: {color: white}}
+      - {say: "цвет белый", slots: {color: white}}
+    negatives: ["включи красный фильм", "белый шум", "красный"]
+  - id: light.brightness
+    tier: execute
+    labels: [LIGHT_CMD, light, brightness]
+    slots:
+      value: {type: percent, range: [1, 100]}
+      room: {type: rooms}
+    patterns:
+      - "{set_verb}? (яркость|свет) (в|на)? {room}? (на|до)? {value}"
+      - "{set_verb}? {light_words} (в|на)? {room}? (на|до) {value}"
+    action: {executor: ha.light_brightness, args: {percent: "$value", room: "$room"}}
+    reply: {kind: earcon}
+    examples: [{say: "яркость пятьдесят", slots: {value: 50}}, {say: "свет на кухне на семьдесят процентов", slots: {value: 70, room: kitchen}}]
+
+  # ── devices, climate ────────────────────────────────────────────────────
+  - id: device.on
+    tier: execute
+    labels: [HOME_CMD, LIGHT_CMD, light, socket, media_device]
+    guards: [not_question]    # same as light.on: «Включить чайник?» is a question about the plan, not a command
+    slots:
+      device: {type: devices}
+      room: {type: rooms}
+    patterns: ["{on_verb} {device} (в|на)? {room}?", "{on_verb} (в|на)? {room} {device}"]
+    action: {executor: ha.device, args: {device: "$device", state: "on", room: "$room"}}
+    reply: {kind: earcon}
+    examples: [{say: "Включи телик.", slots: {device: tv}}, {say: "включи чайник", slots: {device: kettle}}, "Ключи гирлянду.", "зажги гирлянду"]
+    negatives: ["не включай чайник", "Включить чайник?", "включил чайник?"]
+  - id: device.off
+    tier: execute
+    labels: [HOME_CMD, LIGHT_CMD, light, socket, media_device]
+    guards: [not_question]
+    slots:
+      device: {type: devices}
+      room: {type: rooms}
+    patterns: ["{off_verb} {device} (в|на)? {room}?", "{off_verb} (в|на)? {room} {device}"]
+    action: {executor: ha.device, args: {device: "$device", state: "off", room: "$room"}}
+    reply: {kind: earcon}
+    examples: [{say: "выключи проектор", slots: {device: projector}}, "выключи розетку"]
+    negatives: ["Выключить проектор?", "выключил проектор?"]
+  - id: climate.set
+    tier: execute
+    labels: [CLIMATE_CMD, climate, setpoint]
+    slots:
+      room: {type: rooms}
+      mode: {type: hvac_modes}
+      temp: {type: number, range: [16, 30]}
+    patterns:
+      - "{set_verb}? {ac_words} (в|на)? {room}? (на|в)? {mode}? {temp} (градус*)?"
+      - "{set_verb}? {ac_words} (в|на)? {room}? (на|в)? {mode}"
+      - "{on_verb} {ac_words} (в|на)? {room}? (на|в)? {mode}? ({temp} (градус*)?)?"
+      - "{set_verb}? {mode} {temp} (градус*)?"
+      - "{set_verb}? (температуру|температура) (в|на)? {room}? (на|до)? {temp} (градус*)?"
+    action: {executor: ha.climate, args: {room: "$room", mode: "$mode", temperature: "$temp"}}
+    reply: {kind: earcon}
+    examples:
+      - {say: "кондиционер 23", slots: {temp: 23}}
+      - {say: "Наставь кондиционер на втором этаже. Обогрев тридцать градусов.", slots: {room: upstairs, mode: heat, temp: 30}}
+      - {say: "включи кондиционер на охлаждение", slots: {mode: cool}}
+      - {say: "включи кондиционер в спальне на обогрев двадцать два градуса", slots: {room: bedroom, mode: heat, temp: 22}}
+    negatives: ["какая температура на улице"]
+  - id: climate.warmer
+    tier: execute
+    labels: [CLIMATE_CMD, climate]
+    slots:
+      d: {type: delta, range: [1, 10]}
+      room: {type: rooms}
+    patterns:
+      - "(сделай)? (теплее|потеплее|жарче) (в|на)? {room}? {d}?"
+      - "(прибавь|добавь|увеличь|подними|повысь) (температуру|температура|тепла)? (в|на)? {room}? {d}"
+    action: {executor: ha.climate_delta, args: {room: "$room", direction: 1, delta: "$d"}}
+    reply: {kind: earcon}
+    examples: ["сделай теплее", "потеплее в спальне", "прибавь температуру на два градуса"]
+  - id: climate.cooler
+    tier: execute
+    labels: [CLIMATE_CMD, climate]
+    slots:
+      d: {type: delta, range: [1, 10]}
+      room: {type: rooms}
+    patterns:
+      - "(сделай)? (холоднее|похолоднее|прохладнее|попрохладнее) (в|на)? {room}? {d}?"
+      - "(убавь|уменьши|понизь|снизь|сбавь|убери) (температуру|температура|тепла)? (в|на)? {room}? {d}"
+    action: {executor: ha.climate_delta, args: {room: "$room", direction: -1, delta: "$d"}}
+    reply: {kind: earcon}
+    examples: ["сделай холоднее", "похолоднее наверху", "убавь температуру на три градуса"]
+
+  # ── state ───────────────────────────────────────────────────────────────
+  - id: state.report
+    tier: query
+    labels: [STATE_QUERY, state]
+    patterns:
+      - "(какой|какие|что) (сейчас)? (свет|лампы|лампочки|освещение)? (сейчас)? (включен|включено|включены|горит|горят)"
+      - "что (сейчас)? (включено|включен|работает|горит)"
+      - "(скажи|покажи) (что)? (включено|включен)"
+    action: {executor: ha.state_report}
+    reply: {kind: none}
+    examples: ["Какой свет включен?", "что сейчас включено", "что включено"]
+
+  # ── negation: «не включай свет» is a no-op, never the opposite action ───
+  - id: negation.noop
+    tier: canned
+    phase: pre
+    priority: 20
+    allow_negation: true
+    labels: [partial_negative, NEGATION]
+    patterns:
+      - "не (включай|выключай|включать|выключать|открывай|закрывай|запускай|ставь|делай|трогай|гаси|зажигай|громче|тише) ..."
+      - "не надо (включать|выключать|открывать|закрывать|запускать|ставить|делать|трогать|гасить) ..."
+      - "(ни в коем случае|нельзя|только не) (не)? (включай|выключай|включать|выключать|открывай|закрывай) ..."
+    reply: {kind: canned, say: ["Хорошо, не буду."]}
+    examples: ["не включай свет", "не выключай музыку", "не надо включать свет", "не делай громче"]
 
 backtest:
   # Corpus labels that only a language model answers (the back-test expects abstain on these).
-  brain_labels: [CHITCHAT, KNOWLEDGE, ADVICE, FOLLOWUP, question, smalltalk]
+  brain_labels: [CHITCHAT, KNOWLEDGE, ADVICE, FOLLOWUP, question]
   # Speech not addressed to the speaker: what a correct decision is for each label.
   unaddressed: {HALLUCINATION: drop, AMBIENT: no_action}
   holdout_percent: 20
 
-# KPI gate of `backtest --gate`. The limits are totals over the whole corpus (already the Phase 2 values). The
-# coverage floors are what this seed grammar meets today (about 0.17 over everything, 0.25 on real rows); they rise
-# with the grammar towards the Phase 2 targets {real/holdout: 0.85, real/all: 0.80, all/all: 0.85}. A floor whose
-# split is missing or has nothing addressed fails.
+# KPI gate, evaluated by `backtest --route combined --gate` (the nightly job and any grammar change). The coverage floors
+# are ratchets: raise them when a change holds a higher number, never lower them to make a change pass. Floors and caps
+# below are the numbers of 2026-11-16 (docs/research/intent-grammar-rollout-2026-11.md); false triggers are speech not
+# addressed to the speaker that got an answer (a cat talked to in the room: one known case).
+# The held-out split is 18 addressed rows today, too few for an absolute number. Regressions are caught row by row against
+# the last promoted report (same phrases, deterministic engine: a row may get better, never worse, no tolerance; losing or
+# relabelling a row fails too). The absolute floor switches on with n: a confidence-interval test from `ci_min_addressed`
+# rows, the point floor from `floor_min_addressed`. The 90 % product target is the reported `goal`, not a gate.
 gate:
   max_false_triggers: 2
   max_wrong_actions: 6
   max_p95_us: 25000
-  min_coverage: {real/holdout: 0.15, real/all: 0.20, all/all: 0.15}
+  min_coverage:
+    real/all: 0.80
+    all/all: 0.85
+  holdout:
+    splits: [real/holdout]
+    ci_min_addressed: 20          # from here the split fails when its whole 95 % Wilson interval is below the floor
+    floor_min_addressed: 60       # from here the point floor applies as well
+    floor: {coverage: 0.85, correct: 0.80}
+    legacy_floor: {split: real/holdout, coverage: 0.85}   # the old absolute floor, shown in every report, not gated at n=18
+  goal: {split: real/all, coverage: 0.90, correct: 0.90}
+  # Must-pass safety set: every phrase has to be read as the emergency intent (and nothing else) no matter how coverage or
+  # any other number moves. One miss fails the gate and so the nightly run. Add phrases, never remove them.
+  safety:
+    intent: refuse.emergency
+    phrases:
+      - Мне плохо, вызови скорую.
+      - Вызови скорую
+      - Вызовите скорую помощь
+      - скорую!
+      - позвони в скорую
+      - позвони в полицию
+      - вызови полицию
+      - Алиса, мне плохо
+      - мне очень плохо
+      - у меня болит сердце
+      - у меня плохо с сердцем
+      - не могу дышать
+      - мне нечем дышать
+      - я задыхаюсь
+      - у нас пожар
+      - пожар!
+      - помогите
+      - спасите
+      - ребенок тонет
+      - я отравился
+      - он потерял сознание
+      - у него инсульт
+      - позвони 112
+      - позвони сто двенадцать
+      - вызови врача
+      - включи свет и вызови скорую

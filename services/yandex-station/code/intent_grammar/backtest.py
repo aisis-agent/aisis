@@ -16,6 +16,9 @@ Corpus files (JSON lines) under the corpus directory:
   real-voice-*.jsonl   {text, truth, ts?, verdict?, labeller?}        source "real"
   *-labelled.jsonl     the same schema                                source "real"
   intents-ru.jsonl     {text, expect: {kind, domain, tier?, action?}} source "synthetic"
+  quasar-replay.jsonl  {text, handled, via} from tools/replay_quasar.mts: which phrases the deployed quasar container
+                       already answers without a model. Without it the flag falls back to the corpus' own record
+                       (synthetic: expect.kind != llm; real: answered by layer L1 and judged ok/clarify).
 
 A synthetic row that carries `expect.tier` / `expect.action` is only correct when the decision's tier and the
 essential arguments of its action match too (see `meets_expectation`); every other row is judged by its label alone.
@@ -56,6 +59,7 @@ class Row:
     truth: str
     source: str
     split: str
+    quasar: bool = False   # the quasar container already answered this phrase without a model (synthetic: expect.kind != llm; real: layer L1, verdict ok/clarify)
     expect: dict[str, Any] | None = field(default=None, compare=False)   # the corpus' own tier/action, when it has one
 
 
@@ -92,9 +96,14 @@ def load_rows(directory: Path, grammar: Grammar) -> tuple[list[Row], list[dict[s
     percent = holdout_percent(grammar)
     rows: list[Row] = []
     manifest: list[dict[str, Any]] = []
+    replay = _load_replay(directory / REPLAY_FILE)
     occurrences: dict[str, int] = {}
     for path in sorted(directory.glob("*.jsonl")):
         name = path.name
+        if name == REPLAY_FILE:
+            manifest.append({"file": name, "source": "replay", "rows": len(replay or {}),
+                             "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+            continue
         if name == "intents-ru.jsonl":
             source = "synthetic"
         elif name.startswith("real-voice-") or name.endswith("-labelled.jsonl"):
@@ -113,11 +122,34 @@ def load_rows(directory: Path, grammar: Grammar) -> tuple[list[Row], list[dict[s
                 continue
             basis = f"{path.stem}|{record.get('ts', '')}|{split_key(text)}"
             occurrences[basis] = occurrences.get(basis, 0) + 1
+            quasar = replay[text] if replay is not None and text in replay else _quasar_handled(source, record)
             expect = record.get("expect") if source == "synthetic" and isinstance(record.get("expect"), dict) else None
-            rows.append(Row(_row_id(basis, occurrences[basis]), text, truth, source, split_of(text, percent), expect))
+            rows.append(Row(_row_id(basis, occurrences[basis]), text, truth, source, split_of(text, percent),
+                            quasar=quasar, expect=expect))
             count += 1
         manifest.append({"file": name, "source": source, "rows": count, "sha256": hashlib.sha256(data).hexdigest()})
     return rows, manifest
+
+
+REPLAY_FILE = "quasar-replay.jsonl"
+
+
+def _load_replay(path: Path) -> dict[str, bool] | None:
+    """What the deployed quasar layer answers without a model, per phrase (tools/replay_quasar.mts); None when absent."""
+    if not path.exists():
+        return None
+    handled: dict[str, bool] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            record = json.loads(line)
+            handled[str(record["text"]).strip()] = bool(record["handled"])
+    return handled
+
+
+def _quasar_handled(source: str, record: dict[str, Any]) -> bool:
+    if source == "synthetic":
+        return (record.get("expect") or {}).get("kind") not in (None, "llm")
+    return record.get("layer") == "L1" and record.get("verdict") in ("ok", "clarify")
 
 
 def _truth(source: str, record: dict[str, Any]) -> str:
@@ -143,6 +175,9 @@ class Outcome:
 _ACTION_ARGUMENT = {"volume": ("speaker.volume", "level"), "setpoint": ("ha.climate", "temperature"),
                     "brightness": ("ha.light_brightness", "percent")}
 _SWITCH_EXECUTORS = ("ha.light", "ha.device")
+# Decisions of the quasar container, not of the grammar (`intent_route.measured_route`): the back-test knows that the
+# container answered, never with which tier or arguments, so such a decision is judged by its label alone.
+OPAQUE_INTENTS = frozenset(("quasar.handled",))
 
 
 def _action_matcher(spec: str) -> Callable[[dict[str, Any]], bool] | None:
@@ -169,7 +204,10 @@ def meets_expectation(expect: dict[str, Any], decision: Decision) -> bool:
     """Whether a decision with the right label also has the tier and action the corpus row expects.
 
     The tier is compared when it names a grammar tier (`llm` is no decision: label-only). The action is compared by the
-    mapping above, over every part of a compound; a form without an exact mapping makes the whole row label-only."""
+    mapping above, over every part of a compound; a form without an exact mapping makes the whole row label-only, and
+    so does a decision of the quasar container (`OPAQUE_INTENTS`)."""
+    if decision.intent in OPAQUE_INTENTS:
+        return True
     spec = expect.get("action")
     matcher = _action_matcher(str(spec)) if spec else None
     if spec and matcher is None:
@@ -202,12 +240,17 @@ def classify(row: Row, decision: Decision | None, grammar: Grammar) -> str:
     return "correct" if row.expect is None or meets_expectation(row.expect, decision) else "wrong"
 
 
-def evaluate(grammar: Grammar, rows: list[Row]) -> list[Outcome]:
-    grammar.decide("прогрев")  # first call pays lazy costs; it must not count into the latency numbers
+Decider = Callable[[Row], Decision | None]
+
+
+def evaluate(grammar: Grammar, rows: list[Row], decide: Decider | None = None) -> list[Outcome]:
+    """Run every row through `decide` (default: the bare grammar; the adapter routes live in cli.py)."""
+    decide = decide or (lambda row: grammar.decide(row.text))
+    decide(Row("warmup", "прогрев", "", "real", "dev"))  # the first call pays lazy costs; keep them out of the latency numbers
     results: list[Outcome] = []
     for row in rows:
         started = time.perf_counter_ns()
-        decision = grammar.decide(row.text)
+        decision = decide(row)
         micros = (time.perf_counter_ns() - started) // 1000
         results.append(Outcome(row, decision, classify(row, decision, grammar), micros))
     return results
@@ -287,8 +330,9 @@ def per_intent(outcomes: list[Outcome]) -> dict[str, dict[str, int]]:
 
 
 def build_report(grammar: Grammar, rows: list[Row], manifest: list[dict[str, Any]], *, include_text: bool = True,
-                 previous: dict[str, Any] | None = None) -> dict[str, Any]:
-    outcomes = evaluate(grammar, rows)
+                 previous: dict[str, Any] | None = None, decide: Decider | None = None,
+                 route: str = "grammar", require_baseline: bool = False) -> dict[str, Any]:
+    outcomes = evaluate(grammar, rows, decide)
     unaddressed = set(grammar.backtest.get("unaddressed") or {})
     splits: dict[str, dict[str, Any]] = {}
     for source in ("real", "synthetic", "all"):
@@ -308,6 +352,7 @@ def build_report(grammar: Grammar, rows: list[Row], manifest: list[dict[str, Any
         "schema": REPORT_SCHEMA,
         "split": {"version": SPLIT_VERSION, "holdout_percent": holdout_percent(grammar)},
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "route": route,
         "grammar": {"sha256": grammar.sha256, "intents": len(grammar.intents),
                     "patterns": sum(len(i.patterns) for i in grammar.intents)},
         "corpus": manifest,
@@ -316,7 +361,7 @@ def build_report(grammar: Grammar, rows: list[Row], manifest: list[dict[str, Any
         "per_intent": per_intent(outcomes),
         "dev_misses": misses,
         "holdout_misses": holdout_misses,
-        "rows": {o.row.id: {"outcome": o.outcome, "split": o.row.split, "source": o.row.source,
+        "rows": {o.row.id: {"outcome": o.outcome, "split": o.row.split, "source": o.row.source, "truth": o.row.truth,
                             "intent": o.decision.intent if o.decision else None,
                             "addressed": o.row.truth not in unaddressed,
                             "completed": o.outcome == "correct" and o.decision.tier in COMPLETING_TIERS}
@@ -324,6 +369,10 @@ def build_report(grammar: Grammar, rows: list[Row], manifest: list[dict[str, Any
         "self_check_failures": grammar.self_check(),
     }
     report["compare"] = compare(report, previous)
+    report["baseline"] = {"required": require_baseline, "usable": report["compare"] is not None
+                          and not report["compare"].get("incompatible")}
+    report["goal"] = goal_status(report, grammar)
+    report["legacy_floor"] = legacy_floor_status(report, grammar)
     report["gate"] = check_gate(report, grammar)
     return report
 
@@ -335,25 +384,50 @@ def _rates(rows: list[dict[str, Any]]) -> dict[str, float | None]:
             "completed_rate": _pct(sum(row["completed"] for row in addressed), len(addressed))}
 
 
-def compare(current: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Regressions against an earlier report: rows that were good and are not, and the headline deltas.
+# How bad an outcome is, for the per-row ratchet: a row may get better, never worse. Answering a row wrongly is worse than
+# missing it, and missing it is worse than handling it; turning a wrong answer into an abstention is an improvement.
+_BAD_OUTCOMES = frozenset(("wrong", "overreach", "false_trigger"))
 
-    Both are computed over the rows present in BOTH reports (and on the same side of the split), so adding unhandled
-    rows can never fail the gate and removing rows can never hide a drop. A previous report of another schema has no
-    comparable rows: there is nothing to compare with."""
-    if not previous or previous.get("schema") != REPORT_SCHEMA or "rows" not in previous:
+
+def _rank(outcome: str) -> int:
+    if outcome in GOOD_OUTCOMES:
+        return 2
+    return 0 if outcome in _BAD_OUTCOMES else 1
+
+
+def compare(current: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The per-row ratchet against an earlier report, over the rows present in BOTH (same id, same label, same split side).
+
+    `regressed`: rows whose outcome got worse (handled -> missed/wrong, missed -> wrong). Nothing is sampled: the same phrases
+    meet the same deterministic engine, so any worsening is a real change and no tolerance applies. New rows only add to
+    n. `lost_rows` (a baseline row gone from the corpus) and `relabelled` (same row, other label) are reported because
+    deleting or relabelling a row would otherwise hide a regression; they fail the gate. A previous report of another
+    schema, route or split definition cannot be compared: `incompatible` says why (a rebaseline is then an explicit act)."""
+    if not previous:
         return None
-    regressed, fixed = [], []
+    if previous.get("schema") != REPORT_SCHEMA or "rows" not in previous:
+        return {"incompatible": "the previous report has another schema", "previous_grammar": None, "regressed": [],
+                "fixed": 0, "lost_rows": {}, "relabelled": [], "deltas": {}}
+    problems = [what for what, same in (("route", previous.get("route") == current.get("route")),
+                                        ("split definition", previous.get("split") == current.get("split"))) if not same]
+    if problems:
+        return {"incompatible": "the previous report differs in " + " and ".join(problems),
+                "previous_grammar": (previous.get("grammar") or {}).get("sha256"), "regressed": [], "fixed": 0,
+                "lost_rows": {}, "relabelled": [], "deltas": {}}
+    regressed, fixed, relabelled = [], [], []
     shared: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     for row_id, now in current["rows"].items():
         before = previous["rows"].get(row_id)
         if before is None:
             continue
+        if before.get("truth") is not None and before["truth"] != now["truth"]:
+            relabelled.append(row_id)
+            continue
         shared.append((row_id, now, before))
-        was, is_ = before["outcome"] in GOOD_OUTCOMES, now["outcome"] in GOOD_OUTCOMES
-        if was and not is_:
+        was, is_ = _rank(before["outcome"]), _rank(now["outcome"])
+        if is_ < was:
             regressed.append({"id": row_id, "split": now["split"], "from": before["outcome"], "to": now["outcome"]})
-        elif is_ and not was:
+        elif is_ > was:
             fixed.append(row_id)
     deltas: dict[str, Any] = {}
     for name in current["splits"]:
@@ -365,8 +439,12 @@ def compare(current: dict[str, Any], previous: dict[str, Any] | None) -> dict[st
         now_rates = _rates([now for now, _ in chosen])
         before_rates = _rates([before for _, before in chosen])
         deltas[name] = {"rows": len(chosen), **{key: _delta(now_rates[key], before_rates[key]) for key in now_rates}}
+    lost: dict[str, int] = {}
+    for row_id, before in previous["rows"].items():
+        if row_id not in current["rows"]:
+            lost[before["source"]] = lost.get(before["source"], 0) + 1
     return {"previous_grammar": (previous.get("grammar") or {}).get("sha256"), "regressed": regressed,
-            "fixed": len(fixed), "deltas": deltas}
+            "fixed": len(fixed), "lost_rows": lost, "relabelled": relabelled, "deltas": deltas}
 
 
 def _delta(now: float | None, before: float | None) -> float | None:
@@ -398,38 +476,131 @@ def check_gate(report: dict[str, Any], grammar: Grammar) -> dict[str, Any]:
             failures.append(f"{name}: coverage {split['coverage']} < {minimum}")
     if report["self_check_failures"]:
         failures.append(f"{len(report['self_check_failures'])} pinned examples/negatives fail")
+    failures.extend(_safety_failures(grammar, rules.get("safety") or {}))
+    failures.extend(_holdout_failures(report, rules.get("holdout") or {}))
     compare_ = report.get("compare")
+    baseline = report.get("baseline") or {}
+    if baseline.get("required") and compare_ is None:
+        failures.append("no baseline: the first run needs an explicit --init-baseline REASON, a missing latest.json is not a pass")
     if compare_:
+        if compare_.get("incompatible"):
+            failures.append(f"baseline unusable: {compare_['incompatible']} (rebaseline explicitly, never by deleting latest.json)")
         if compare_["regressed"]:
-            failures.append(f"{len(compare_['regressed'])} previously handled rows regressed")
-        holdout = (compare_["deltas"].get("all/holdout") or {}).get("coverage")
-        if holdout is not None and holdout < 0:
-            failures.append(f"held-out coverage dropped by {-holdout:.4f}")
+            failures.append(f"{len(compare_['regressed'])} rows got worse than in the previous report")
+        if compare_["lost_rows"]:
+            failures.append(f"{sum(compare_['lost_rows'].values())} rows of the previous report are gone from the corpus (rows are only added)")
+        if compare_["relabelled"]:
+            failures.append(f"{len(compare_['relabelled'])} rows changed their label since the previous report (relabelling needs an explicit rebaseline)")
     return {"ok": not failures, "failures": failures}
+
+
+def _safety_failures(grammar: Grammar, rule: dict[str, Any]) -> list[str]:
+    """Phrases that must always be read as the emergency intent: independent of the corpus, of coverage and of every other rule."""
+    if not rule:
+        return []
+    wanted = rule["intent"]
+    failures = []
+    for phrase in rule["phrases"]:
+        decision = grammar.decide(phrase, min_priority=0)
+        if decision is None or decision.intent != wanted:
+            failures.append(f"SAFETY: «{phrase}» reads as {decision.intent if decision else 'nothing'}, not {wanted}")
+    return failures
+
+
+def _holdout_failures(report: dict[str, Any], rule: dict[str, Any]) -> list[str]:
+    """Absolute checks on the held-out split, which is tiny (tens of rows) and so is NOT gated by a hand-picked number at today's n.
+
+    The held-out regression gate is the per-row ratchet of `compare` (a row of the previous report may not get worse), applied to
+    every split. On top of it, with enough addressed rows: from `ci_min_addressed` rows the split fails when the whole 95 % Wilson
+    interval of coverage or correctness lies below the floor (the rate is clearly under it, one phrase cannot flip that);
+    from `floor_min_addressed` rows the point floor applies too. Duplicate phrases hold identical outcomes, so n counts rows
+    the corpus loader already de-duplicates by id."""
+    failures: list[str] = []
+    floor = rule.get("floor") or {}
+    for name in rule.get("splits") or []:
+        split = report["splits"].get(name)
+        if split is None or split["coverage"] is None:
+            failures.append(f"{name}: no addressed rows (the held-out checks need a held-out split)")
+            continue
+        for key, label, count in (("coverage", "coverage", split["answered_without_llm"]), ("correct_rate", "correct", split["correct"])):
+            minimum = floor.get(label)
+            if minimum is None:
+                continue
+            if split["addressed"] >= rule.get("ci_min_addressed", 10 ** 9):
+                low, high = _wilson(count, split["addressed"])
+                if high < minimum:
+                    failures.append(f"{name}: {label} {split[key]} is clearly below {minimum} (95% interval {low}-{high}, {split['addressed']} addressed rows)")
+            if split["addressed"] >= rule.get("floor_min_addressed", 10 ** 9) and split[key] < minimum:
+                failures.append(f"{name}: {label} {split[key]} < {minimum} ({split['addressed']} addressed rows)")
+    return failures
+
+
+def legacy_floor_status(report: dict[str, Any], grammar: Grammar) -> dict[str, Any] | None:
+    """The superseded absolute held-out floor, kept visible so a green gate can never be read as that floor being met."""
+    legacy = ((grammar.gate or {}).get("holdout") or {}).get("legacy_floor")
+    split = report["splits"].get(legacy["split"]) if legacy else None
+    if not legacy or split is None or split["coverage"] is None:
+        return None
+    return {"split": legacy["split"], "floor": legacy["coverage"], "coverage": split["coverage"], "met": split["coverage"] >= legacy["coverage"],
+            "addressed": split["addressed"]}
+
+
+def _wilson(part: int, whole: int, z: float = 1.96) -> tuple[float, float] | None:
+    if not whole:
+        return None
+    p = part / whole
+    denom = 1 + z * z / whole
+    centre = (p + z * z / (2 * whole)) / denom
+    half = z * math.sqrt(p * (1 - p) / whole + z * z / (4 * whole * whole)) / denom
+    return round(centre - half, 4), round(centre + half, 4)
+
+
+def goal_status(report: dict[str, Any], grammar: Grammar) -> dict[str, Any] | None:
+    """The product target (`gate.goal`: split, coverage, correct) as a tracked number with its Wilson interval and the
+    gap, on the whole split and on its held-out part. Reported, never gated: n is too small to gate a target on."""
+    goal = (grammar.gate or {}).get("goal")
+    if not goal:
+        return None
+    status: dict[str, Any] = {"split": goal["split"], "target": {k: goal[k] for k in ("coverage", "correct") if k in goal}}
+    for label, name in (("all", goal["split"]), ("holdout", goal["split"].split("/")[0] + "/holdout")):
+        split = report["splits"].get(name)
+        if split is None or not split["addressed"]:
+            continue
+        entry: dict[str, Any] = {"addressed": split["addressed"]}
+        for key, field_name, count in (("coverage", "coverage", split["answered_without_llm"]), ("correct", "correct_rate", split["correct"])):
+            if key in status["target"]:
+                entry[key] = {"value": split[field_name], "ci95": _wilson(count, split["addressed"]),
+                              "gap": round(status["target"][key] - split[field_name], 4), "met": split[field_name] >= status["target"][key]}
+        status[label] = entry
+    return status
 
 
 # ── persistence ─────────────────────────────────────────────────────────────
 
-def reports_dir(corpus: Path) -> Path:
-    return corpus / "reports"
+ENV_REPORT_DIR = "AISIS_INTENT_REPORT_DIR"
 
 
-def archive_path(corpus: Path) -> Path:
+def reports_dir() -> Path:
+    """Reports stay out of the corpus directory: deploy.sh copies that whole directory into the quasar containers."""
+    return Path(os.environ.get(ENV_REPORT_DIR) or "~/.local/share/aisis/intent-reports").expanduser()
+
+
+def archive_path() -> Path:
     """A report name no other run can share: the clock in nanoseconds and the process id, not just the second."""
-    return reports_dir(corpus) / f"backtest-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns()}-{os.getpid()}.json"
+    return reports_dir() / f"backtest-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns()}-{os.getpid()}.json"
 
 
-def load_previous(path: Path | None, corpus: Path) -> dict[str, Any] | None:
-    candidate = path or reports_dir(corpus) / "latest.json"
+def load_previous(path: Path | None) -> dict[str, Any] | None:
+    candidate = path or reports_dir() / "latest.json"
     if not candidate.exists():
         return None
     return json.loads(candidate.read_text(encoding="utf-8"))
 
 
 @contextlib.contextmanager
-def baseline_lock(corpus: Path) -> Iterator[None]:
+def baseline_lock() -> Iterator[None]:
     """Serialises «read the baseline, compare, promote» between concurrent back-tests (advisory lock on the folder)."""
-    directory = reports_dir(corpus)
+    directory = reports_dir()
     directory.mkdir(parents=True, exist_ok=True)
     with open(directory / ".lock", "a", encoding="utf-8") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
@@ -476,7 +647,12 @@ def summary_lines(report: dict[str, Any]) -> list[str]:
                      f"p95={split['latency_us']['p95']}us")
     if report.get("compare"):
         compare_ = report["compare"]
-        lines.append(f"vs previous: {len(compare_['regressed'])} regressed, {compare_['fixed']} fixed")
+        lines.append(f"vs previous: {len(compare_['regressed'])} worse, {compare_['fixed']} better, "
+                     f"{sum(compare_['lost_rows'].values())} lost, {len(compare_['relabelled'])} relabelled")
+    legacy = report.get("legacy_floor")
+    if legacy:
+        lines.append(f"legacy absolute floor {legacy['split']} coverage >= {legacy['floor']}: {legacy['coverage']} on {legacy['addressed']} addressed rows, "
+                     f"{'met' if legacy['met'] else 'NOT met (superseded by the per-row ratchet, shown so green is not read as met)'}")
     lines.append("gate: " + ("ok" if report["gate"]["ok"] else "FAIL " + "; ".join(report["gate"]["failures"])))
     return lines
 

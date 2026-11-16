@@ -219,3 +219,13 @@ finished. Resolve that ownership through the normal session/lease coordination
 before removing or replacing the marker. A recognized abandoned v1 marker can be
 reclaimed only after acquiring the process lock. There is no implicit force or
 foreign-owner override.
+
+## Grammar route: answers without a model
+
+A declarative grammar (`code/intent_grammar/`, README there) decides what the speaker says without calling a model: canned wake,
+greeting, thanks and refusal lines, «Не расслышал. Повтори, пожалуйста.» for garbled short phrases, the clock and date, timers and
+alarms, negation («не включай свет» does nothing), relative volume, AC mode and setpoint in words, light colour. The adapter runs it
+before calc, the skills and the brain (`intent_route.py`); the quasar overlay `overlays/intent-grammar/` asks it first through
+`/intent/decide`. Measurements, switches (`AISIS_INTENT_GRAMMAR`, `GRAMMAR_HOOK`), risks and the owner's steps:
+`docs/research/intent-grammar-rollout-2026-11.md`. Back-test the labelled corpora with
+`cd code && python3 -m intent_grammar backtest --route combined --gate`.
