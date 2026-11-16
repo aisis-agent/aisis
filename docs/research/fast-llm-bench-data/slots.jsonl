@@ -1,0 +1,47 @@
+{"id": "S01", "text": "Какая погода завтра в Белграде?", "gold": {"intent": "weather", "city": "Белград", "day": "tomorrow", "room": null, "device": null, "value": null}}
+{"id": "S02", "text": "Погода в Москве на сегодня", "gold": {"intent": "weather", "city": "Москва", "day": "today", "room": null, "device": null, "value": null}}
+{"id": "S03", "text": "Что с погодой в Париже послезавтра", "gold": {"intent": "weather", "city": "Париж", "day": "day_after_tomorrow", "room": null, "device": null, "value": null}}
+{"id": "S04", "text": "Будет ли дождь в субботу в Нови-Саде", "gold": {"intent": "weather", "city": "Нови-Сад", "day": "saturday", "room": null, "device": null, "value": null}}
+{"id": "S05", "text": "Какая погода?", "gold": {"intent": "weather", "city": null, "day": null, "room": null, "device": null, "value": null}}
+{"id": "S06", "text": "Сколько градусов на улице сейчас", "gold": {"intent": "weather", "city": null, "day": "today", "room": null, "device": null, "value": null}}
+{"id": "S07", "text": "Холодно ли будет в Берлине в понедельник", "gold": {"intent": "weather", "city": "Берлин", "day": "monday", "room": null, "device": null, "value": null}}
+{"id": "S08", "text": "Погода в Санкт-Петербурге завтра утром", "gold": {"intent": "weather", "city": "Санкт-Петербург", "day": "tomorrow", "room": null, "device": null, "value": null}}
+{"id": "S09", "text": "Расскажи про погоду в Тбилиси", "gold": {"intent": "weather", "city": "Тбилиси", "day": null, "room": null, "device": null, "value": null}}
+{"id": "S10", "text": "Какая температура будет в среду в Стамбуле", "gold": {"intent": "weather", "city": "Стамбул", "day": "wednesday", "room": null, "device": null, "value": null}}
+{"id": "S11", "text": "Нужен ли зонт сегодня в Лондоне", "gold": {"intent": "weather", "city": "Лондон", "day": "today", "room": null, "device": null, "value": null}}
+{"id": "S12", "text": "Погода на выходные в Вене", "gold": {"intent": "weather", "city": "Вена", "day": "weekend", "room": null, "device": null, "value": null}}
+{"id": "S13", "text": "Пагода завтра в Белграде", "gold": {"intent": "weather", "city": "Белград", "day": "tomorrow", "room": null, "device": null, "value": null}}
+{"id": "S14", "text": "Какая погода в Нью-Йорке через два дня", "gold": {"intent": "weather", "city": "Нью-Йорк", "day": "day_after_tomorrow", "room": null, "device": null, "value": null}}
+{"id": "S15", "text": "Включи свет на кухне", "gold": {"intent": "home", "city": null, "day": null, "room": "кухня", "device": "свет", "value": "on"}}
+{"id": "S16", "text": "Выключи свет в спальне", "gold": {"intent": "home", "city": null, "day": null, "room": "спальня", "device": "свет", "value": "off"}}
+{"id": "S17", "text": "Выключи телевизор в гостиной", "gold": {"intent": "home", "city": null, "day": null, "room": "гостиная", "device": "телевизор", "value": "off"}}
+{"id": "S18", "text": "Включи кондиционер в спальне на двадцать два градуса", "gold": {"intent": "home", "city": null, "day": null, "room": "спальня", "device": "кондиционер", "value": "22"}}
+{"id": "S19", "text": "Поставь кондиционер в гостиной на двадцать шесть", "gold": {"intent": "home", "city": null, "day": null, "room": "гостиная", "device": "кондиционер", "value": "26"}}
+{"id": "S20", "text": "Включи вентилятор в студии", "gold": {"intent": "home", "city": null, "day": null, "room": "студия", "device": "вентилятор", "value": "on"}}
+{"id": "S21", "text": "Закрой шторы в спальне", "gold": {"intent": "home", "city": null, "day": null, "room": "спальня", "device": "шторы", "value": "close"}}
+{"id": "S22", "text": "Открой шторы в гостиной", "gold": {"intent": "home", "city": null, "day": null, "room": "гостиная", "device": "шторы", "value": "open"}}
+{"id": "S23", "text": "Запусти пылесос", "gold": {"intent": "home", "city": null, "day": null, "room": null, "device": "пылесос", "value": "on"}}
+{"id": "S24", "text": "Выключи пылесос", "gold": {"intent": "home", "city": null, "day": null, "room": null, "device": "пылесос", "value": "off"}}
+{"id": "S25", "text": "Включи свет", "gold": {"intent": "home", "city": null, "day": null, "room": null, "device": "свет", "value": "on"}}
+{"id": "S26", "text": "Поставь яркость света на кухне на тридцать процентов", "gold": {"intent": "home", "city": null, "day": null, "room": "кухня", "device": "свет", "value": "30"}}
+{"id": "S27", "text": "Включи увлажнитель на втором этаже", "gold": {"intent": "home", "city": null, "day": null, "room": "второй этаж", "device": "увлажнитель", "value": "on"}}
+{"id": "S28", "text": "Выключи свет на втором этаже", "gold": {"intent": "home", "city": null, "day": null, "room": "второй этаж", "device": "свет", "value": "off"}}
+{"id": "S29", "text": "Включи телевизор", "gold": {"intent": "home", "city": null, "day": null, "room": null, "device": "телевизор", "value": "on"}}
+{"id": "S30", "text": "Выключи кондиционер на кухне", "gold": {"intent": "home", "city": null, "day": null, "room": "кухня", "device": "кондиционер", "value": "off"}}
+{"id": "S31", "text": "Включи ночник в спальне", "gold": {"intent": "home", "city": null, "day": null, "room": "спальня", "device": "ночник", "value": "on"}}
+{"id": "S32", "text": "Выключи лампу в прихожей", "gold": {"intent": "home", "city": null, "day": null, "room": "прихожая", "device": "лампа", "value": "off"}}
+{"id": "S33", "text": "Ключи свет на кухне", "gold": {"intent": "home", "city": null, "day": null, "room": "кухня", "device": "свет", "value": "on"}}
+{"id": "S34", "text": "Включи свет в детской", "gold": {"intent": "home", "city": null, "day": null, "room": "детская", "device": "свет", "value": "on"}}
+{"id": "S35", "text": "Сделай громче", "gold": {"intent": "volume", "city": null, "day": null, "room": null, "device": null, "value": "up"}}
+{"id": "S36", "text": "Поставь громкость на тридцать", "gold": {"intent": "volume", "city": null, "day": null, "room": null, "device": null, "value": "30"}}
+{"id": "S37", "text": "Громкость пятьдесят", "gold": {"intent": "volume", "city": null, "day": null, "room": null, "device": null, "value": "50"}}
+{"id": "S38", "text": "Потише", "gold": {"intent": "volume", "city": null, "day": null, "room": null, "device": null, "value": "down"}}
+{"id": "S39", "text": "Поставь громкость в спальне на двадцать", "gold": {"intent": "volume", "city": null, "day": null, "room": "спальня", "device": null, "value": "20"}}
+{"id": "S40", "text": "Выключи звук", "gold": {"intent": "volume", "city": null, "day": null, "room": null, "device": null, "value": "mute"}}
+{"id": "S41", "text": "Поставь таймер на десять минут", "gold": {"intent": "timer", "city": null, "day": null, "room": null, "device": null, "value": "600"}}
+{"id": "S42", "text": "Таймер на полчаса", "gold": {"intent": "timer", "city": null, "day": null, "room": null, "device": null, "value": "1800"}}
+{"id": "S43", "text": "Разбуди меня в семь утра", "gold": {"intent": "timer", "city": null, "day": null, "room": null, "device": null, "value": "07:00"}}
+{"id": "S44", "text": "Расскажи анекдот", "gold": {"intent": "none", "city": null, "day": null, "room": null, "device": null, "value": null}}
+{"id": "S45", "text": "Привет, как дела?", "gold": {"intent": "none", "city": null, "day": null, "room": null, "device": null, "value": null}}
+{"id": "S46", "text": "Кто президент Франции?", "gold": {"intent": "none", "city": null, "day": null, "room": null, "device": null, "value": null}}
+{"id": "S47", "text": "Сколько будет два плюс два", "gold": {"intent": "none", "city": null, "day": null, "room": null, "device": null, "value": null}}
