@@ -60,7 +60,7 @@ docker run --rm --network none --entrypoint /node_modules/.bin/tsx \
   -v "$OVERLAY/backend/ha-intents.ts:/src/backend/ha-intents.ts:ro" \
   -v "$OVERLAY/backend/asr-correct.ts:/src/backend/asr-correct.ts:ro" \
   -v "$OVERLAY/backend/grammar-hook.ts:/src/backend/grammar-hook.ts:ro" "$IMAGE" /src/backend/check_grammar_hook.mts   # ИТОГ 34/34
-../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar      # base = the active color's image
+../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar-$(date -u +%Y%m%dT%H%M%SZ)      # base = the active color's image; the tag is unique per run
 ```
 
 Nothing here deploys or restarts anything (the quasar deploys belong to the deploy owner). `check_grammar_hook.mts` serves a stub adapter and a
@@ -70,6 +70,12 @@ bad JSON, an unknown and a prototype route name, `GRAMMAR_HOOK=shadow` (not awai
 `off` spelling (`off`, `OFF`, `0`, `false`, `disabled`, empty: no call), the bearer header with and without a token, and that a pending
 clarification («Громкость.» → «семь») is answered before the hook is called (`ИТОГ 34/34`). The adapter must serve `/intent/decide` before the flip: without it the hook fails
 open after 250 ms on every turn (correct, but slower than before).
+
+**Rollout order.** The hook is `on` by default (`GRAMMAR_HOOK` unset = `on`), so the first flip already lets the grammar act on live turns.
+Safe order: (1) the adapter serves `/intent/decide` (curl it with `"shadow": true`), (2) deploy the image, (3) watch the first turns (adapter
+journal, the quasar `Grammar ...` log lines). To observe first, set `GRAMMAR_HOOK=shadow` in `runtime.env` BEFORE the deploy (the container reads it
+once at creation) and switch to `on` with a second recreate of the active color. The 2026-11-17 deploy went straight to `on`; rollback is
+`GRAMMAR_HOOK=off` plus a recreate (see Rollback). Image tags use dashes: docker tags cannot contain `+`.
 
 `compose.bluegreen.yaml` passes `GRAMMAR_HOOK` to the prod colors (`${GRAMMAR_HOOK-on}` from `runtime.env`: only an UNSET variable means `on`, an empty
 `GRAMMAR_HOOK=` is `off`) and sets `off` for stage: `/intent/decide` executes timers on the adapter it reaches, and stage containers share the host
@@ -102,7 +108,7 @@ python3 ../weather-via-cli/prepare_overlay.py --baseline "$BASE/backend/entity-i
 python3 prepare_overlay.py --ha-intents "$OVERLAY/backend/ha-intents.ts" --asr-correct "$BASE/backend/asr-correct.ts" --output-dir "$OVERLAY.intent"
 cp "$OVERLAY.weather/backend/entity-index.ts" "$OVERLAY.intent/backend/asr-correct.ts" "$OVERLAY.intent/backend/grammar-hook.ts" "$OVERLAY/backend/"
 cp "$OVERLAY.intent/backend/ha-intents.ts" "$OVERLAY/backend/ha-intents.ts"                      # speaker-room + grammar hook
-../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar+speaker-room+weather
+../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar-speaker-room-weather-$(date -u +%Y%m%dT%H%M%SZ)   # docker tags cannot contain "+"; unique per run: a failed deploy must never overwrite the tag of the running image
 ```
 
 The in-container check passes on the combined `ha-intents.ts` too (`ИТОГ 34/34`, with the speaker-room `speaker-room.ts`
