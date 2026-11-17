@@ -54,7 +54,10 @@ The station is rooted and its Yandex cloud is not reachable, so there is no stoc
 speaker. A heard phrase is tried in this order; the first layer that recognises it answers:
 
 1. quasar fast intents (container): lights, climate, TV, volume, media keys, «включи <исполнитель>»
-   (adapter `/music/play` → Music Assistant → AirPlay on the speaker), current weather from the HA entity;
+   (adapter `/music/play` → Music Assistant → AirPlay on the speaker), outdoor humidity and pressure from HA sensors.
+   Weather and the outdoor temperature are NOT answered here: `overlays/weather-via-cli` makes the entity lookup
+   return "none", so the turn reaches the adapter (before 2026-11-16 the HA weather entity answered «какая погода»
+   with its own template and a humidity percentage, and weather-cli never ran);
 2. adapter `voice_skills.py` (this directory): weather questions of every kind (`weather say --now|--tomorrow|--week|--umbrella|--dress`
    from weather-cli, HA + Open-Meteo) and «включи музыку» with no name (`music_airplay.music_any`: leave what
    plays (also a phone's AirPlay stream) alone, else queue 25 random tracks of the Music Assistant library;
@@ -76,8 +79,12 @@ device in HA (an area set only on the player entity is not read); the registry c
 and `bluegreen/deploy.sh deploy --overlay NEW` ships it; `overlays/speaker-room/run_tests.sh` runs `tests/*.mts` against
 the overlay applied to the active image's sources, in scratch containers with no network.
 
-One-time setup on the host: `ln -s ~/xp/weather-cli/bin/weather ~/.local/bin/weather` (the adapter finds it
-on PATH or in `~/.local/bin` at call time; `AISIS_WEATHER_COMMAND='["/path/weather"]'` overrides). weather-cli
+One-time setup on the host: `scripts/install-weather-cli.sh` (clones weather-cli to `~/xp/weather-cli`, links
+`~/.local/bin/weather`, writes `~/.config/weather-cli/config.json` from `WEATHER_LAT/LON/TZ` when given, otherwise
+weather-cli takes the Home Assistant home zone; idempotent, `--check` reports drift). The adapter finds the CLI
+on PATH or in `~/.local/bin` at call time (no restart); `AISIS_WEATHER_COMMAND='["/path/weather"]'` overrides. A missing
+CLI shows up as `weather_failed reason=weather_cli_not_found` in the adapter log (a failing run as `reason=exit_N` with
+its stderr). Without a place config every answer depends on Home Assistant being up (the home zone is read from it). weather-cli
 reads Home Assistant through `aisis-ha-cli` (`WEATHER_HA_URL`, default `AISIS_HACLI_URL`); ha-cli forwards the
 query string, which `weather.get_forecasts?return_response` needs.
 

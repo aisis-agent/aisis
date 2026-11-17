@@ -31,6 +31,7 @@ WEATHER_FAILED = "Не получилось узнать погоду, попр�
 MUSIC_FAILED = "Не получилось включить музыку."
 MUSIC_UNAVAILABLE = "Музыка сейчас недоступна."
 WEATHER_TIMEOUT_S = 8.0
+DEFAULT_HACLI_URL = "http://127.0.0.1:8795"
 
 _NON_WORD = re.compile(r"[^a-zа-я0-9\s\-]")
 _SPACES = re.compile(r"\s+")
@@ -41,67 +42,186 @@ def _tokens(text: str) -> list[str]:
     return _SPACES.sub(" ", _NON_WORD.sub(" ", text.lower().replace("ё", "е"))).split()
 
 
-def _has(tokens: list[str], stems: tuple[str, ...]) -> bool:
-    return any(token.startswith(stem) for token in tokens for stem in stems)
+def _has(tokens: list[str], stems: tuple[str, ...] = (), words: frozenset[str] = frozenset()) -> bool:
+    """True when a token starts with a stem (inflected weather words) or equals a word (short or ambiguous ones)."""
+    return any(token in words or token.startswith(stems) for token in tokens)
 
 
 # ── weather ──────────────────────────────────────────────────────────────────
 # A weather request is made of weather words ONLY: the whole utterance (minus lead-ins) must come from this
 # vocabulary, so «как погода влияет на здоровье», «погода на Марсе», «где купить зонт», «как одеться на свадьбу» or
-# «прогноз курса доллара» stay with the brain. Same intent grammar as the quasar overlay's weather-parse.ts.
+# «прогноз курса доллара» stay with the brain. The quasar layer hands this adapter only the utterances listed in
+# overlays/weather-via-cli/diverted_phrases.json; test_weather_skills.py proves every one is answered here.
 
 _WEATHER_LEAD_IN = frozenset(("алиса", "а", "ну", "слушай", "скажи", "расскажи", "подскажи", "пожалуйста", "мне",
-                              "нам", "дай", "узнай", "посмотри", "глянь", "можешь", "ка"))
-_OUTDOOR = ("улиц", "снаруж", "двор", "окном")
-_TEMPERATURE = ("градус", "температур")
-_FEELING = ("холодн", "тепл", "жарк", "прохладн")
+                              "нам", "дай", "узнай", "посмотри", "глянь", "можешь", "ка", "покажи", "проверь"))
+# The same places the quasar layer reads as «outside» (OUTDOOR_STEMS): a question it hands over must parse here.
+_OUTDOOR = ("улиц", "уличн", "снаруж", "балкон")
+# «за окном» only: «Что на окне?» is a question about the window sill, not the weather.
+_OUTDOOR_WORDS = frozenset(("двор", "дворе", "окном"))
+# Exact words, not prefixes: a prefix would also accept «погоди», «градусник», «ветеринар», «завтрак», «Грозный»,
+# «Ливны». Prefixes stay only where the stem is unambiguous (дожд, снег, зонт, прогноз, температур, ...).
+_WEATHER_NOUN_WORDS = frozenset(("погода", "погоды", "погоду", "погоде", "погодой"))
+_TEMPERATURE = ("температур",)
+_TEMPERATURE_WORDS = frozenset(("градус", "градуса", "градусов", "градусы", "градусах"))
+_WIND_WORDS = frozenset(("ветер", "ветра", "ветру", "ветром", "ветре"))
+_FEELING = ("холодн", "жарк", "прохладн")
+_FEELING_WORDS = frozenset(("тепло", "тепла", "теплее", "теплей", "теплый", "теплая", "теплое", "теплую", "теплой",
+                            "теплые", "теплых", "теплым", "теплом", "теплому"))
 _UMBRELLA = ("зонт",)
 _DRESS = ("одеть", "одеват", "надеть", "надеват", "одежд")
-_PRECIPITATION = ("дожд", "снег", "гроз", "ливен", "ливн", "град", "метел")
-_PRECIPITATION_VERBS = ("ли", "будет", "идет", "пойдет", "ожидается", "намечается", "собирается")
-_TOMORROW = ("завтра", "завтрашн")
-_WEEKDAYS = ("понедельн", "вторник", "среда", "среду", "среде", "четверг", "пятниц", "суббот", "воскрес")
-_WEEK = ("недел", "выходн", "ближайш", "послезавтра", "дни", "дней") + _WEEKDAYS
-_QUESTION_LEAD = ("что", "как", "какая", "какой", "сколько", "там", "ли", "холодно", "тепло", "жарко")
-# Inflected words (prefix) and small function words (exact) that may appear next to the weather words.
-_WEATHER_STEMS = (_OUTDOOR + _TEMPERATURE + _FEELING + _UMBRELLA + _DRESS + _PRECIPITATION + _PRECIPITATION_VERBS
-                  + _TOMORROW + _WEEK + ("погод", "прогноз", "одет", "одев", "надет", "надев", "белград", "сегодн",
-                                         "дн", "день"))
-_WEATHER_WORDS = frozenset(("какая", "какой", "какое", "каков", "как", "что", "чем", "там", "у", "нас", "на", "в", "во",
-                            "по", "с", "собой", "ли", "будет", "стоит", "лучше", "надо", "нужен", "нужна", "нужно",
-                            "брать", "взять", "понадобится", "пригодится", "выходить", "выйти", "идти", "пойти", "мы",
-                            "сейчас", "сегодня", "опять", "сколько"))
+_PRECIPITATION = ("дожд",)
+_PRECIPITATION_WORDS = frozenset(("снег", "снега", "снегу", "снегом", "снеге", "снегопад", "снегопада", "снегопаду",
+                                  "снегопадом", "снегопаде", "метель", "метели", "метелью", "гроза", "грозы", "грозу", "грозой", "грозе", "град", "града", "градом", "ливень",
+                                  "ливни", "ливня", "ливнем",
+                                  "ливневый", "ливневая", "ливневое", "ливневые", "ливневого", "ливневой", "ливневую",
+                                  "грозовой", "грозовая", "грозовое", "грозовые", "грозового", "грозовую",
+                                  "снежный", "снежная", "снежное", "снежные", "снежного", "снежной", "снежную"))
+# «во дворе», «в дождь», «в снегу», «в какой одежде», «в чём одеться»: words after «в»/«во» that are not places. Exact forms only:
+# «Снегири» and «Дождевка» merely start like weather stems.
+_AFTER_IN_WORDS = _OUTDOOR_WORDS | _PRECIPITATION_WORDS | frozenset(("дождь", "дожде", "дождя", "дождем", "дожди",
+                                                                         "какой", "какую", "каком", "чем"))
+_PRECIPITATION_VERBS = frozenset(("ли", "будет", "идет", "пойдет", "ожидается", "намечается", "собирается"))
+_TOMORROW = ("завтрашн",)
+_TOMORROW_WORDS = frozenset(("завтра",))
+_WEEKDAYS = ("понедельн", "вторник", "четверг", "пятниц", "суббот", "воскрес")
+_WEEK = ("недел", "выходн", "ближайш") + _WEEKDAYS
+_WEEK_WORDS = frozenset(("среда", "среду", "среде", "послезавтра", "дни", "дней"))
+_QUESTION_LEAD = frozenset(("что", "как", "какая", "какой", "какое", "сколько", "там", "ли", "холодно", "тепло",
+                            "жарко"))
+# The home place is Belgrade: «погода завтра в Белграде» is the home forecast. Any other city is not vocabulary,
+# so «погода в Париже» goes to the brain.
+_HOME_CITY_WORDS = frozenset(("белград", "белграде", "белграда", "белграду", "белградом"))
+# Demonstratives in any case: «в эти выходные», «в это воскресенье», «на этой неделе». They are only vocabulary;
+# the day word next to them decides the mode.
+_DEMONSTRATIVES = frozenset(("этой", "эту", "эти", "это", "этот", "этих", "этом", "этим", "следующей", "следующую",
+                             "следующие", "следующий", "следующем"))
+# weather-cli has no hour-of-day mode and answers one day: such qualifiers are not vocabulary (no confident answer to
+# another question), but a weather question with only them in it gets WEATHER_QUALIFIER_HINT, not the brain.
+# «и» is vocabulary («погода и температура», «какая погода и сколько градусов»); it is unsupported only when it
+# joins two different days («сегодня и завтра»), see _joins_two_days.
+_UNSUPPORTED_QUALIFIERS = frozenset(("вечером", "утром", "ночью", "днем"))
+# Inflected words (prefix) that may appear next to the weather words; everything else must match exactly.
+_WEATHER_STEMS = (_OUTDOOR + _TEMPERATURE + _FEELING + _UMBRELLA + _DRESS + _PRECIPITATION + _TOMORROW + _WEEK
+                  + ("прогноз", "одет", "одев", "надет", "надев", "сегодн"))
+_WEATHER_WORDS = (frozenset(("какая", "какой", "какое", "какие", "каков", "какова", "каково", "как", "что", "чем", "там", "у", "нас", "на", "в",
+                             "во", "по", "с", "собой", "стоит", "лучше", "надо", "нужен", "нужна", "нужно", "брать",
+                             "взять", "понадобится", "пригодится", "выходить", "выйти", "идти", "пойти", "мы",
+                             "сейчас", "сегодня", "опять", "же", "и", "о", "об", "обо", "воздуха", "цельсия", "текущая", "текущую", "текущей", "текущее", "текущий", "сколько", "за", "день"))
+                  | _OUTDOOR_WORDS | _WEATHER_NOUN_WORDS | _TEMPERATURE_WORDS | _WIND_WORDS | _FEELING_WORDS
+                  | _PRECIPITATION_WORDS | _PRECIPITATION_VERBS | _TOMORROW_WORDS | _WEEK_WORDS | _HOME_CITY_WORDS
+                  | _DEMONSTRATIVES)
 
 WEATHER_MODES = ("now", "tomorrow", "week", "umbrella", "dress")
+
+
+# «Какая погода? Спасибо.»: the quasar layer judges each sentence alone and hands the weather one over, the adapter then
+# gets the whole utterance. Thanks are not vocabulary the question depends on.
+_CLOSING_WORDS = frozenset(("спасибо", "благодарю"))
+
+
+def _weather_phrase_after_in(rest: list[str]) -> bool:
+    """«в холодную погоду», «в тёплую дождливую погоду», «в холодный день»: weather adjectives, then a weather noun or «день»."""
+    adjectives = _FEELING + ("дождлив", "снежн")
+    index = 0
+    while index < len(rest) and (rest[index] in _FEELING_WORDS or rest[index].startswith(adjectives)):
+        index += 1
+    return 0 < index < len(rest) and (rest[index] in _WEATHER_NOUN_WORDS or rest[index] in ("день", "дня"))
+
+
+def _demonstrative_day(word: str, rest: list[str]) -> bool:
+    """«в эти выходные», «в этот день»: a demonstrative counts only when a day word follows, not «в этой Дождевке»."""
+    return word in _DEMONSTRATIVES and bool(rest) and (rest[0] in _WEEK_WORDS or rest[0] in ("день", "дня")
+                                                       or rest[0].startswith(_WEEK + _TOMORROW))
+
+
+def _names_another_place(tokens: list[str]) -> bool:
+    """«в Снегирях», «во Львове»: a place after «в»/«во» that is not the home city, a day or a demonstrative.
+
+    The whole-utterance vocabulary already refuses most places; this catches the ones that merely start like a
+    weather stem (Снегири, Дождевка).
+    """
+    return any(
+        token in ("в", "во") and not (following in _HOME_CITY_WORDS or following in _AFTER_IN_WORDS
+                                      or _demonstrative_day(following, tokens[index + 2:]) or following in _WEEK_WORDS
+                                      or following.startswith(_WEEK + _TOMORROW)
+                                      or _weather_phrase_after_in(tokens[index + 1:]))
+        for index, (token, following) in enumerate(zip(tokens, tokens[1:])))
+
+
+def _in_vocabulary(tokens: list[str], extra: frozenset[str] = frozenset()) -> bool:
+    words = [token for token in tokens if token not in _WEATHER_LEAD_IN and token not in _CLOSING_WORDS]
+    return bool(words) and not _names_another_place(words) and all(token in _WEATHER_WORDS or token in extra or token.startswith(_WEATHER_STEMS)
+                               for token in words)
+
+
+def _is_next_day(tokens: list[str]) -> bool:
+    """«на следующий день»: tomorrow, said another way."""
+    return any(token.startswith("следующ") and following in ("день", "дня")
+               for token, following in zip(tokens, tokens[1:]))
+
+
+def _joins_two_days(tokens: list[str]) -> bool:
+    """«сегодня и завтра», «завтра и на выходные»: one answer cannot cover both."""
+    days = (_has(tokens, ("сегодн",), frozenset(("сейчас",))),
+            _is_next_day(tokens) or _has(tokens, _TOMORROW, _TOMORROW_WORDS), _has(tokens, _WEEK, _WEEK_WORDS))
+    return "и" in tokens and sum(days) > 1
 
 
 def parse_weather_ask(text: str) -> str | None:
     """Utterance -> weather-cli mode (now|tomorrow|week|umbrella|dress), or None when it is not a weather question."""
     tokens = _tokens(text)
-    if not tokens or len(tokens) > 8:
+    if not tokens or len(tokens) > 10:
         return None
-    words = [token for token in tokens if token not in _WEATHER_LEAD_IN]
-    if not words or not all(token in _WEATHER_WORDS or _has([token], _WEATHER_STEMS) for token in words):
+    if "за" in tokens and "окном" not in tokens:  # «что за зонт», «что за одежда»
         return None
-    time = "week" if _has(tokens, _WEEK) else "tomorrow" if _has(tokens, _TOMORROW) else "now"
-    outdoor = _has(tokens, _OUTDOOR)
+    if not _in_vocabulary(tokens) or _joins_two_days(tokens):
+        return None
+    time = ("week" if _has(tokens, _WEEK, _WEEK_WORDS) else "tomorrow" if _is_next_day(tokens) or _has(tokens, _TOMORROW, _TOMORROW_WORDS)
+            else "now")
+    outdoor = _has(tokens, _OUTDOOR, _OUTDOOR_WORDS)
     if _has(tokens, _DRESS):
         return "dress"
     if _has(tokens, _UMBRELLA):
         return "umbrella" if time == "now" else time
-    if _has(tokens, ("погод", "прогноз")):
+    if _has(tokens, ("прогноз",), _WEATHER_NOUN_WORDS):
         return time
-    if _has(tokens, _PRECIPITATION) and _has(tokens, _PRECIPITATION_VERBS):
+    # «будет ли дождь», «дождь идёт?», «на улице дождь», «там дождь?»
+    if (_has(tokens, _PRECIPITATION, _PRECIPITATION_WORDS)
+            and (_has(tokens, words=_PRECIPITATION_VERBS) or outdoor or "там" in tokens)):
         return "umbrella" if time == "now" else time
-    # «какая температура завтра», «сколько градусов на улице»: a temperature asked about outdoors or a later day.
-    if _has(tokens, _TEMPERATURE) and (outdoor or time != "now"):
+    # «сколько градусов», «какая температура завтра»: a temperature with no room or device word in the utterance
+    # (the whole-utterance vocabulary above keeps «температура в комнате» out) is the temperature outside.
+    if _has(tokens, _TEMPERATURE, _TEMPERATURE_WORDS):
+        return time
+    # «какой ветер на улице»
+    if _has(tokens, words=_WIND_WORDS) and outdoor:
         return time
     # «что на улице», «как там на улице», «холодно ли на улице»
-    if outdoor and _has(tokens, _QUESTION_LEAD):
+    if outdoor and _has(tokens, words=_QUESTION_LEAD):
         return time
-    if _has(tokens, _FEELING) and outdoor:
+    if _has(tokens, _FEELING, _FEELING_WORDS) and outdoor:
         return time
     return None
+
+
+WEATHER_QUALIFIER_HINT = "Так не умею. Могу сказать погоду сейчас, на завтра или на неделю."
+
+
+def is_unsupported_weather_qualifier(text: str) -> bool:
+    """A weather question that is weather vocabulary plus only a qualifier weather-cli cannot answer («вечером», «и»).
+
+    Needs an explicit weather noun, rain, umbrella or outdoor word, so bare «какая температура утром» is not caught
+    (the quasar indoor handler may own it). Such a turn must not reach the brain: it would answer «переспроси».
+    """
+    tokens = _tokens(text)
+    if not tokens or len(tokens) > 10:
+        return False
+    if not _joins_two_days(tokens) and not any(token in _UNSUPPORTED_QUALIFIERS for token in tokens):
+        return False
+    if not _in_vocabulary(tokens, _UNSUPPORTED_QUALIFIERS):
+        return False
+    return _has(tokens, ("прогноз", "дожд", "зонт") + _OUTDOOR, _WEATHER_NOUN_WORDS | _OUTDOOR_WORDS | _PRECIPITATION_WORDS)
 
 
 # ── music without a name ─────────────────────────────────────────────────────
@@ -133,14 +253,17 @@ def is_generic_music_request(text: str) -> bool:
 
 # ── runners ──────────────────────────────────────────────────────────────────
 
-def _configured_weather_command(env: dict[str, str]) -> list[str] | None:
-    """AISIS_WEATHER_COMMAND as a JSON argv array; None when unset."""
+def configured_weather_command(env: dict[str, str]) -> list[str] | None:
+    """AISIS_WEATHER_COMMAND as a JSON argv array; None when unset. An argument with a NUL cannot be passed to a
+    process, so it is refused here, not at the first question."""
     configured = env.get("AISIS_WEATHER_COMMAND", "").strip()
     if not configured:
         return None
     argv = json.loads(configured)
     if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
         raise ValueError("AISIS_WEATHER_COMMAND must be a JSON argv array")
+    if any("\0" in item for item in argv):
+        raise ValueError("AISIS_WEATHER_COMMAND arguments must not contain NUL")
     return argv
 
 
@@ -150,10 +273,15 @@ _WEATHER_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "XDG_CONFIG_HOME", "XDG_C
 _WEATHER_ENV_PREFIX = "WEATHER_"
 
 
-def _weather_child_env(env: dict[str, str]) -> dict[str, str]:
+def weather_child_env(env: dict[str, str], ha_url: str) -> dict[str, str]:
+    """The environment weather-cli runs in: the allowlist above, PATH extended with ~/.local/bin, and the ha-cli
+    proxy as its Home Assistant (the real token stays in ha-cli). `scripts/install-weather-cli.sh --check` runs the
+    command under this exact environment."""
     child = {key: value for key, value in env.items() if key in _WEATHER_ENV_KEYS or key.startswith(_WEATHER_ENV_PREFIX)}
     child.setdefault("HOME", str(Path.home()))
     child["PATH"] = os.pathsep.join((child.get("PATH", os.defpath), str(Path.home() / ".local" / "bin")))
+    child.setdefault("WEATHER_HA_URL", ha_url)
+    child.setdefault("WEATHER_HA_TOKEN", "via-ha-cli")
     return child
 
 
@@ -170,14 +298,16 @@ class Skills:
 
     def __init__(self, env: dict[str, str]):
         self.env = env
-        self.configured_weather_command = _configured_weather_command(env)
+        self.configured_weather_command = configured_weather_command(env)
         # weather-cli reads Home Assistant through the ha-cli proxy (state cache, the real token stays there).
-        self.ha_url = env.get("AISIS_HACLI_URL", "http://127.0.0.1:8795")
+        self.ha_url = env.get("AISIS_HACLI_URL", DEFAULT_HACLI_URL)
 
     async def answer(self, text: str) -> str | None:
         mode = parse_weather_ask(text)
         if mode is not None:
             return await self.weather(mode)
+        if is_unsupported_weather_qualifier(text):
+            return WEATHER_QUALIFIER_HINT
         if is_generic_music_request(text):
             return await self.music()
         return None
@@ -190,13 +320,11 @@ class Skills:
         return [found] if found else None
 
     async def weather(self, mode: str) -> str:
-        env = _weather_child_env(self.env)
+        env = weather_child_env(self.env, self.ha_url)
         command = self.weather_command(env["PATH"])
         if command is None:
-            LOG.warning("weather_failed reason=weather_cli_not_found")
+            LOG.warning("weather_failed reason=weather_cli_not_found hint=run scripts/install-weather-cli.sh")
             return WEATHER_FAILED
-        env.setdefault("WEATHER_HA_URL", self.ha_url)
-        env.setdefault("WEATHER_HA_TOKEN", "via-ha-cli")
         try:
             proc = await asyncio.create_subprocess_exec(*command, "say", f"--{mode}", env=env,
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -217,8 +345,8 @@ class Skills:
             raise
         reply = stdout.decode("utf-8", "replace").strip()
         if proc.returncode or not reply:
-            LOG.warning("weather_failed reason=exit_%s mode=%s err=%s", proc.returncode, mode,
-                        stderr.decode("utf-8", "replace").strip()[:200])
+            err = stderr.decode("utf-8", "replace").strip()
+            LOG.warning("weather_failed reason=exit_%s mode=%s err=%s", proc.returncode, mode, err[:200])
             return WEATHER_FAILED
         LOG.info("weather_answered mode=%s", mode)
         return reply
