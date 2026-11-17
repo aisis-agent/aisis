@@ -229,3 +229,37 @@ before calc, the skills and the brain (`intent_route.py`); the quasar overlay `o
 `/intent/decide`. Measurements, switches (`AISIS_INTENT_GRAMMAR`, `GRAMMAR_HOOK`), risks and the owner's steps:
 `docs/research/intent-grammar-rollout-2026-11.md`. Back-test the labelled corpora with
 `cd code && python3 -m intent_grammar backtest --route combined --gate`.
+
+## Jev: an advisory classifier for the turns that go to the brain
+
+Off by default. Jev (TypeSafe's decision model through the Vercel AI Gateway, `code/jev.py`) is asked only about a turn the
+grammar, the quasar layer, arithmetic and the skills did **not** answer, i.e. one that is about to wait ~2.4 s for the brain. One
+call (~0.25 s warm) answers four typed questions: what the phrase is (`command` nobody implements / `talk` / `garbled` /
+`not_addressed`), the brain tier, the reasoning effort, and the route in the wording FastModelBench measured (deterministic / fast /
+reprompt / escalate). Tier, effort and route are advice that is only logged: the brain has no such knob yet. Where it sits and what it
+measured: `docs/research/jev-usage-2026-11.md`, `docs/research/jev-route-bench-2026-11.md`.
+
+| Setting (adapter environment) | Default | Meaning |
+|---|---|---|
+| `AISIS_JEV` | `off` | `off`: no Jev. `shadow`: decide **concurrently** with the brain and log; never changes or delays a reply. `on`: act per class (below); with both switches off it is `shadow`. |
+| `VERCEL_JEV_KEY` | unset | Gateway key. Without it Jev is not used whatever `AISIS_JEV` says. Never logged. |
+| `AISIS_JEV_REFUSE` | `off` | `on`: a `command` at or above the threshold gets «Этого я пока не умею.» instead of waiting for the brain. |
+| `AISIS_JEV_REPROMPT` | `off` | `on`: a `garbled` at or above the threshold gets «Не расслышал. Повтори, пожалуйста.» (microphone stays open; shares the grammar's one-reprompt-a-minute cooldown, so it needs `AISIS_INTENT_GRAMMAR` not `off`). |
+| `AISIS_JEV_THRESHOLD` | `0.95` | The confidence an answer needs to act; 0.5 to 1.0, anything else falls back to 0.95 and is logged by name. The tier and effort hints degrade to «balanced» / «medium» below it too. |
+| `AISIS_JEV_URL`, `AISIS_JEV_MODEL`, `AISIS_JEV_TIMEOUT` | gateway, `typesafe-ai/jev`, 0.4 s | Endpoint, model, per-call budget (can only be lowered). |
+
+**Emergencies are never Jev's.** A phrase that mentions an emergency stem (скорая, полиция, пожар, помощь, «мне плохо», сердце, дышать,
+тонет, отравился, сознание, врач, 112 …; `jev.is_emergency`) is not sent to Jev in `on` mode and never gets Jev's refusal or reprompt;
+it goes to the brain, as without Jev. The grammar's `refuse.emergency` (priority 1000) answers first whenever the grammar is on; the guard
+is the second, independent line for when it is off or misses. A test keeps the guard's list a superset of the grammar's pinned emergency set.
+
+Journal lines (logger `aisis.yandex`; `turn` is a 10-hex hash of the phrase, the text itself is never logged; `ms` and `cost` (USD) are
+Jev's latency and what the gateway reports; `outcome` is `ok`, `below_threshold` or the failure; `decision` is what the answers read as
+even when below the threshold):
+
+```
+jev_shadow utterance=talk tier=fast effort=none conf=0.97 tier_conf=0.81 effort_conf=0.90 route=escalate route_conf=0.88 decision=jev_talk outcome=ok ms=251 cost=0.0000405 turn=3f9a1c07be guard=none
+```
+
+Rollback: `AISIS_JEV=off` (or drop the key), restart `aisis-station-adapter`; `/healthz` `jev` shows the mode, `acting`, the switches, the
+threshold and the call counters.

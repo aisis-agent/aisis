@@ -186,6 +186,17 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await r.route("st", "голи со спортом")).kind, "reply")      # 70 s later: again
         self.assertEqual((await r.route("other", "голи со спортом")).kind, "reply")   # another station has its own clock
 
+    def test_allow_reprompt_is_the_cooldown_the_grammar_and_jev_share(self):
+        clock = [100.0]
+        r = router(monotonic=lambda: clock[0])
+        self.assertTrue(r.allow_reprompt("st"))        # due: the clock restarts
+        self.assertFalse(r.allow_reprompt("st"))
+        clock[0] += intent_route.REPROMPT_COOLDOWN_S
+        self.assertTrue(r.allow_reprompt("st"))
+        self.assertTrue(r.allow_reprompt("other"))     # per station
+        self.assertEqual(intent_route.REPROMPT_TEXT, "Не расслышал. Повтори, пожалуйста.")
+        self.assertEqual(intent_route.UNSUPPORTED_TEXT, "Этого я пока не умею.")
+
     async def test_a_clarification_answer_is_joined_to_its_question(self):
         timers = FakeTimers()
         clock = [100.0]

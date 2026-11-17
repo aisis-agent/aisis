@@ -36,6 +36,8 @@ LOG = logging.getLogger("aisis.intent")
 BUNDLE = Path(__file__).parent / "intent_grammar" / "grammar" / "ru.json"
 REPROMPT_COOLDOWN_S = 60.0     # a second miss right after «не расслышал» goes to the brain: noise cannot loop the speaker
 TIMERS_OFF = "Таймеры и будильники я пока не умею."
+REPROMPT_TEXT = "Не расслышал. Повтори, пожалуйста."    # what a reprompt says when the decision does not come from a grammar reply (Jev)
+UNSUPPORTED_TEXT = "Этого я пока не умею."              # the plain refusal of a command nobody implements (Jev)
 TIMER_CANCEL_REMINDER_HINT = "Таймеров нет, есть напоминание. Чтобы отменить его, скажи: отмени напоминание."
 
 MONTHS = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря")
@@ -274,7 +276,7 @@ class IntentRouter:
         """Decide and execute one turn; Route("none") hands it on. `via_quasar`: the caller (quasar) runs volume itself."""
         started = time.perf_counter_ns()
         try:
-            decision = self.classify(text, phase, fallback=not self._asked_a_question(station))
+            decision = self.classify(text, phase, fallback=not self.asked_a_question(station))
             joined = self._joined_answer(station, text, phase)
             if joined is not None:
                 decision, text = joined
@@ -304,7 +306,7 @@ class IntentRouter:
             else:
                 self.brain_asked.pop(station, None)
 
-    def _asked_a_question(self, station: str) -> bool:
+    def asked_a_question(self, station: str) -> bool:
         """The brain's last line to this station was a question: a short answer to it («да», «про собак») is the brain's to
         continue, never a catch-all's «не расслышал». The window is long (the brain's text is ready long before it is spoken and a
         long story ends with its question) but bounded: lines answered by the hook or the quasar layer never reach `note_reply`, so
@@ -321,7 +323,7 @@ class IntentRouter:
         if tier == "drop":
             return Route("silent", intent=intent, source="grammar")
         if tier in ("canned", "reprompt", "clarify"):
-            if tier == "reprompt" and not self._reprompt_allowed(station):
+            if tier == "reprompt" and not self.allow_reprompt(station):
                 return NONE
             line = render_reply(decision, self.pick)
             if not line:
@@ -340,7 +342,8 @@ class IntentRouter:
             return Route("reply", TIMERS_OFF, intent=decision.intent, source="grammar")
         return NONE
 
-    def _reprompt_allowed(self, station: str) -> bool:
+    def allow_reprompt(self, station: str) -> bool:
+        """One reprompt a minute per station, shared by the grammar's reprompts and Jev's: True (and the clock restarts) when one is due."""
         now = self.monotonic()
         if now - self.last_reprompt.get(station, float("-inf")) < REPROMPT_COOLDOWN_S:
             return False
