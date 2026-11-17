@@ -1,7 +1,5 @@
-"""voice_skills: weather questions and nameless «включи музыку» are answered before the brain."""
+"""voice_skills: nameless «включи музыку» is answered before the brain (weather: test_weather_skills.py)."""
 import asyncio
-import os
-import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -9,42 +7,6 @@ from unittest import mock
 import music_airplay
 import voice_skills
 from adapter import Adapter
-
-
-class WeatherParseTests(unittest.TestCase):
-    def test_questions_map_to_modes(self):
-        cases = {
-            "Какая погода?": "now",
-            "Алиса, какая погода": "now",
-            "Погода завтра": "tomorrow",
-            "Какая погода будет завтра?": "tomorrow",
-            "Какая погода на неделю": "week",
-            "Что на улице?": "now",
-            "Нужен ли зонт": "umbrella",
-            "Будет ли завтра дождь": "tomorrow",
-            "Как одеться": "dress",
-            "Сколько градусов на улице": "now",
-            "Какая температура завтра": "tomorrow",
-            "Холодно ли на улице": "now",
-            "Какая погода в субботу": "week",
-            "Прогноз на завтра": "tomorrow",
-            "Прогноз погоды": "now",
-            "Расскажи прогноз": "now",
-        }
-        for day in ("понедельник", "вторник", "среду", "четверг", "пятницу", "субботу", "воскресенье"):
-            cases[f"Какая погода в {day}"] = "week"
-        for text, mode in cases.items():
-            with self.subTest(text=text):
-                self.assertEqual(voice_skills.parse_weather_ask(text), mode)
-
-    def test_commands_other_places_and_noise_are_not_weather(self):
-        for text in ("Включи погоду на телевизоре", "Какая погода в Париже", "Включи свет", "Какая температура в комнате",
-                     "Включи музыку", "Расскажи прогноз курса доллара", "Почему идёт дождь", "Какая погода в выходные в Париже",
-                     "Какая погода в среду в Париже", "Какая средняя температура в комнате", "Где купить зонт",
-                     "Как надеть галстук", "Почему погода меняется", "Как починить зонт", "Как одеться на свадьбу",
-                     "Как погода влияет на здоровье", "Расскажи о погоде на Марсе", "Расскажи про дождь в японской поэзии и про то как он влияет на настроение людей", ""):
-            with self.subTest(text=text):
-                self.assertIsNone(voice_skills.parse_weather_ask(text))
 
 
 class MusicParseTests(unittest.TestCase):
@@ -62,90 +24,11 @@ class MusicParseTests(unittest.TestCase):
 
 
 class SkillsRunnerTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-
-    def fake_weather(self, body: str) -> str:
-        path = os.path.join(self.tmp.name, "weather")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("#!/bin/sh\n" + body + "\n")
-        os.chmod(path, stat.S_IRWXU)
-        return path
-
-    def skills(self, weather_body: str | None) -> voice_skills.Skills:
-        env = {"PATH": "/usr/bin:/bin"}
-        if weather_body is not None:
-            env["AISIS_WEATHER_COMMAND"] = '["%s"]' % self.fake_weather(weather_body)
-        return voice_skills.Skills(env)
-
-    def test_weather_runs_the_cli_with_the_mode_and_the_ha_cli_proxy(self):
-        skills = self.skills('echo "$@ $WEATHER_HA_URL"')
-        reply = asyncio.run(skills.answer("Какая погода завтра"))
-        self.assertEqual(reply, "say --tomorrow http://127.0.0.1:8795")
-
-    def test_weather_failure_is_an_honest_sentence(self):
-        self.assertEqual(asyncio.run(self.skills("exit 3").answer("какая погода")), voice_skills.WEATHER_FAILED)
-        self.assertEqual(asyncio.run(self.skills("true").answer("какая погода")), voice_skills.WEATHER_FAILED)
-
-    def test_weather_timeout_kills_the_cli(self):
-        skills = self.skills("sleep 30")
-        with mock.patch.object(voice_skills, "WEATHER_TIMEOUT_S", 0.2):
-            self.assertEqual(asyncio.run(skills.answer("какая погода")), voice_skills.WEATHER_FAILED)
-
-    def test_timeout_survives_a_process_group_that_is_already_gone(self):
-        real_killpg = os.killpg
-
-        def killpg_then_vanish(pgid, sig):
-            real_killpg(pgid, sig)
-            raise ProcessLookupError
-
-        skills = self.skills("sleep 30")
-        with mock.patch.object(voice_skills, "WEATHER_TIMEOUT_S", 0.2), \
-                mock.patch.object(voice_skills.os, "killpg", side_effect=killpg_then_vanish):
-            self.assertEqual(asyncio.run(skills.answer("какая погода")), voice_skills.WEATHER_FAILED)
-
-    def test_cli_gets_a_minimal_environment_without_secrets(self):
-        env = {"PATH": "/usr/bin:/bin", "HOME": self.tmp.name, "LANG": "C.UTF-8",
-               "WEATHER_LAT": "1.5", "AISIS_WEATHER_COMMAND": '["%s"]' % self.fake_weather("env")}
-        secrets = {"ANTHROPIC_API_KEY": "sk-x", "HA_TOKEN": "t1", "HA_URL": "http://ha", "AISIS_CLAUDE_KEY": "k",
-                   "MA_TOKEN": "t2", "GITHUB_TOKEN": "t3"}
-        skills = voice_skills.Skills({**env, **secrets})
-        reply = asyncio.run(skills.answer("какая погода"))
-        child = dict(line.split("=", 1) for line in reply.splitlines() if "=" in line)
-        for name in ("ANTHROPIC_API_KEY", "HA_TOKEN", "HA_URL", "AISIS_CLAUDE_KEY", "MA_TOKEN", "GITHUB_TOKEN",
-                     "AISIS_WEATHER_COMMAND"):
-            self.assertNotIn(name, child)
-        self.assertEqual(child["HOME"], self.tmp.name)
-        self.assertEqual(child["LANG"], "C.UTF-8")
-        self.assertEqual(child["WEATHER_LAT"], "1.5")
-        self.assertEqual(child["WEATHER_HA_URL"], "http://127.0.0.1:8795")
-        self.assertEqual(child["WEATHER_HA_TOKEN"], "via-ha-cli")
-
-    def test_missing_cli_is_an_honest_sentence(self):
-        skills = voice_skills.Skills({"PATH": "/nonexistent"})
-        with mock.patch.object(voice_skills.shutil, "which", return_value=None):
-            self.assertEqual(asyncio.run(skills.answer("какая погода")), voice_skills.WEATHER_FAILED)
-
-    def test_cli_installed_after_start_is_found(self):
-        skills = voice_skills.Skills({"PATH": "/nonexistent"})
-        with mock.patch.object(voice_skills.shutil, "which", return_value=self.fake_weather('echo "ok $@"')):
-            self.assertEqual(asyncio.run(skills.answer("какая погода")), "ok say --now")
-
-    def test_unlaunchable_command_is_an_honest_sentence(self):
-        missing = voice_skills.Skills({"AISIS_WEATHER_COMMAND": '["/nonexistent/weather"]'})
-        self.assertEqual(asyncio.run(missing.answer("какая погода")), voice_skills.WEATHER_FAILED)
-        plain = os.path.join(self.tmp.name, "plain")
-        open(plain, "w").close()  # exists, not executable
-        denied = voice_skills.Skills({"AISIS_WEATHER_COMMAND": '["%s"]' % plain})
-        self.assertEqual(asyncio.run(denied.answer("какая погода")), voice_skills.WEATHER_FAILED)
-
-    def test_bad_command_setting_is_rejected(self):
-        with self.assertRaises(ValueError):
-            voice_skills.Skills({"AISIS_WEATHER_COMMAND": '"weather"'})
+    def skills(self) -> voice_skills.Skills:
+        return voice_skills.Skills({"PATH": "/usr/bin:/bin"})
 
     def test_music_replies_follow_the_engine_result(self):
-        skills = self.skills(None)
+        skills = self.skills()
         results = {
             "playing": ({"ok": True, "action": "already"}, "Музыка уже играет."),
             "play": ({"ok": True, "action": "play", "matched": {"name": "Hero", "artist": "Skillet"}}, "Включаю Hero, Skillet."),
@@ -157,7 +40,8 @@ class SkillsRunnerTests(unittest.TestCase):
                 self.assertEqual(asyncio.run(skills.answer("Включи музыку.")), spoken)
 
     def test_everything_else_is_left_to_the_brain(self):
-        self.assertIsNone(asyncio.run(self.skills(None).answer("Расскажи анекдот")))
+        self.assertIsNone(asyncio.run(self.skills().answer("Расскажи анекдот")))
+
 
 
 class MusicAnyTests(unittest.TestCase):

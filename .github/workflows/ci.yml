@@ -49,6 +49,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends ffmpeg
+      - name: weather-via-cli overlay tests
+        run: python3 -m unittest discover -s services/yandex-station/overlays/weather-via-cli
+      - name: weather skill tests (adapter parser, runner and the quasar hand-over list)
+        working-directory: services/yandex-station/code
+        run: python3 -m unittest test_weather_skills
       - name: cached remote announcement tests
         run: python3 -m unittest discover -s services/yandex-station/code -p "test_*announcement*.py"
       - name: intent grammar tests and committed JSON bundle
