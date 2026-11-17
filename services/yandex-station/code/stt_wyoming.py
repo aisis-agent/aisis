@@ -67,6 +67,14 @@ UNCLEAR_SPEECH = ("weak_filler", "repetition", "too_many_words")
 # listening (the request follows in the same session); at the end of the stream it is the empty final of an unanswered window.
 WAKE_ONLY = "wake_word"
 MAX_HELD = 4   # cuts kept behind a running recognition; a stream of them behind a slow recognizer drops the newest, never grows the heap
+PROBE_RATE = 16000                    # /healthz/asr: half a second of 16-bit mono silence, enough to run a whole transcription
+PROBE_PCM_BYTES = PROBE_RATE
+PROBE_TIMEOUT_S = 4
+# The failures of a probe that prove the recognizer itself is broken: RuntimeError is transcribe()'s own verdict (empty or
+# oversized header, error event, no transcript), ValueError covers a malformed JSON or UTF-8 reply, KeyError/AttributeError/TypeError a
+# JSON reply of the wrong shape, the rest are a connection the recognizer dropped mid-exchange. Timeouts and a refused connection are deliberately not in it (see health_asr).
+RECOGNIZER_BROKEN = (RuntimeError, ValueError, KeyError, AttributeError, TypeError, EOFError,
+                     ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
 
 
 def _fold(text):
@@ -106,13 +114,19 @@ async def read_event(reader):
     return event["type"], data
 
 
+def wyoming_address(uri):
+    """The parsed recognizer address; ValueError for anything but tcp://host:port (a setting, not a recognizer failure)."""
+    address = urlsplit(uri)
+    if address.scheme != "tcp" or not address.hostname or not address.port:
+        raise ValueError("AISIS_WYOMING_URI must be tcp://host:port")
+    return address
+
+
 async def transcribe(uri, pcm, sample_rate, language="ru", timeout=30, profile=None, context=None):
     """One utterance to a Wyoming recognizer. `profile` (the event's `name`) and `context` ({"prompt", "hotwords"})
     are stt-cli `stt serve` extensions: it merges them with that profile's dictionaries. Stock Wyoming servers
     ignore unknown fields, so they are only sent when set."""
-    address = urlsplit(uri)
-    if address.scheme != "tcp" or not address.hostname or not address.port:
-        raise ValueError("AISIS_WYOMING_URI must be tcp://host:port")
+    address = wyoming_address(uri)
     reader, writer = await asyncio.wait_for(asyncio.open_connection(address.hostname, address.port), 5)
     try:
         async def exchange():
@@ -356,6 +370,7 @@ class Endpoint:
 
 
 class STTGateway:
+    SLOTS = 2   # recognitions in flight at once (live utterances; /healthz/asr runs only when none is)
     # How long, after the recognizer returned, enforce mode waits for a slower speaker check before failing open.
     SPEAKER_GRACE = 2.0
     SPEAKER_RETRY_AFTER = 60.0
@@ -372,7 +387,7 @@ class STTGateway:
                 self.env.get("AISIS_HACLI_URL", "http://127.0.0.1:8795"), voice_vocab.library_artists))
             if self.env.get("AISIS_STT_DOMAIN_CONTEXT") == "1" else None)
         self.tv = tv                  # tvpause.TvPause: pause the TV when the station starts listening
-        self.slots = asyncio.Semaphore(2)
+        self.slots = asyncio.Semaphore(self.SLOTS)
         self.verifier = verifier
         self.archive_enabled = archive
         self.pruned_at = 0.0
@@ -557,6 +572,47 @@ class STTGateway:
 
     async def health(self, request):
         return web.json_response({"service": "aisis-wyoming-stt", "configured": bool(self.env.get("AISIS_WYOMING_URI")), "model_downloads": False})
+
+    async def health_asr(self, request):
+        """200 only when the recognizer really transcribed a half second of silence. The tcp port answering (or a Describe)
+        proves nothing: on 2026-11-17 wyoming-whisper kept answering Describe while every transcription died on a full
+        temp directory and the client got an invalid header. aisis-failover restarts the recognizer on a 503 only, and a 503
+        is evidence that the recognizer ANSWERED WRONGLY: it hung up, replied with an empty or malformed header, an error
+        event, or no transcript (RECOGNIZER_BROKEN). Everything that says nothing about a broken recognizer gives no
+        verdict, because a restart cannot fix it and would drop other clients' work (Home Assistant shares the recognizer):
+        504 for a timeout or a refused or unreachable address (slow, contended, starting, or gone: systemd restarts a dead
+        process), 202 while live utterances hold a slot (the probe waits for none, and leaves one slot open while it runs; the
+        recognizer itself may still serialize a live utterance behind its half second of silence),
+        501 when no usable recognizer address is configured. The probe sends the language and profile of live traffic."""
+        uri = self.env.get("AISIS_WYOMING_URI")
+        try:
+            wyoming_address(uri or "")
+        except ValueError:
+            return web.json_response({"error": "bad_uri" if uri else "not_configured"}, status=501)
+        language, extras = self.env.get("AISIS_STT_LANGUAGE", "ru"), self.recognizer_extras()
+        taken = 0
+        while taken < self.SLOTS and not self.slots.locked():   # free slots are taken without yielding: no waiting, no queue jumping
+            await self.slots.acquire()
+            taken += 1
+        if taken < self.SLOTS:
+            for _ in range(taken):
+                self.slots.release()
+            return web.json_response({"skipped": "busy"}, status=202)
+        for _ in range(self.SLOTS - 1):   # idle confirmed; one slot is enough for the probe, the others stay open to live utterances
+            self.slots.release()
+        started = time.monotonic()
+        try:
+            await asyncio.wait_for(self.recognizer(uri, bytes(PROBE_PCM_BYTES), PROBE_RATE, language, timeout=PROBE_TIMEOUT_S, **extras),
+                                   PROBE_TIMEOUT_S + 1)
+        except RECOGNIZER_BROKEN as exc:  # the class name is the diagnosis, never the text
+            LOG.warning("asr_probe_broken class=%s", type(exc).__name__)
+            return web.json_response({"error": type(exc).__name__}, status=503)
+        except Exception as exc:
+            LOG.warning("asr_probe_inconclusive class=%s", type(exc).__name__)
+            return web.json_response({"error": type(exc).__name__}, status=504)
+        finally:
+            self.slots.release()
+        return web.json_response({"ok": True, "seconds": round(time.monotonic() - started, 2)})
 
     async def spotter_clip(self, request):
         """A command the speaker recognised on the device: quasar posts the audio the station uploaded for it (spotter_clips.py)."""
@@ -785,6 +841,7 @@ class STTGateway:
         app.on_startup.append(self.warm_speaker)
         app.router.add_get("/", self.websocket)
         app.router.add_get("/healthz", self.health)
+        app.router.add_get("/healthz/asr", self.health_asr)
         app.router.add_post("/spotter-clip", self.spotter_clip)
         return app
 
