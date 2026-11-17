@@ -276,7 +276,7 @@ class IntentRouter:
         """Decide and execute one turn; Route("none") hands it on. `via_quasar`: the caller (quasar) runs volume itself."""
         started = time.perf_counter_ns()
         try:
-            decision = self.classify(text, phase, fallback=not self._asked_a_question(station))
+            decision = self.classify(text, phase, fallback=not self.asked_a_question(station))
             joined = self._joined_answer(station, text, phase)
             if joined is not None:
                 decision, text = joined
@@ -306,7 +306,7 @@ class IntentRouter:
             else:
                 self.brain_asked.pop(station, None)
 
-    def _asked_a_question(self, station: str) -> bool:
+    def asked_a_question(self, station: str) -> bool:
         """The brain's last line to this station was a question: a short answer to it («да», «про собак») is the brain's to
         continue, never a catch-all's «не расслышал». The window is long (the brain's text is ready long before it is spoken and a
         long story ends with its question) but bounded: lines answered by the hook or the quasar layer never reach `note_reply`, so

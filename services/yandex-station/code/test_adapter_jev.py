@@ -90,6 +90,21 @@ class AdapterJevTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((sent["text"], sent["shouldListen"]), (intent_route.UNSUPPORTED_TEXT, False))
         adapter.turn.assert_not_awaited()
 
+    async def test_a_short_answer_to_a_brain_question_is_not_reprompted_by_jev(self):
+        scripted = Scripted(decision("jev_garbled", "garbled"))
+        adapter = await self.adapter(scripted=scripted)
+        adapter.intents.brain_asked["st1"] = adapter.intents.monotonic()   # the brain's last line to this station was a question
+        self.assertEqual(await self.spoken(adapter, "про собак"), "ответ мозга")
+        adapter.turn.assert_awaited()
+
+    async def test_a_numeric_emergency_number_never_reaches_jev_with_the_grammar_off(self):
+        scripted = Scripted(decision("jev_command_unsupported", "command"))
+        adapter = await self.adapter(scripted=scripted, AISIS_INTENT_GRAMMAR="off")
+        for phrase in ("позвони 194", "набери 192", "позвони 193"):
+            with self.subTest(phrase):
+                self.assertEqual(await self.spoken(adapter, phrase), "ответ мозга")
+        self.assertEqual(scripted.calls, [])   # the guard stopped them before the call
+
     async def test_refusal_and_reprompt_are_separate_switches(self):
         cases = (("on", "off", "jev_command_unsupported", "command", COMMAND_PHRASE, intent_route.UNSUPPORTED_TEXT),
                  ("on", "off", "jev_garbled", "garbled", GARBLED_PHRASE, "ответ мозга"),

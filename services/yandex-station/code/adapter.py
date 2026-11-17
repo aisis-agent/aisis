@@ -579,6 +579,8 @@ class Adapter:
             self.jev_pending.add(task)
             task.add_done_callback(self.jev_pending.discard)
             return None
+        if self.intents is not None and self.intents.asked_a_question(station):
+            return None   # a short answer to the brain's own question is the brain's to continue, as for the grammar's catch-alls
         turn = jev.turn_hash(text)
         if jev.is_emergency(text):
             LOG.info("jev_route outcome=skipped guard=emergency turn=%s", turn)

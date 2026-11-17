@@ -60,6 +60,20 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         got = await JevClient(FakePost((200, reply)), KEY).choose("x", [jev.UTTERANCE, jev.TIER, jev.EFFORT])
         self.assertEqual(got["tier"].confidence, 1.0)
 
+    async def test_a_boolean_confidence_is_malformed(self):
+        for field in ("confidence", "probability"):
+            with self.subTest(field):
+                reply = answers("talk")
+                for answer in reply["answers"]:
+                    if field == "confidence":
+                        answer["confidence"] = True
+                    else:
+                        del answer["confidence"]
+                        for probability in answer["probabilities"]:
+                            probability["probability"] = True
+                with self.assertRaises(JevError):
+                    await JevClient(FakePost((200, reply)), KEY).choose("x", [jev.UTTERANCE, jev.TIER, jev.EFFORT])
+
     async def test_every_failure_is_a_jev_error_without_the_key_or_text(self):
         async def hang():
             await asyncio.sleep(5)

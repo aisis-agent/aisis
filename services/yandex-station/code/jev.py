@@ -144,11 +144,13 @@ def _parse_choices(data: dict[str, Any], questions: list[Choice]) -> dict[str, C
         if answer is None or answer.get("choice") not in question.options:
             raise JevError("malformed answer")
         confidence = answer.get("confidence")
+        if isinstance(confidence, bool):   # JSON true is a bool, which Python calls an int: a malformed answer, not 1.0
+            raise JevError("malformed confidence")
         if not isinstance(confidence, (int, float)):
             probabilities = answer.get("probabilities")
             confidence = next((p.get("probability") for p in probabilities if isinstance(p, dict)
                                and p.get("value") == answer["choice"]), None) if isinstance(probabilities, list) else None
-        if not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
             raise JevError("malformed confidence")
         parsed[question.name] = ChoiceAnswer(answer["choice"], float(confidence))
     return parsed
@@ -367,7 +369,7 @@ _EMERGENCY_PREFIXES = (
     "скор", "полиц", "милиц", "пожар", "помощ", "помогит", "спасит", "спасат", "неотложк", "врач", "доктор", "медик", "больниц",
     "сердц", "сердеч", "дыш", "дыха", "задых", "задох", "задуш", "удуш", "тон", "утон", "отрав", "созна", "обмор", "инсульт",
     "инфаркт", "кров", "умира", "умер", "суицид", "самоубий", "дым", "загор", "горит", "горим", "гарь", "гарью")
-_EMERGENCY_WORDS = frozenset(("плохо", "нехорошо", "худо", "112", "101", "102", "103", "911"))
+_EMERGENCY_WORDS = frozenset(("плохо", "нехорошо", "худо", "112", "101", "102", "103", "911", "192", "193", "194"))
 _EMERGENCY_NUMBERS = re.compile(r"\b(?:сто двенадцать|один один два|ноль (?:один|два|три)|сто девяносто (?:два|три|четыре))\b")
 _TOKEN = re.compile(r"[0-9a-zа-я]+")
 
