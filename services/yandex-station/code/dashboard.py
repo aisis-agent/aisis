@@ -738,11 +738,6 @@ def corpus_run():
     rc, out = sh(["docker", "cp", CORPUS_DIR + "/.", f"{box}:/src/backend/corpus/"], 30)
     if rc != 0:
         return {"ok": False, "err": f"docker cp: {out[:120]}"}
-    runner_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "corpus-runner")
-    for name in ("run_corpus.mts", "expected_kind.mjs"):    # the versioned runner wins over any copy in the private corpus dir
-        rc, out = sh(["docker", "cp", os.path.join(runner_dir, name), f"{box}:/src/backend/corpus/{name}"], 30)
-        if rc != 0:
-            return {"ok": False, "err": f"docker cp {name}: {out[:120]}"}
     rc, out = sh(["docker", "exec", "-e", "AISIS_ADAPTER_INTENT_URL=http://127.0.0.1:9/intent/decide", "-w", "/src/backend/corpus", box,
                   "/node_modules/.bin/tsx", "run_corpus.mts"], 120)
     if rc != 0:

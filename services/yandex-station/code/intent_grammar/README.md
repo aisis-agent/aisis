@@ -145,9 +145,9 @@ turn cannot change the volume (only the overlay's pre-phase hook can), a guessed
 configured is declined. The measurement assumes the full production configuration (timers, Home Assistant actions, skills bound:
 `intent_route.measured_router`); a deployment without `AISIS_TIMER_TTS_ENTITY` / `AISIS_TIMER_PLAYER` answers its timer phrases «не умею» instead.
 
-**The quasar corpus runner (`run_corpus.mts`, the `deploy.sh` pre-flip check and the dashboard's corpus run) is versioned in `services/yandex-station/corpus-runner/`**;
-only the private data (`intents-ru.jsonl`) and the dialog runner stay in the private corpus dir. `deploy.sh` and the dashboard copy the runner and
-`expected_kind.mjs` into the container after the private dir, so the repository's copy wins. Its one exemption for `canned` rows: the quasar layer has no
+**The quasar corpus runner (`run_corpus.mts`, the `deploy.sh` pre-flip check) is versioned in `services/yandex-station/corpus-runner/`**;
+only the private data (`intents-ru.jsonl`) and the dialog runner stay in the private corpus dir. `deploy.sh` copies the runner and
+`expected_kind.mjs` into the container after the private dir (a failed copy fails the check), so the repository's copy wins. (The dashboard's own corpus run uses a separate corpus tree with its own runner and is not covered.) Its one exemption for `canned` rows: the quasar layer has no
 `canned` tier, the adapter's route answers emergency phrases («позвони в полицию», domain `EMERGENCY_REFUSAL`) as `refuse.emergency`, and the runner reaches
 no adapter (closed port), so exactly the `EMERGENCY_REFUSAL` rows are expected to come out as `llm` there. A `canned` row of any other domain is NOT
 exempt and fails the check. The run prints the rule (`правило: canned -> llm только для домена EMERGENCY_REFUSAL (N строк)`); the emergency answer itself is
