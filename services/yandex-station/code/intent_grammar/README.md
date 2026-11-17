@@ -145,6 +145,14 @@ turn cannot change the volume (only the overlay's pre-phase hook can), a guessed
 configured is declined. The measurement assumes the full production configuration (timers, Home Assistant actions, skills bound:
 `intent_route.measured_router`); a deployment without `AISIS_TIMER_TTS_ENTITY` / `AISIS_TIMER_PLAYER` answers its timer phrases «не умею» instead.
 
+**The quasar corpus runner (`run_corpus.mts`, the `deploy.sh` pre-flip check) is not version-controlled here**: it lives in the quasar image's `backend/corpus/`
+with the private corpus. Its rule for `canned` rows (e.g. «позвони в полицию», domain EMERGENCY_REFUSAL): the quasar layer has no canned tier, the adapter's
+route answers them (`refuse.emergency`), and the runner reaches no adapter (closed port), so the row is expected to come out as `llm` there (before the
+overlay the runner showed 465/466 with exactly this row failing). This is NOT a weakened gate: the emergency answer itself is pinned by `gate.safety`
+(26 phrases, one miss fails `backtest --gate` and the nightly run), which is the check that matters. The runner's `canned -> llm` mapping applies to every
+`canned` row, so a future `canned` row that quasar was supposed to answer itself would be hidden: keep `canned` rows limited to adapter-answered classes
+or narrow the mapping to the domain.
+
 Per row the outcome is one of `correct`, `wrong`, `missed` (abstained on something an intent should answer), `overreach` (answered a
 brain-only class), `brain_ok`, `dropped` / `no_action` (unaddressed speech handled), `false_trigger` (unaddressed speech got an answer),
 `leak` (a hallucination fell through to the model). The report (`$AISIS_INTENT_REPORT_DIR`, default `~/.local/share/aisis/intent-reports/`:
