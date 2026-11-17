@@ -58,6 +58,8 @@ jobs:
           python3 -m intent_grammar compile --check
       - name: quasar intent-grammar overlay patch applier tests
         run: python3 -m unittest discover -s services/yandex-station/overlays/intent-grammar -p "test_*.py"
+      - name: quasar corpus runner rule tests (canned -> llm only for the emergency domain)
+        run: node --test services/yandex-station/corpus-runner/*.test.mjs
   whitespace:
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -18,6 +18,7 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 state_dir=${AISIS_BG_STATE:-$HOME/.local/share/aisis/bluegreen-state}
 app_dir=${AISIS_CODE_DIR:-$HOME/xp/aisis/services/yandex-station/code}
 corpus_dir=${AISIS_CORPUS_DIR:-$HOME/.local/share/aisis/corpus}
+runner_dir=$here/../corpus-runner   # the versioned corpus runner; the private corpus_dir only holds the data and dialog runner
 postgres_container=${AISIS_POSTGRES_CONTAINER:-aisis-yandex-postgres-1}
 speaker_wait=${AISIS_SPEAKER_WAIT_S:-90}
 
@@ -101,6 +102,9 @@ corpus_check() {
   # execute timers (with the hook on it fails open). The hook against an adapter is not checked here: see check_grammar_hook.mts.
   local CHECK_ADAPTER_INTENT_URL=http://127.0.0.1:9/intent/decide
   docker cp "$corpus_dir/." "$c:/src/backend/corpus/"
+  # The runner (and its canned->llm rule, emergency domain only) comes from this repository, over any copy in the private dir.
+  docker cp "$runner_dir/run_corpus.mts" "$c:/src/backend/corpus/run_corpus.mts"
+  docker cp "$runner_dir/expected_kind.mjs" "$c:/src/backend/corpus/expected_kind.mjs"
   out=$(docker exec -e AISIS_ADAPTER_INTENT_URL="$CHECK_ADAPTER_INTENT_URL" -w /src/backend/corpus "$c" /node_modules/.bin/tsx run_corpus.mts 2>&1) || true
   line=$(grep -a 'ИТОГ' <<<"$out" || true)
   [[ $line =~ ([0-9]+)/([0-9]+) ]] || { log "corpus on $c: no result line"; return 1; }
