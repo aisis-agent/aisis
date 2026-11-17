@@ -42,6 +42,7 @@ def history(name_end_ms, name_ms=380, gap_ms=None, request_ms=700, total_ms=HIST
         request_start = (name_end_ms + gap_ms) // 20
         request_frames = request_ms // 20
         out[request_start:request_start + request_frames] = burst(request_frames, peak * 0.8)
+    del out[frames:]                                               # a slice assigned past the end would lengthen the stream
     return out
 
 

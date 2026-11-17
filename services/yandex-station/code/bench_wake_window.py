@@ -111,7 +111,7 @@ def decode(path: str) -> bytes:
     return subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f", "s16le", "-ac", "1", "-ar", str(RATE), "-"], capture_output=True, check=True).stdout
 
 
-async def recognise(pcm: bytes, prime: bytes, uri: str) -> str:
+async def recognise(pcm: bytes, prime: bytes, uri: str, lead_voiced_ms: int = 0) -> str:
     """What the gateway's recognition path writes for `pcm`: its Endpoint (VAD primed on `prime`), judge and level front-end, the recognizer."""
     import webrtcvad
 
@@ -125,7 +125,9 @@ async def recognise(pcm: bytes, prime: bytes, uri: str) -> str:
         utterances.extend(endpoint.feed(pcm[offset:offset + FRAME * 2 * 3]))
     tail = endpoint.flush(include_partial=True)
     texts = []
-    for utt in utterances + ([tail] if tail else []):
+    for index, utt in enumerate(utterances + ([tail] if tail else [])):
+        if index == 0 and utt.voiced_ms >= stt_wyoming.LEAD_MIN_OWN_MS:   # what the gateway does: the cut name counts for the first utterance
+            utt = stt_wyoming.replace(utt, lead_voiced_ms=lead_voiced_ms)
         if stt_wyoming.judge(utt, tuning):
             continue
         lifted, _ = stt_wyoming.frontend_for_recognizer(utt.speech_pcm, utt.voiced_rms, tuning)
@@ -164,7 +166,7 @@ def run_sessions(since: str, uri: str, db: str, archive: str) -> int:
         uncut = asyncio.run(recognise(pcm, b"", uri))
         if not uncut:
             continue
-        cut = asyncio.run(recognise(pcm[found.end_ms * RATE // 1000 * 2:], pcm[:found.end_ms * RATE // 1000 * 2], uri)) if found.end_ms is not None else None
+        cut = asyncio.run(recognise(pcm[found.end_ms * RATE // 1000 * 2:], pcm[:found.end_ms * RATE // 1000 * 2], uri, found.voiced_ms)) if found.end_ms is not None else None
         print("%-18s %-6d %-9s %-30s %-30s" % (datetime.datetime.fromtimestamp(session["open"]).strftime("%m-%d %H:%M:%S"), history_ms,
                                                found.end_ms if found.end_ms is not None else found.reason, uncut[:29], "(not cut)" if cut is None else cut[:29]), flush=True)
     return 0
@@ -226,7 +228,7 @@ def run_stress(names: list[str], requests: list[str], uri: str, db: str, archive
                         cut = "not_cut:" + found.reason
                     else:
                         at = found.end_ms * RATE // 1000 * 2
-                        cut = outcome(asyncio.run(recognise(pcm[at:], pcm[:at], uri)), references[request_id])
+                        cut = outcome(asyncio.run(recognise(pcm[at:], pcm[:at], uri, found.voiced_ms)), references[request_id])
                     counts[(uncut, cut)] = counts.get((uncut, cut), 0) + 1
     total = sum(counts.values())
     print("references:", {k[4:15]: v for k, v in references.items()})

@@ -28,6 +28,7 @@ PEAK_UNTIL_MS = 330            # … and no later than this (the request's first
 LAST_PAUSE_MS = 180            # the pause behind the name starts before this mark (the name ends 0.2-0.4 s before the history's end); a later pause is a dip inside the request's first word
 MAX_NAME_MS = 900              # a longer burst is a name with the request run into it
 ALONE_MS = 400                 # the name burst has nothing before it for this long (not the speaker's other words, not the burst's own earlier part)
+NAME_PREROLL_MS = 200          # the speaker check hears the name with the preroll the Endpoint gave an utterance before the cut existed
 CLICK_MS = 120                 # every stream starts with a click this long: it is not speech
 BRIDGE_FRAMES = 5              # a dip this short (100 ms) is inside a word, not a pause: the name's «ма» and «лисан» are one burst
 MIN_PAUSE_FRAMES = 3           # 60 ms of quiet: the shortest pause behind the name in the real sessions is 80 ms
@@ -114,7 +115,7 @@ class Gate:
     def __init__(self, rate: int, enabled: bool = True):
         self.rate = rate
         self.removed: bytes | None = None
-        self.name: bytes = b""     # the part of `removed` that is the name's burst (not the history before it)
+        self.name: bytes = b""     # the name's burst and the preroll before it (not the rest of the history)
         self.located: Located | None = None
         self.history: int | None = None
         self.decided = not enabled
@@ -154,7 +155,7 @@ class Gate:
         cut = self.located.end_ms * self.rate // 1000 * 2
         self.decided = True
         self.removed = bytes(self.held[:cut])
-        self.name = bytes(self.held[self.located.start_ms * self.rate // 1000 * 2:cut])
+        self.name = bytes(self.held[max(0, self.located.start_ms - NAME_PREROLL_MS) * self.rate // 1000 * 2:cut])
         out = bytes(self.held[cut:])
         self.held = bytearray()
         return out

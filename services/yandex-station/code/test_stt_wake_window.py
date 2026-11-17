@@ -49,6 +49,20 @@ class CountingVad(Vad):
         return super().is_speech(frame, rate)
 
 
+class HangoverVad(Vad):
+    """A VAD that, like webrtcvad, keeps calling frames speech for a few frames after the loud ones end."""
+
+    def __init__(self, frames=6):
+        self.frames, self.left = frames, 0
+
+    def is_speech(self, frame, rate):
+        if super().is_speech(frame, rate):
+            self.left = self.frames
+            return True
+        self.left = max(0, self.left - 1)
+        return self.left > 0 or False
+
+
 class Clock:
     def __init__(self):
         self.now = 0.0
@@ -73,6 +87,7 @@ def activation_stream(name_end_ms=2040, gap_ms=140, request_ms=1200, live_ms=200
     if gap_ms is not None:
         onset = (name_end_ms + gap_ms) // 20
         levels[onset:onset + request_ms // 20] = speech(request_ms)
+    del levels[total // 20:]                                  # a slice assigned past the end would lengthen the stream
     return levels
 
 
@@ -132,12 +147,12 @@ class Replay(unittest.TestCase):
                     await ws.send_json({"sample_rate": RATE})
                     head = RATE * 2 * burst_ms // 1000
                     await ws.send_bytes(pcm[:head])
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(0.05)
                     step = RATE * 2 * 200 // 1000
                     for offset in range(head, len(pcm), step):
                         clock.now += 0.2
                         await ws.send_bytes(pcm[offset:offset + step])
-                        await asyncio.sleep(0.02)
+                        await asyncio.sleep(0.05)
                     if finish:
                         await ws.send_json({"type": "finish"})
                     try:
@@ -248,6 +263,16 @@ class Replay(unittest.TestCase):
         self.assertEqual(len(heard), 1)
         self.assertTrue(self.heard_the_name(heard[0]))
         self.assertGreater(len(heard[0]), len(calls[0]))
+
+    def test_the_vad_hangover_right_after_the_cut_does_not_take_the_name_credit_meant_for_the_request(self):
+        """A pause longer than the Endpoint's silence closes the hangover frames as an utterance of their own: it is a blip, the
+        request that follows a second later still counts the name for its length and its speaker check."""
+        self.vad_factory = HangoverVad
+        pcm = squares(activation_stream(request_ms=160, gap_ms=1000, live_ms=3000))
+        messages, calls, rows = self.session(pcm, ["Стоп."])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(messages, [{"text": "Стоп.", "end_of_utt": True}])
+        self.assertEqual([row[:2] for row in rows], [("activation", "wake_window"), ("gate", "short"), ("sent", None)])
 
     def test_the_cut_can_be_switched_off(self):
         pcm = squares(activation_stream())
