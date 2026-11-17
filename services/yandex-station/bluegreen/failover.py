@@ -5,7 +5,7 @@ Every tick (default 1.5 s) it probes, in parallel:
   * the active and the standby quasar color (API /devices 200 + uniproxy port answers),
   * the switch (end to end, through its canonical ports),
   * with --components (prod default): adapter, stt, pm, ha-cli, postgres, tls-voice,
-    dns-relay, kit (sync helper on :18080), lan-proxy, embed sidecar, wyoming tunnel.
+    dns-relay, kit (sync helper on :18080), lan-proxy, embed sidecar, asr (a real transcription of silence).
 
 A quasar color or the switch counts as failed after `--threshold` consecutive failed ticks
 (default 3); other components after `--component-threshold` (default 6).
@@ -60,11 +60,23 @@ class Component:
     container: str | None = None  # container to restart when kind == http|container
     tcp_port: int | None = None  # extra TCP check on the container's published host IP
     every: int = 1  # probe on every Nth tick only (kit: its service logs each probe; others: subprocess cost)
+    timeout: float | None = None  # http probe timeout; None = the watchdog's --http-timeout (asr: a whole transcription)
+    fails_on: int | None = None  # http: 200 = healthy, this status = failed, any other answer (gateway down, 202 busy, 501, route missing) = no verdict
+    background: bool = False  # probe off the tick (a slow probe must not delay the quasar failover decision), result read once done
+    restart_cooldown_s: float | None = None  # minimum gap between two restarts of this component (None = RESTART_COOLDOWN_S)
 
 
 COMPONENTS = (
     Component("adapter", "http", "http://127.0.0.1:31117/healthz", unit="aisis-station-adapter.service"),
     Component("stt", "http", "http://127.0.0.1:31121/healthz", unit="aisis-station-stt.service"),
+    # A real transcription of silence through the gateway (stt_wyoming.py /healthz/asr), roughly once a minute: the
+    # recognizer once kept answering while every transcription died on a full temp directory (2026-11-17).
+    # The recognizer is restarted only on the gateway's explicit 503 (the recognizer answered wrongly); a dead gateway, one
+    # that predates the route, a timeout or a probe skipped for live traffic gives no verdict, and restarting Wyoming (shared with Home
+    # Assistant) could not fix any of those. At most one restart per 10 minutes: a restart cannot fix a full disk or a bad
+    # language setting either, and then the incident alert is what matters, not a model reload every minute.
+    Component("asr", "http", "http://127.0.0.1:31121/healthz/asr", unit="wyoming-whisper.service", every=40, timeout=8.0,
+              fails_on=503, background=True, restart_cooldown_s=600.0),
     Component("pm", "http", "http://127.0.0.1:31118/health", unit="aisis-station-pm.service"),
     Component("ha-cli", "http", "http://127.0.0.1:8795/health", unit="aisis-ha-cli.service"),
     Component("postgres", "container", "aisis-yandex-postgres-1", container="aisis-yandex-postgres-1", every=3),
@@ -102,6 +114,7 @@ class Watchdog:
     trackers: dict[str, Tracker] = field(default_factory=dict)
     ticks: int = 0
     clock: Future | None = None
+    pending: dict[str, Future] = field(default_factory=dict)   # background probes in flight, by component name
     next_clock: float = 0.0
     log_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -127,9 +140,13 @@ class Watchdog:
             self.event("alert_failed", error=str(exc))
 
     # ── probes ───────────────────────────────────────────────────────────
-    def probe_component(self, comp: Component) -> tuple[bool, str]:
+    def probe_component(self, comp: Component) -> tuple[bool | None, str]:
+        """(healthy, detail); healthy None = no verdict this time (the watchdog neither counts nor clears a failure)."""
         if comp.kind == "http":
-            status = smoke.http_status(comp.target, self.http_timeout)
+            status = smoke.http_status(comp.target, comp.timeout or self.http_timeout)
+            if comp.fails_on is not None:
+                verdict = True if status == 200 else False if status == comp.fails_on else None
+                return verdict, f"http {status}"
             return status == 200, f"http {status}"
         if comp.kind == "unit":
             result = subprocess.run(["systemctl", "--user", "is-active", comp.target], capture_output=True, text=True)
@@ -164,9 +181,9 @@ class Watchdog:
         except OSError:
             return False
 
-    def _cooldown_ok(self, key: str) -> bool:
+    def _cooldown_ok(self, key: str, cooldown: float = RESTART_COOLDOWN_S) -> bool:
         tracker = self.trackers[key]
-        if time.time() - tracker.last_action < RESTART_COOLDOWN_S:
+        if time.time() - tracker.last_action < cooldown:
             return False
         tracker.last_action = time.time()
         return True
@@ -184,8 +201,8 @@ class Watchdog:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def restart_unit(self, unit: str, key: str) -> None:
-        if not self._cooldown_ok(key):
+    def restart_unit(self, unit: str, key: str, cooldown: float = RESTART_COOLDOWN_S) -> None:
+        if not self._cooldown_ok(key, cooldown):
             return
 
         def work() -> None:
@@ -234,7 +251,13 @@ class Watchdog:
         }
         if self.components:
             for comp in COMPONENTS:
-                if self.ticks % comp.every == 0:
+                if comp.background:
+                    waiting = self.pending.get(comp.name)
+                    if waiting is None and self.ticks % comp.every == 0:
+                        self.pending[comp.name] = pool.submit(self.probe_component, comp)
+                    elif waiting is not None and waiting.done():
+                        jobs[comp.name] = self.pending.pop(comp.name)
+                elif self.ticks % comp.every == 0:
                     jobs[comp.name] = pool.submit(self.probe_component, comp)
         self.ticks += 1
         if self.components and self.clock is None and time.monotonic() >= self.next_clock:
@@ -268,6 +291,9 @@ class Watchdog:
             if comp.name not in jobs:
                 continue  # not probed this tick: only fresh probes count toward the threshold
             ok, detail = results[comp.name]
+            if ok is None:
+                self.event("probe_no_verdict", target=comp.name, detail=detail)
+                continue
             tracker = self.observe(comp.name, ok, detail)
             # Threshold is in time (component_threshold ticks); slower probes need fewer failures.
             needed = max(1 if comp.every == 1 else 2, -(-self.component_threshold // comp.every))
@@ -275,7 +301,7 @@ class Watchdog:
                 continue
             self.open_incident(comp.name, tracker, f"{comp.name} не отвечает ({detail}), перезапускаю")
             if comp.unit:
-                self.restart_unit(comp.unit, comp.name)
+                self.restart_unit(comp.unit, comp.name, comp.restart_cooldown_s or RESTART_COOLDOWN_S)
             elif comp.container:
                 self.restart_container(comp.container, comp.name)
 

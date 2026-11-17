@@ -60,10 +60,12 @@ jobs:
         working-directory: services/yandex-station/code
         run: |
           python3 -m unittest test_intent_grammar test_intent_route test_timers test_ha_actions test_jev test_adapter_jev test_intent_nightly
-          python3 -m unittest test_utterance_trace test_adapter_trace test_session_pages test_clipfeed_diag test_clipfeed_tg test_wake_word test_stt_wake
+          python3 -m unittest test_utterance_trace test_adapter_trace test_session_pages test_clipfeed_diag test_clipfeed_tg test_wake_word test_stt_wake test_stt_asr_health
           python3 -m intent_grammar compile --check
       - name: quasar intent-grammar overlay patch applier tests
         run: python3 -m unittest discover -s services/yandex-station/overlays/intent-grammar -p "test_*.py"
+      - name: failover watchdog component tests
+        run: python3 -m unittest discover -s services/yandex-station/bluegreen -p "test_*.py"
       - name: quasar corpus runner rule tests (canned -> llm only for the emergency domain)
         run: node --test services/yandex-station/corpus-runner/*.test.mjs
   whitespace:

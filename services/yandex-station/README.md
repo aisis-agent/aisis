@@ -110,6 +110,18 @@ query string, which `weather.get_forecasts?return_response` needs.
   probing adapter/stt/pm/ha-cli/kit/lan-proxy/embed units and the postgres,
   tls-voice, dns-relay containers. A `maintenance` file in
   `~/.local/share/aisis/bluegreen-state/` suspends it during deploys.
+- **Recognizer health**: a port or Describe answer proves nothing about Wyoming (2026-11-17: temp WAV writes hit the `/tmp`
+  tmpfs user quota, every transcription returned an invalid header, Describe stayed green). The STT gateway's
+  `/healthz/asr` transcribes half a second of silence for real with the live language and profile. 503 + error class means the
+  recognizer answered wrongly (hung up, empty or malformed header, error event, no transcript); no verdict: 504 (timeout,
+  refused or unreachable address: slow, contended, starting or gone, which a restart does not fix and which systemd
+  already handles), 202 (live utterances hold a slot), 501 (no usable recognizer address). `aisis-failover` probes it in
+  the background about once a minute (`asr` component) and restarts `wyoming-whisper.service` after two 503s, at most once per 10 minutes (a restart cannot fix a full
+  disk, then the incident alert is what counts); a probe
+  without a verdict (also a dead or older gateway) neither counts nor clears a failure (the `stt` component watches the
+  gateway). Known gap: a recognizer that merely hangs is not restarted by this probe.
+  The recognizer's temp audio lives in `~/.cache/aisis-asr-tmp` (`wyoming-whisper.service.d/20-disk-tmpdir.conf`:
+  `CacheDirectory=` + `TMPDIR`, swept at every start), not on the quota-limited `/tmp`.
 - **Activation word**: the name that woke the station (`wake_word.py`, names = the grammar's `lexicon.wake`) is never request
   content. The STT gateway cuts it from the head of a transcript before the final goes to quasar (`wake_cut:<name>` in the
   clip's `reason`; the clip's `transcript` is the cleaned text, the one the dialog log and the feed's «ответ» line match on;
