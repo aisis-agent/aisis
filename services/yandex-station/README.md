@@ -132,6 +132,25 @@ query string, which `weather.get_forecasts?return_response` needs.
   next to each of them to the gateway (`POST /spotter-clip`, `spotter_clips.py`), which archives it as a clip with
   `trigger='spotter'` (the transcript is the speaker's own recognition, not Whisper's) linked to the text dialog nearest in
   time (one of the same station first); the feed posts it like any other utterance, captioned «распознано самой колонкой».
+- **How an utterance was processed (diagnostics, session links)**: the adapter writes one record per call it answers into
+  `utterance_traces` of `dialogs.sqlite3` (`utterance_trace.py`; the quasar hook's `/intent/decide` call is `via: hook`,
+  the speaker's turn `via: turn`): layer (grammar / skill / calc / jev / brain / error / none), the grammar's decision with
+  its parameters (intent, tier, priority band, confidence, slots, executor and arguments), why a decision was not run
+  by the adapter, the clarification or reprompt it asked (and the phrase it was joined to), calls (Home Assistant
+  service + entity + data + status, weather-cli, music, timers), Jev's verdict, the brain's provider/slot/model/attempts,
+  per-stage latency and errors. It is stored by the adapter itself (own SQLite connection in a thread, fail-soft;
+  `AISIS_UTTERANCE_TRACE=off` stops it). A record belongs to the dialog that was running at its time
+  (`dialogstore._attach_traces`; the adapter does not know the quasar dialog id). Each clip post carries the compact lines
+  (ranked: the answer and its parameters stay, stage times go first when the 1024-character caption is full) and
+  **always** a link to the session page, `<dashboard>/session/<dialog id>`, or `/session/clip/<clip id>` for a clip with
+  no dialog. The dashboard address is `AISIS_DASHBOARD_URL`, else this machine's own Tailscale MagicDNS name from
+  `tailscale status --self` (`session_links.py`); when neither is known the post says so instead of printing a dead link.
+  The dashboard serves two plain HTML pages (`session_pages.py`, no SPA build needed): `/session/...` (activation, each
+  request with audio and ASR facts, the traces, the quasar log) and `/grammar` (every intent of the bundle with its YAML
+  block and a GitHub link to its line in `ru.yaml`); a session links the intent that fired to
+  `/grammar#intent-<id>`. The wake word alone is an activation (`voice_clips.status='activation'`): it is never a post of
+  its own, the next request's post and the session page show it. `clipfeed.py test --clip <id>` posts an archived clip
+  the way the feed would (labelled TEST, not entered in the ledger).
 - Containers keep their historical names (`aisis-yandex-postgres-1`,
   `aisis-yandex-network-{tls-voice,dns-relay}-1`, compose project `aisis-yandex`
   for postgres) — do not recreate them just to rename.

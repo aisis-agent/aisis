@@ -30,6 +30,7 @@ from intent_grammar.grammar import load, render_reply
 from intent_grammar.timewords import plural
 from timers import duration_accusative, left_text
 import voice_skills
+import utterance_trace
 
 LOG = logging.getLogger("aisis.intent")
 
@@ -272,14 +273,42 @@ class IntentRouter:
         if not task.cancelled():
             task.exception()   # the awaiters report it; a task nobody awaits any more must not log «never retrieved»
 
+    def trace_fields(self, decision: Decision) -> dict[str, Any]:
+        """The decision as utterance-trace fields, with the intent's priority band from the grammar."""
+        priority = next((intent.priority for intent in self.grammar.intents if intent.id == decision.intent), None)
+        return utterance_trace.decision_fields(decision, priority)
+
+    def _why_declined(self, decision: Decision, via_quasar: bool, station: str) -> str:
+        """Why a decision the grammar made is not run by the adapter (the trace shows it; the old path answers instead)."""
+        if decision.tier == "reprompt":
+            return "reprompt cooldown: one «не расслышал» a minute per station"
+        if decision.parts:
+            return "compound: a clause is not run by the adapter"
+        if decision.tier == "confirm" or decision.fuzzy:
+            return "fuzzy guess: needs the owner's «да»"
+        executor = (decision.action or {}).get("executor") or ""
+        if executor in VOLUME_EXECUTORS:
+            return "volume change is run by the quasar layer" if not via_quasar else "volume arguments break the contract"
+        if executor == "dialog.end" or executor not in ADAPTER_EXECUTORS:
+            return f"executor {executor or '—'} belongs to the quasar layer"
+        if executor.startswith(TIMER_PREFIXES) and self.timers is None:
+            return "timers are not configured"
+        if executor.startswith("ha.") and self.ha is None:
+            return "Home Assistant actions are off"
+        if executor == "dialog.repeat_last":
+            return "nothing to repeat"
+        return f"executor {executor} gave no answer"
+
     async def route(self, station: str, text: str, *, phase: str | None = None, via_quasar: bool = False) -> Route:
         """Decide and execute one turn; Route("none") hands it on. `via_quasar`: the caller (quasar) runs volume itself."""
         started = time.perf_counter_ns()
+        decision = None
         try:
             decision = self.classify(text, phase, fallback=not self.asked_a_question(station))
             joined = self._joined_answer(station, text, phase)
             if joined is not None:
                 decision, text = joined
+                utterance_trace.note(joined=text)
             if decision is None:
                 route = NONE
             elif self._timer_action(decision, via_quasar, station):
@@ -290,11 +319,27 @@ class IntentRouter:
                 self.pending[station] = (text, self.monotonic())
         except Exception as err:  # fail open: the old path answers
             LOG.warning("intent_route_failed class=%s", type(err).__name__)
+            utterance_trace.error("route: " + type(err).__name__)
             route = NONE
         route = dataclasses.replace(route, ms=(time.perf_counter_ns() - started) // 1_000_000)   # a copy: NONE is shared
         self.stats[route.source if route.kind != "none" else "none"] = self.stats.get(
             route.source if route.kind != "none" else "none", 0) + 1
+        self._trace(decision, route, via_quasar, station)
         return route
+
+    def _trace(self, decision: Decision | None, route: Route, via_quasar: bool, station: str) -> None:
+        trace = utterance_trace.current()
+        if trace is None:
+            return
+        trace.stage_ms("route", route.ms)
+        if decision is None:
+            return
+        trace.note(**self.trace_fields(decision))
+        trace.stage_ms("grammar", decision.elapsed_us // 1000)
+        if route.kind == "none":
+            trace.note(declined=self._why_declined(decision, via_quasar, station))
+        elif decision.tier in ("clarify", "reprompt"):
+            trace.note(asked=decision.tier)
 
     def note_reply(self, station: str, text: str, *, brain: bool = False) -> None:
         """The last thing the speaker said to this station, for «повтори». `brain`: the brain said it. A question of the brain's
@@ -400,7 +445,11 @@ class IntentRouter:
         if executor == "dialog.repeat_last":
             return self.last_reply.get(station)
         if executor.startswith(TIMER_PREFIXES):
-            return await self._timer(executor, args)
+            started = time.monotonic()
+            text = await self._timer(executor, args)
+            utterance_trace.call("timer", executor=executor, args=utterance_trace.plain(args) or None, ok=text is not None,
+                                 ms=int((time.monotonic() - started) * 1000))
+            return text
         if executor.startswith("ha."):
             return await self.ha.run(executor, args, station)
         return None

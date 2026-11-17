@@ -14,6 +14,8 @@ import re
 import time
 from typing import Any, Awaitable, Callable
 
+import utterance_trace
+
 AREAS = {
     "living": "Гостиная",
     "kitchen": "Кухня",
@@ -162,10 +164,13 @@ class HaActions:
         command = _Command()
         try:
             area = await self._room(args.get("room"), station)
+            utterance_trace.note(room=area)
             reply = await handler(area, args, command)
         except _Outcome as out:
+            utterance_trace.note(outcome=out.reply)
             return out.reply
-        except Exception:
+        except Exception as err:
+            utterance_trace.error("ha: " + type(err).__name__)
             return REPLY_FAILED
         return REPLY_QUEUED if command.queued else reply
 
@@ -235,13 +240,20 @@ class HaActions:
         return [states[i] for i in ids if i.startswith(domain + ".") and i in states]
 
     async def _service(self, command: _Command, domain: str, service: str, body: dict) -> None:
+        started = time.monotonic()
+        fields = {"service": f"{domain}.{service}", "entity": body.get("entity_id"),
+                  "data": {k: v for k, v in body.items() if k != "entity_id"} or None}
         try:
             status, _ = await self._post(f"/api/services/{domain}/{service}", body)
-        except Exception:
+        except Exception as err:
+            utterance_trace.call("ha", **fields, ok=False, error=type(err).__name__, ms=int((time.monotonic() - started) * 1000))
             raise _Outcome(REPLY_FAILED)
+        ok = 200 <= status < 300
+        utterance_trace.call("ha", **fields, status=status, ok=ok, queued=True if status == 202 else None,
+                             ms=int((time.monotonic() - started) * 1000))
         if status == 202:
             command.queued = True
-        elif not 200 <= status < 300:
+        elif not ok:
             raise _Outcome(REPLY_FAILED)
 
     # -- climate --------------------------------------------------------------------------------------------------

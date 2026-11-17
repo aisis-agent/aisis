@@ -39,7 +39,7 @@ POLL_TIMEOUT_S = 25
 RETRY_S = 10
 PROMPT_KEY = "prompt:"
 VERDICT_ECHO_CHARS = 80
-BOT_FOOTER = "Кнопки ниже или ответом на сообщение: что сказали на самом деле. Могли говорить издалека, начало или конец могло обрезаться."
+BOT_FOOTER = "Кнопки или реплай: что сказали на самом деле."
 
 ACTIONS = {"ok": "correct", "no": "noise"}
 
