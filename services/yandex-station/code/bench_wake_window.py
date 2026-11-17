@@ -125,9 +125,12 @@ async def recognise(pcm: bytes, prime: bytes, uri: str, lead_voiced_ms: int = 0)
         utterances.extend(endpoint.feed(pcm[offset:offset + FRAME * 2 * 3]))
     tail = endpoint.flush(include_partial=True)
     texts = []
-    for index, utt in enumerate(utterances + ([tail] if tail else [])):
-        if index == 0 and utt.voiced_ms >= stt_wyoming.LEAD_MIN_OWN_MS:   # what the gateway does: the cut name counts for the first utterance
-            utt = stt_wyoming.replace(utt, lead_voiced_ms=lead_voiced_ms)
+    pending = lead_voiced_ms
+    for utt in utterances + ([tail] if tail else []):
+        if pending and utt.voiced_ms >= stt_wyoming.LEAD_MIN_OWN_MS:   # what the gateway does: the cut name counts for the first real utterance that passes with it
+            led = stt_wyoming.replace(utt, lead_voiced_ms=pending)
+            if stt_wyoming.judge(led, tuning) is None:
+                utt, pending = led, 0
         if stt_wyoming.judge(utt, tuning):
             continue
         lifted, _ = stt_wyoming.frontend_for_recognizer(utt.speech_pcm, utt.voiced_rms, tuning)

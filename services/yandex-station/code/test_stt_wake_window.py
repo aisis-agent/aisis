@@ -265,14 +265,24 @@ class Replay(unittest.TestCase):
         self.assertGreater(len(heard[0]), len(calls[0]))
 
     def test_the_vad_hangover_right_after_the_cut_does_not_take_the_name_credit_meant_for_the_request(self):
-        """A pause longer than the Endpoint's silence closes the hangover frames as an utterance of their own: it is a blip, the
-        request that follows a second later still counts the name for its length and its speaker check."""
+        """A pause longer than the Endpoint's silence closes the hangover frames as an utterance of their own: it is a blip. The request
+        that follows a second later is 60 ms of loud frames plus the VAD's own hangover, 160 ms: it passes only with the name's credit,
+        and its speaker check hears the name."""
+        heard = []
+
+        def spy(gateway):
+            async def check(pcm, rate):
+                heard.append(pcm)
+                return None
+            gateway.speaker_check = check
         self.vad_factory = HangoverVad
-        pcm = squares(activation_stream(request_ms=160, gap_ms=1000, live_ms=3000))
-        messages, calls, rows = self.session(pcm, ["Стоп."])
+        pcm = squares(activation_stream(request_ms=60, gap_ms=1000, live_ms=3000))
+        messages, calls, rows = self.session(pcm, ["Стоп."], setup=spy)
         self.assertEqual(len(calls), 1)
         self.assertEqual(messages, [{"text": "Стоп.", "end_of_utt": True}])
         self.assertEqual([row[:2] for row in rows], [("activation", "wake_window"), ("gate", "short"), ("sent", None)])
+        self.assertEqual(len(heard), 1)
+        self.assertTrue(self.heard_the_name(heard[0]))
 
     def test_the_cut_can_be_switched_off(self):
         pcm = squares(activation_stream())
