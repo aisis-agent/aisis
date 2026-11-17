@@ -72,6 +72,14 @@ Current phrases: «Брачо» for the primary persona and «Рэя» for a sec
 
 The first model (`ey_milosh`) failed exactly here: without the filler, «Милош» has a reduced unstressed vowel and a prefix shared with common words (мило, милый, миллион).
 
+## Activation is an event, not a request
+
+The activation word fired on the device before any recognition ran. Whatever the recognizer later writes for it is never request content (decided 2026-11-17 after a clip-feed pair: the speaker said «Алиса», paused, Whisper heard «Малис.», the grammar's catch-all answered «Не расслышал. Повтори», and the real request arrived in a second session):
+- the name is never part of the text that is routed: it is cut from the head of every transcript (the grammar's `lexicon.wake` plus a bounded sound rule for mishearings), and the recognizer prompt stays free of it;
+- a segment that is only the name is an activation event: it is archived (`status='activation'`), shown on the session, and answered with nothing. No reprompt, no clarification, no «Слушаю», no brain call. The listening window stays open, so the request that follows belongs to the same turn, the same dialog and the same clip-feed post;
+- an activation nobody followed with a request ends the turn silently, like an unanswered follow-up window;
+- activation segments are not counted in recognizer-quality numbers (the archive marks them) and the back-test strips the name from every utterance.
+
 ## Acceptance metrics
 
 Every model or pipeline change is accepted only through benchmarks; numbers are recorded in the repository that owns the component.

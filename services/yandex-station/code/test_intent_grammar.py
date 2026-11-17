@@ -583,6 +583,38 @@ class ShippedBehaviourTests(unittest.TestCase):
         self.assertEqual(self.g.decide("громковато").action["args"], {"step": -1})
         self.assertEqual(self.g.decide("громче").action["args"], {"step": 1})
 
+    def test_a_reminder_names_what_and_when_in_either_order(self):
+        # tg#30177: «Напомню, выключить грелку через десять минут.» carried both; the grammar only knew «через N <что>»
+        for text in ("напомни выключить грелку через десять минут", "Напомню, выключить грелку через десять минут.",
+                     "напомни мне выключить грелку через 10 минут", "напомни через десять минут выключить грелку",
+                     "через десять минут напомни мне выключить грелку"):
+            with self.subTest(text=text):
+                decision = self.g.decide(text)
+                self.assertEqual((decision.intent, decision.slots), ("reminder.in", {"duration": 600, "what": "выключить грелку"}))
+                self.assertEqual(decision.action, {"executor": "timer.start", "args": {"seconds": 600, "note": "выключить грелку"}})
+        self.assertEqual(self.g.decide("напомни купить хлеб").intent, "reminder.help")   # no time said: asking when is right
+        # an incomplete or ambiguous request is asked about, never run with a pronoun or half a phrase as the note
+        for text in ("напомни мне через десять минут", "напомни через десять минут", "напомни нам через десять минут",
+                     "напомни ему через десять минут",
+                     "напомни себе через десять минут", "напомни нам обоим через десять минут", "напомни нам всем через десять минут",
+                     "напомни мне и ему через десять минут",
+                     "напомни выключить грелку через десять минут или через час",
+                     "напомни через десять минут выключить грелку через час"):
+            with self.subTest(text=text):
+                self.assertEqual(self.g.decide(text).intent, "reminder.help", text)
+        # a «через» that is no time belongs to the note
+        self.assertEqual(self.g.decide("напомни через десять минут отправить файл через телеграм").slots["what"],
+                         "отправить файл через телеграм")
+        # a name at the end of the note is the note's own word: the new mishearing aliases must not be edge words of the grammar
+        self.assertEqual(self.g.decide("напомни через десять минут позвать Алису").slots["what"], "позвать алису")
+
+    def test_a_bare_name_is_never_a_garbled_request(self):
+        # tg#30176: «Малис.» (the station's «Алиса» heard by Whisper) fell to the «Не расслышал» catch-all
+        for text in ("Малис.", "Алиса.", "Тариса.", "Лисы."):
+            with self.subTest(text=text):
+                decision = self.g.decide(text)
+                self.assertEqual((decision.intent, decision.tier), ("smalltalk.wake", "canned"), text)
+
     def test_gate_block_limits_a_first_report(self):
         gate = self.g.gate
         self.assertEqual((gate["max_false_triggers"], gate["max_wrong_actions"], gate["max_p95_us"]), (2, 6, 25000))

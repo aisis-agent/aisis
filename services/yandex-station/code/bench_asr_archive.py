@@ -226,7 +226,7 @@ def pending(conn: sqlite3.Connection, engine: str, limit: int) -> list[sqlite3.R
     conn.row_factory = sqlite3.Row
     return conn.execute(
         "SELECT c.id, c.path, c.dur, c.voiced_ms FROM voice_clips c LEFT JOIN asr_bench b ON b.clip_id=c.id AND b.engine=? "
-        "WHERE b.clip_id IS NULL ORDER BY c.ts DESC LIMIT ?", (engine, limit)).fetchall()
+        "WHERE b.clip_id IS NULL AND c.status<>? ORDER BY c.ts DESC LIMIT ?", (engine, voiceclips.ACTIVATION, limit)).fetchall()
 
 
 def run(db_path: str, engines: list[str], max_clips: int, budget_s: float) -> dict:
@@ -295,7 +295,10 @@ def set_reference(db_path: str, clip_id: str, text: str, source: str = "human") 
 def summary(db_path: str) -> dict:
     conn = connect(db_path)
     conn.row_factory = sqlite3.Row
-    clips = {r["id"]: r for r in conn.execute("SELECT id, status, transcript, voiced_ms, trigger FROM voice_clips")}
+    # An activation clip (the name alone) is no utterance: neither a gated clip nor a sent one, and no engine is scored on it.
+    clips = {r["id"]: r for r in conn.execute("SELECT id, status, transcript, voiced_ms, trigger FROM voice_clips WHERE status<>?",
+                                              (voiceclips.ACTIVATION,))}
+    activations = {r[0] for r in conn.execute("SELECT id FROM voice_clips WHERE status=?", (voiceclips.ACTIVATION,))}
     refs = {r["clip_id"]: r["text"] for r in conn.execute("SELECT clip_id, text FROM asr_reference")}
     rows = conn.execute("SELECT clip_id, engine, text, ms, dur, empty, pattern, loop, err FROM asr_bench").fetchall()
     last = conn.execute("SELECT ts, engines, done, skipped, seconds FROM asr_bench_runs ORDER BY ts DESC LIMIT 1").fetchone()
@@ -309,6 +312,8 @@ def summary(db_path: str) -> dict:
     by_engine: dict[str, dict[str, str]] = {}
     stats: dict[str, dict] = {}
     for r in rows:
+        if r["clip_id"] in activations:
+            continue
         by_engine.setdefault(r["engine"], {})[r["clip_id"]] = r["text"] or ""
         s = stats.setdefault(r["engine"], {"n": 0, "errors": 0, "empty": 0, "pattern": 0, "loops": 0, "gated_clips": 0,
                                            "text_on_gated": 0, "ms": [], "audio_s": 0.0, "ref": [], "live": []})

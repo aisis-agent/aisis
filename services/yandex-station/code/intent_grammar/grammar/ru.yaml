@@ -11,7 +11,7 @@ locale: ru
 
 lexicon:
   # Names the speaker answers to, with the mishearings seen on far-field speech («Тариса», «Лисы»).
-  wake: [алиса, алис, алисы, алиску, алиска, тариса, лисы, элиса, илиса, олиса, толиса, яндекс, брачо]
+  wake: [алиса, алис, алисы, алиску, алиска, тариса, малис, лисы, элиса, илиса, олиса, толиса, яндекс, брачо]
   lead_in: [а, ну, слушай, эй, слышь, так]
   fillers: [пожалуйста, плиз, вот, же, значит, короче, типа]
   negation: [не, нельзя, ни, никогда]
@@ -110,7 +110,7 @@ intents:
     labels: [WAKE_ONLY]
     patterns: ["{wake}"]
     reply: {kind: canned, say: ["Слушаю.", "Да?", "Я здесь."]}
-    examples: ["Алиса", "Алиса?", "Тариса.", "Лисы."]
+    examples: ["Алиса", "Алиса?", "Тариса.", "Лисы.", "Малис."]
   - id: smalltalk.greeting
     tier: canned
     phase: pre
@@ -454,14 +454,19 @@ intents:
     labels: [timer, TIMER, reminder]
     slots:
       duration: {type: duration}
-      what: {type: text}
+      # «напомни мне через пять минут» has no note (whom to remind is not one); «… через десять минут или через час» has two times
+      what: {type: text, reject: [мне, нам, ему, ей, им, всем, обоим, обеим, себе, тебе, вам, нему, ней, ним, и, с, со], no_time: true}
     patterns:
       - "напомни (мне)? через {duration} {what}"
+      - "напомни (мне)? {what} через {duration}"
       - "через {duration} напомни (мне)? {what}"
     action: {executor: timer.start, args: {seconds: "$duration", note: "$what"}}
     reply: {kind: template, say: "Напомню через {duration_text}."}
     examples:
       - {say: "напомни через десять минут выключить плиту", slots: {duration: 600, what: "выключить плиту"}}
+      - {say: "напомни выключить грелку через десять минут", slots: {duration: 600, what: "выключить грелку"}}
+      - {say: "Напомню, выключить грелку через десять минут.", slots: {duration: 600, what: "выключить грелку"}}   # tg#30177: Whisper's «напомню» for «напомни»
+      - {say: "через час напомни мне позвонить маме", slots: {duration: 3600, what: "позвонить маме"}}
 
   # ── volume ──────────────────────────────────────────────────────────────
   # Action args contract (executor speaker.volume): exactly one of `step` (+1/-1, relative), `level` (a plain number

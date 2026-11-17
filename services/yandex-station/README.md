@@ -110,6 +110,15 @@ query string, which `weather.get_forecasts?return_response` needs.
   probing adapter/stt/pm/ha-cli/kit/lan-proxy/embed units and the postgres,
   tls-voice, dns-relay containers. A `maintenance` file in
   `~/.local/share/aisis/bluegreen-state/` suspends it during deploys.
+- **Activation word**: the name that woke the station (`wake_word.py`, names = the grammar's `lexicon.wake`) is never request
+  content. The STT gateway cuts it from the head of a transcript before the final goes to quasar (`wake_cut:<name>` in the
+  clip's `reason`; the clip's `transcript` is the cleaned text, the one the dialog log and the feed's «ответ» line match on;
+  the ASR bench therefore scores a cut clip's engine output with the name as an error: read those WERs with that in mind). A segment that is only the name (Whisper writes «Алиса.», «Малис.», «Лисы.») is an
+  activation event: clip `status='activation'`, `reason='wake'`, no final to quasar, the session keeps listening, so the
+  request that follows lands in the same session and dialog (tg#30176/30177: the name used to be answered «Не расслышал»
+  and the request came in a second session). The gateway has no wake-word timestamps (quasar does not forward the
+  device's spotter spans), so the name is found in the transcript, not cut from the audio; the recognizer still hears it.
+  An activation nobody followed ends the turn silently (the empty final carries `rejected: wake_word`). Python-only: restart `aisis-station-stt`.
 - **Whisper prompt**: `aisis-whisper-prompt.timer` regenerates the recognizer's
   initial prompt every 6 h (code/refresh-whisper-prompt.sh -> `voice_vocab.py prompt`).
   It is home vocabulary only (fixed example commands, HA room and device names, library
