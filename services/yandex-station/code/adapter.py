@@ -28,6 +28,7 @@ import dialog_context
 import dialogstore
 import ha_actions
 import intent_route
+import jev
 import led_animation
 import reply_guard
 import user_prompt
@@ -149,6 +150,15 @@ class Adapter:
         self.intent_ha_url = self.env.get("AISIS_HACLI_URL", "http://127.0.0.1:8795").rstrip("/")
         if self.intent_mode != "off":
             self.intents = self._build_intents()
+        # Jev (decision model on the Vercel AI Gateway) for the turns the grammar and the quasar layer could not answer:
+        # AISIS_JEV=off|shadow|on (default off) plus VERCEL_JEV_KEY. `on` acts per class (AISIS_JEV_REFUSE, AISIS_JEV_REPROMPT,
+        # both off by default) above AISIS_JEV_THRESHOLD (default 0.95). Hard 0.4 s budget, breaker, fail-open (jev.py).
+        self.jev_mode = self.env.get("AISIS_JEV", "off").lower()
+        self.jev_settings = jev.settings_from_env(self.env)
+        self.jev: jev.JevRouteProvider | None = None
+        self.jev_session: ClientSession | None = None
+        self.jev_task: asyncio.Task | None = None
+        self.jev_pending: set[asyncio.Task] = set()
         self.chatgpt_timeout: float | None = self._chatgpt_timeout()
         self.store = Store(self.env.get("AISIS_STATE_DB", str(Path.home()/".local/state/aisis/adapter.sqlite3")))
         self.command = json.loads(self.env.get("AISIS_CHATGPT_COMMAND", "[]"))
@@ -258,8 +268,29 @@ class Adapter:
             await self.timers.resume()
         if self.env.get("AISIS_LED_ANIMATION") == "on":  # adb on the speaker: opt-in per process (not in tests/stage)
             led_animation.start_watcher()  # sound-start animation on the clock display, fire-and-forget
+        if self.jev_mode in ("on", "shadow") and self.env.get("VERCEL_JEV_KEY"):
+            self.jev_session = ClientSession(timeout=ClientTimeout(total=1.0), trust_env=False,
+                                             connector=TCPConnector(keepalive_timeout=120))
+            self.jev = jev.from_env(self.env, self.jev_session, self.jev_settings)
+            self.jev_task = asyncio.create_task(self._keep_jev_warm())
+
+    async def _keep_jev_warm(self):
+        """A warm TLS connection makes a Jev call ~0.25 s; a cold one would not fit the 0.4 s budget."""
+        base = self.env.get("AISIS_JEV_URL", jev.DEFAULT_URL).split("/v1/")[0]
+        while True:
+            try:
+                async with self.jev_session.get(base, allow_redirects=False):
+                    pass
+            except (ClientError, asyncio.TimeoutError):
+                pass
+            await asyncio.sleep(25)
 
     async def close(self, _app):
+        if self.jev_task is not None:
+            self.jev_task.cancel()
+            await asyncio.gather(self.jev_task, *self.jev_pending, return_exceptions=True)
+        if self.jev_session is not None:
+            await self.jev_session.close()
         if self.warm_task is not None:
             self.warm_task.cancel()
             await asyncio.gather(self.warm_task, return_exceptions=True)
@@ -297,7 +328,11 @@ class Adapter:
             "tts_configured": bool(self.fish_key()), "automatic_retries": False,
             "tts_voice": tts_settings.load()["tts_voice"], "alice_tts": self.alice_last,
             "intent_grammar": {"mode": self.intent_mode, "loaded": self.intents is not None,
-                               "routes": dict(self.intents.stats) if self.intents else {}}})
+                               "routes": dict(self.intents.stats) if self.intents else {}},
+            "jev": {"mode": self.jev_mode, "active": self.jev is not None,
+                    "acting": self.jev is not None and self.jev_mode == "on" and self.jev_settings.acts,
+                    "threshold": self.jev_settings.threshold, "refuse": self.jev_settings.refuse,
+                    "reprompt": self.jev_settings.reprompt, "stats": dict(self.jev.stats) if self.jev else {}}})
 
     async def turn(self, station: str, text: str):
         if not self.command:
@@ -510,6 +545,10 @@ class Adapter:
             if reply is None:
                 reply = await self.skills.answer(text)
             if reply is None:
+                jev_route = await self._jev_reply(station, text)
+                if jev_route is not None:
+                    reply, listen = jev_route.text, jev_route.listen
+            if reply is None:
                 reply = await self.turn(station, text)
                 from_brain = True
         except asyncio.CancelledError:
@@ -522,6 +561,53 @@ class Adapter:
         if not ws.closed:
             await ws.send_json({"type": "partialResponse", "data": {"text": reply,
                 "directives": [], "finished": True, "shouldListen": listen}})
+
+    async def _jev_reply(self, station: str, text: str) -> intent_route.Route | None:
+        """What Jev lets the speaker say instead of waiting ~2.4 s for the brain; None leaves the turn to the brain.
+
+        Reached only by turns the grammar, the quasar layer, arithmetic and the skills left unanswered. `shadow` (and `on`
+        while neither AISIS_JEV_REFUSE nor AISIS_JEV_REPROMPT is on) decides concurrently with the brain call and only logs
+        (turn hash, never the text). `on` waits for Jev (<= 0.4 s) and acts per class: a confident «garbled» gets one reprompt
+        a minute per station (the microphone stays open), a confident «command» nobody implements gets the plain refusal; «talk»
+        goes to the brain with the tier and effort logged as advice (the brain has no such knob yet). A phrase that mentions an
+        emergency (jev.is_emergency) never reaches Jev in `on` and never gets a Jev text.
+        """
+        if self.jev is None:
+            return None
+        if self.jev_mode != "on" or not self.jev_settings.acts:
+            task = asyncio.create_task(self._jev_shadow(text))
+            self.jev_pending.add(task)
+            task.add_done_callback(self.jev_pending.discard)
+            return None
+        turn = jev.turn_hash(text)
+        if jev.is_emergency(text):
+            LOG.info("jev_route outcome=skipped guard=emergency turn=%s", turn)
+            return None
+        try:
+            verdict = await self.jev.assess(jev.RouteTurn(text))
+            LOG.info("jev_route %s", jev.describe(verdict, turn))
+            return self._jev_action(station, verdict.decision)
+        except Exception as err:   # fail open: a bug in the optional layer sends the turn to the brain
+            LOG.warning("jev_route_failed class=%s", type(err).__name__)
+            return None
+
+    def _jev_action(self, station: str, decision: jev.RouteDecision | None) -> intent_route.Route | None:
+        if decision is None:
+            return None
+        settings = self.jev_settings
+        if decision.reason_code == "jev_garbled" and settings.reprompt and self.intents is not None \
+                and self.intents.allow_reprompt(station):
+            return intent_route.Route("reply", intent_route.REPROMPT_TEXT, listen=True, intent="jev.garbled", source="jev")
+        if decision.reason_code == "jev_command_unsupported" and settings.refuse:
+            return intent_route.Route("reply", intent_route.UNSUPPORTED_TEXT, intent="jev.command", source="jev")
+        return None
+
+    async def _jev_shadow(self, text: str) -> None:
+        try:
+            verdict = await self.jev.assess(jev.RouteTurn(text))
+            LOG.info("jev_shadow %s", jev.describe(verdict, jev.turn_hash(text), "emergency" if jev.is_emergency(text) else "none"))
+        except Exception as err:
+            LOG.warning("jev_shadow_failed class=%s", type(err).__name__)
 
     async def processor(self, request):
         self.authorize(request)
