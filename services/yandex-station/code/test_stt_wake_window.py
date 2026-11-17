@@ -127,12 +127,12 @@ class Replay(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("AISIS_VOICE_ARCHIVE", None) if previous is None
                         else os.environ.__setitem__("AISIS_VOICE_ARCHIVE", previous))
 
-    def session(self, pcm, heard, burst_ms=HISTORY, finish=True, env=None, setup=None, clock_jump=0.0):
+    def session(self, pcm, heard, burst_ms=HISTORY, finish=True, env=None, setup=None, clock_jump=None):
         """Play `pcm` as the station delivers it: the first `burst_ms` at t=0, the rest in real time. Returns (messages, audio the recognizer got, rows)."""
         answers = list(heard)
         calls = []
         clock = Clock()
-        jumps = [clock_jump]
+        jump_chunk, jump_seconds = clock_jump or (-1, 0.0)
 
         async def recognizer(uri, audio, rate, language, **extras):
             calls.append(audio)
@@ -150,9 +150,8 @@ class Replay(unittest.TestCase):
                     await ws.send_bytes(pcm[:head])
                     await asyncio.sleep(0.05)
                     step = RATE * 2 * 200 // 1000
-                    for offset in range(head, len(pcm), step):
-                        clock.now += 0.2 + jumps.pop()
-                        jumps.append(0.0)
+                    for index, offset in enumerate(range(head, len(pcm), step)):
+                        clock.now += 0.2 + (jump_seconds if index == jump_chunk else 0.0)
                         await ws.send_bytes(pcm[offset:offset + step])
                         await asyncio.sleep(0.05)
                     if finish:
@@ -319,7 +318,7 @@ class Replay(unittest.TestCase):
         self.assertTrue(self.heard_the_name(heard[0]))
 
     def test_a_wall_clock_jump_between_chunks_does_not_expire_the_name(self):
-        """The age counts stream audio, not the clock: a 30 s jump (stalled loop, NTP step) between chunks leaves the name credit intact."""
+        """The age counts stream audio, not the clock: a 30 s jump (stalled loop, NTP step) between chunks, after the name is cut, leaves the name credit intact."""
         heard = []
 
         def spy(gateway):
@@ -328,10 +327,12 @@ class Replay(unittest.TestCase):
                 return None
             gateway.speaker_check = check
         pcm = squares(activation_stream(request_ms=140, gap_ms=2500, live_ms=4000))
-        messages, calls, rows = self.session(pcm, ["Стоп."], setup=spy, clock_jump=30.0)
+        messages, calls, rows = self.session(pcm, ["Стоп."], setup=spy, clock_jump=(4, 30.0))
         self.assertEqual(len(calls), 1)
+        self.assertFalse(self.heard_the_name(calls[0]), "the name was not cut: the jump came before the decision")
         self.assertEqual(messages, [{"text": "Стоп.", "end_of_utt": True}])
         self.assertTrue(self.heard_the_name(heard[0]))
+        self.assertEqual(rows, [("activation", "wake_window", None), ("sent", None, "Стоп.")])
 
     def test_a_short_sound_long_after_the_name_does_not_get_it(self):
         """A knock eight seconds after «Алиса» is the 140 ms blip it is: no credit, dropped."""
