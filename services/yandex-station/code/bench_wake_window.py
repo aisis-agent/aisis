@@ -122,12 +122,16 @@ async def recognise(pcm: bytes, prime: bytes, uri: str, lead_voiced_ms: int = 0)
         endpoint.prime(prime)
     utterances = []
     for offset in range(0, len(pcm), FRAME * 2 * 3):
-        utterances.extend(endpoint.feed(pcm[offset:offset + FRAME * 2 * 3]))
+        fed = min(len(pcm), offset + FRAME * 2 * 3)
+        utterances.extend((utt, fed) for utt in endpoint.feed(pcm[offset:fed]))
     tail = endpoint.flush(include_partial=True)
+    if tail:
+        utterances.append((tail, len(pcm)))
     texts = []
     pending = lead_voiced_ms
-    for utt in utterances + ([tail] if tail else []):
-        if pending and utt.voiced_ms >= stt_wyoming.LEAD_MIN_OWN_MS:   # what the gateway does: the cut name counts for the first real utterance that passes with it
+    for utt, fed in utterances:
+        age_ms = fed * 1000 // (2 * RATE) - utt.duration_ms
+        if pending and utt.voiced_ms >= stt_wyoming.LEAD_MIN_OWN_MS and age_ms <= stt_wyoming.LEAD_MAX_AGE_MS:   # what the gateway does with the cut name
             led = stt_wyoming.replace(utt, lead_voiced_ms=pending)
             if stt_wyoming.judge(led, tuning) is None:
                 utt, pending = led, 0

@@ -301,6 +301,28 @@ class Replay(unittest.TestCase):
         self.assertEqual(messages, [{"text": "Стоп.", "end_of_utt": True}])
         self.assertIn(("gate", "steady_noise"), [row[:2] for row in rows])
 
+    def test_a_one_word_request_five_seconds_after_the_name_still_has_the_name(self):
+        """Past any wall-clock-measured limit: the age is stream audio after the cut."""
+        heard = []
+
+        def spy(gateway):
+            async def check(pcm, rate):
+                heard.append(pcm)
+                return None
+            gateway.speaker_check = check
+        pcm = squares(activation_stream(request_ms=140, gap_ms=5000, live_ms=6500))
+        messages, calls, rows = self.session(pcm, ["Стоп."], setup=spy)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(messages, [{"text": "Стоп.", "end_of_utt": True}])
+        self.assertTrue(self.heard_the_name(heard[0]))
+
+    def test_a_short_sound_long_after_the_name_does_not_get_it(self):
+        """A knock eight seconds after «Алиса» is the 140 ms blip it is: no credit, dropped."""
+        pcm = squares(activation_stream(request_ms=140, gap_ms=8000, live_ms=9500))
+        messages, calls, rows = self.session(pcm, [])
+        self.assertEqual(calls, [])
+        self.assertIn(("gate", "short"), [row[:2] for row in rows])
+
     def test_the_cut_can_be_switched_off(self):
         pcm = squares(activation_stream())
         messages, calls, rows = self.session(pcm, ["Алиса, включи свет в студии."], env={"AISIS_STT_WAKE_WINDOW": "0"})
