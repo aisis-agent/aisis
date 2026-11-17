@@ -46,6 +46,7 @@ class AdapterJevTests(unittest.IsolatedAsyncioTestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         self.env = {"AISIS_ALLOWED_STATIONS": "st1", "AISIS_STATE_DB": self.dir.name + "/adapter.sqlite3", "AISIS_MEMORY": "0",
+                    "AISIS_UTTERANCE_TRACE": "off",
                     "AISIS_CHATGPT_COMMAND": "[]", "AISIS_ADAPTER_TOKEN": "test-only-token", "AISIS_HA_ACTIONS": "off"}
 
     async def adapter(self, mode="on", scripted=None, refuse="on", reprompt="on", **extra):

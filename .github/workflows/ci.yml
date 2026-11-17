@@ -56,10 +56,11 @@ jobs:
         run: python3 -m unittest test_weather_skills
       - name: cached remote announcement tests
         run: python3 -m unittest discover -s services/yandex-station/code -p "test_*announcement*.py"
-      - name: intent grammar, adapter route, timers, Home Assistant executors, Jev, nightly loop, committed JSON bundle
+      - name: intent grammar, adapter route, timers, Home Assistant executors, Jev, nightly loop, utterance traces, session pages, clip feed, committed JSON bundle
         working-directory: services/yandex-station/code
         run: |
           python3 -m unittest test_intent_grammar test_intent_route test_timers test_ha_actions test_jev test_adapter_jev test_intent_nightly
+          python3 -m unittest test_utterance_trace test_adapter_trace test_session_pages test_clipfeed_diag test_clipfeed_tg
           python3 -m intent_grammar compile --check
       - name: quasar intent-grammar overlay patch applier tests
         run: python3 -m unittest discover -s services/yandex-station/overlays/intent-grammar -p "test_*.py"

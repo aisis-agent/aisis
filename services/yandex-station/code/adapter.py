@@ -35,6 +35,7 @@ import user_prompt
 import timers
 import tts_settings
 import uniproxy_tts
+import utterance_trace
 import voice_skills
 import voice_vocab
 
@@ -159,6 +160,9 @@ class Adapter:
         self.jev_session: ClientSession | None = None
         self.jev_task: asyncio.Task | None = None
         self.jev_pending: set[asyncio.Task] = set()
+        self.trace_pending: set[asyncio.Task] = set()
+        # AISIS_UTTERANCE_TRACE=off: no per-utterance records (utterance_trace.py) in dialogs.sqlite3; the diagnostics of the clip feed and the session page go empty.
+        self.trace_enabled = self.env.get("AISIS_UTTERANCE_TRACE", "on").lower() != "off"
         self.chatgpt_timeout: float | None = self._chatgpt_timeout()
         self.store = Store(self.env.get("AISIS_STATE_DB", str(Path.home()/".local/state/aisis/adapter.sqlite3")))
         self.command = json.loads(self.env.get("AISIS_CHATGPT_COMMAND", "[]"))
@@ -286,6 +290,7 @@ class Adapter:
             await asyncio.sleep(25)
 
     async def close(self, _app):
+        await self.flush_traces()   # the last turn's record is written before the process goes
         if self.jev_task is not None:
             self.jev_task.cancel()
             await asyncio.gather(self.jev_task, *self.jev_pending, return_exceptions=True)
@@ -346,21 +351,27 @@ class Adapter:
             block = self._persona_block()
             digest = hashlib.sha256(block.encode()).hexdigest()[:16]
             inject = bool(block) and self.store.persona_due(station, self.persona_idle, self.persona_turns, digest)
-            memories = await self.memory.retrieve(station, text) if self.memory is not None else []
-            # Dialog context (tg#28364): last dialogs of this station, plus matching old ones when the
-            # question asks for history. claude_primary stores this whole outgoing text in its
-            # per-station history, so both blocks are clipped to a few hundred characters each.
-            dialog_blocks = await self._dialog_blocks(station, text)
+            with utterance_trace.stage("context"):   # memory retrieval and the recent-dialogs blocks
+                memories = await self.memory.retrieve(station, text) if self.memory is not None else []
+                # Dialog context (tg#28364): last dialogs of this station, plus matching old ones when the
+                # question asks for history. claude_primary stores this whole outgoing text in its
+                # per-station history, so both blocks are clipped to a few hundred characters each.
+                dialog_blocks = await self._dialog_blocks(station, text)
             prefix = ("[Системная установка: " + block + "]\n" if inject else "") + dialog_blocks \
                 + (self.memory.format_block(memories) if memories else "")
             outgoing = prefix + "Пользователь: " + text if prefix else text
             if len(outgoing) > 16000:
                 outgoing, inject, memories = text, False, []
             try:
-                result = await run_command(self.command, {"station_id": station, "text": outgoing,
-                    "conversation_id": self.store.conversation(station), "turn_id": turn},
-                    self.chatgpt_timeout if self.chatgpt_timeout is not None else
-                    float(self.env.get("AISIS_CHATGPT_TIMEOUT", "250")))
+                with utterance_trace.stage("brain"):
+                    result = await run_command(self.command, {"station_id": station, "text": outgoing,
+                        "conversation_id": self.store.conversation(station), "turn_id": turn},
+                        self.chatgpt_timeout if self.chatgpt_timeout is not None else
+                        float(self.env.get("AISIS_CHATGPT_TIMEOUT", "250")))
+                try:   # diagnostics never cost the answer (the router's metadata is whatever it printed)
+                    utterance_trace.note(brain=self._brain_trace(result, inject, len(memories), len(outgoing)))
+                except Exception as exc:
+                    utterance_trace.error("brain metadata unreadable: " + type(exc).__name__)
                 self.store.finish(turn, "complete", station, result.get("conversation_id"))
                 if inject:
                     self.store.persona_sent(station, digest)
@@ -376,6 +387,16 @@ class Adapter:
             except Exception:
                 self.store.finish(turn, "failed", station)
                 raise
+
+    def _brain_trace(self, result: dict, persona: bool, memories: int, prompt_chars: int) -> dict:
+        """Which brain answered and what rode in the prompt: provider/credential slot/model from the router's own answer, the attempts
+        (a failed key and the fallback show here), persona and memory blocks. Never the text or a credential."""
+        attempts = [{"slot": a.get("slot"), "result": str(a.get("result"))[:40], "s": a.get("seconds")}
+                    for a in (result.get("attempts") if isinstance(result.get("attempts"), list) else []) if isinstance(a, dict)][:4]
+        return {k: v for k, v in {"provider": result.get("provider"), "slot": result.get("credential_slot"),
+                                  "model": result.get("model") or self.env.get("AISIS_CLAUDE_MODEL"), "attempts": attempts or None,
+                                  "persona": persona or None, "memories": memories or None, "prompt_chars": prompt_chars}.items()
+                if v is not None}
 
     def _recent_sync(self, station: str, text: str) -> tuple[dict, str]:
         """Settings plus the recent-dialogs block; blocking file/DB reads, run in a thread."""
@@ -517,10 +538,38 @@ class Adapter:
             raise TurnError("invalid_text")
         return station, text
 
+    def _store_trace(self, trace: utterance_trace.Trace, layer: str, reply: str | None = None, listen: bool = False) -> None:
+        """Close the call's trace and store it (own thread: SQLite never blocks the loop; a task, so a cancelled turn still stores).
+        Fail-soft: the record is diagnostics, never a reason to fail or delay a turn."""
+        if trace.closed:
+            return
+        trace.note(layer=layer, reply=reply, listen=True if listen else None)
+        record = utterance_trace.end(trace)
+        LOG.info("utterance_trace via=%s layer=%s intent=%s ms=%s", record["via"], layer, record.get("intent"), record["ms"])
+        if not self.trace_enabled:
+            return
+
+        async def store():
+            try:
+                await asyncio.to_thread(dialogstore.add_trace, self.dialogs_db, record)
+            except Exception as exc:
+                LOG.warning("utterance_trace_store_failed class=%s", type(exc).__name__)
+
+        task = asyncio.create_task(store())
+        self.trace_pending.add(task)
+        task.add_done_callback(self.trace_pending.discard)
+
+    async def flush_traces(self) -> None:
+        """Wait for the trace records still being written (shutdown, tests)."""
+        if self.trace_pending:
+            await asyncio.wait(self.trace_pending, timeout=3)
+
     async def _process_turn(self, ws, data):
         listen = False      # the grammar's question («На сколько поставить таймер?») keeps the microphone open
         from_brain = False  # the reply is the brain's own (the router treats a question of its as one a short answer belongs to)
         station = None     # set once _turn_input has accepted the turn: a rejected one still gets its error reply
+        trace = None       # opened once there is a phrase to route (utterance_trace.py)
+        layer = "none"
         try:
             station, text = self._turn_input(data)
             if text is None:
@@ -528,6 +577,7 @@ class Adapter:
                     await ws.send_json({"type": "partialResponse", "data": {"text": NO_SPEECH_REPLY,
                         "directives": [], "finished": True, "shouldListen": False}})
                 return
+            trace = utterance_trace.start("turn", text, station)
             # The grammar route answers what needs no model: canned lines, reprompts, the clock, timers, climate and
             # colour, then arithmetic and weather (intent_route.py). Instant arithmetic never wakes the slow browser
             # brain; neither do weather and «включи музыку», which the brain cannot do and would refuse.
@@ -535,32 +585,59 @@ class Adapter:
             if self.intents is not None and self.intent_mode == "shadow":
                 decision = self.intents.classify(text)       # decide only: no timer, Home Assistant call or reprompt cooldown
                 LOG.info("intent_shadow intent=%s tier=%s", decision.intent if decision else None, decision.tier if decision else None)
+                trace.note(shadow=True, **(self.intents.trace_fields(decision) if decision else {}))
             elif self.intents is not None:
                 route = await self.intents.route(station, text)
                 if route.kind in ("reply", "silent"):
                     reply = route.text or ""
                     listen = route.listen
+                    layer = "skill" if route.source == "skill" else "grammar"
             if reply is None:
                 reply = calc_evaluate(text)
+                if reply is not None:
+                    layer = "calc"
             if reply is None:
-                reply = await self.skills.answer(text)
+                with utterance_trace.stage("skills"):
+                    reply = await self.skills.answer(text)
+                if reply is not None:
+                    layer = "skill"
+                    trace.note(executor="skills.answer")
             if reply is None:
                 jev_route = await self._jev_reply(station, text)
                 if jev_route is not None:
                     reply, listen = jev_route.text, jev_route.listen
+                    layer = "jev"
+                    trace.note(intent=jev_route.intent, asked="reprompt" if listen else None)
             if reply is None:
                 reply = await self.turn(station, text)
                 from_brain = True
+                layer = "brain"
+                if listen is False and reply.rstrip().endswith("?"):
+                    trace.note(asked="brain")
         except asyncio.CancelledError:
+            if trace is not None:
+                trace.error("turn cancelled (the speaker's socket closed before the reply)")
+                self._store_trace(trace, "error")
             raise
         except Exception as exc:
             LOG.warning("processor_failed class=%s", type(exc).__name__)
             reply = ERROR_REPLY
-        if self.intents is not None and station is not None:
-            self.intents.note_reply(station, reply, brain=from_brain)
-        if not ws.closed:
-            await ws.send_json({"type": "partialResponse", "data": {"text": reply,
-                "directives": [], "finished": True, "shouldListen": listen}})
+            layer = "error"
+            if trace is not None:
+                trace.error(str(exc) if isinstance(exc, TurnError) else type(exc).__name__)
+        try:
+            if self.intents is not None and station is not None:
+                self.intents.note_reply(station, reply, brain=from_brain)
+            if not ws.closed:
+                await ws.send_json({"type": "partialResponse", "data": {"text": reply,
+                    "directives": [], "finished": True, "shouldListen": listen}})
+        except BaseException as exc:   # a socket that broke (or a cancel) mid-send: the work was done, the record must say so
+            if trace is not None:
+                trace.error("reply not delivered: " + type(exc).__name__)
+            raise
+        finally:
+            if trace is not None:
+                self._store_trace(trace, layer, reply, listen)
 
     async def _jev_reply(self, station: str, text: str) -> intent_route.Route | None:
         """What Jev lets the speaker say instead of waiting ~2.4 s for the brain; None leaves the turn to the brain.
@@ -586,12 +663,28 @@ class Adapter:
             LOG.info("jev_route outcome=skipped guard=emergency turn=%s", turn)
             return None
         try:
-            verdict = await self.jev.assess(jev.RouteTurn(text))
+            with utterance_trace.stage("jev"):
+                verdict = await self.jev.assess(jev.RouteTurn(text))
             LOG.info("jev_route %s", jev.describe(verdict, turn))
-            return self._jev_action(station, verdict.decision)
+            route = self._jev_action(station, verdict.decision)
+            utterance_trace.note(jev=self._jev_trace(verdict, "on", route is not None))
+            return route
         except Exception as err:   # fail open: a bug in the optional layer sends the turn to the brain
             LOG.warning("jev_route_failed class=%s", type(err).__name__)
+            utterance_trace.error("jev: " + type(err).__name__)
             return None
+
+    @staticmethod
+    def _jev_trace(verdict: jev.Verdict, mode: str, acted: bool) -> dict:
+        """Jev's verdict for the trace: what it read the phrase as, the route it advised, why that stood or not, and whether it acted."""
+        def answer(name: str) -> str | None:
+            got = verdict.answers.get(name)
+            return f"{got.choice} {got.confidence:.2f}" if got else None
+
+        candidate = verdict.candidate
+        return {k: v for k, v in {"mode": mode, "utterance": answer("utterance"), "tier": answer("tier"), "effort": answer("effort"),
+                                  "route": answer("route"), "decision": candidate.reason_code if candidate else None,
+                                  "outcome": verdict.reason, "ms": verdict.latency_ms, "acted": acted}.items() if v is not None}
 
     def _jev_action(self, station: str, decision: jev.RouteDecision | None) -> intent_route.Route | None:
         if decision is None:
@@ -608,6 +701,7 @@ class Adapter:
         try:
             verdict = await self.jev.assess(jev.RouteTurn(text))
             LOG.info("jev_shadow %s", jev.describe(verdict, jev.turn_hash(text), "emergency" if jev.is_emergency(text) else "none"))
+            utterance_trace.note(jev=self._jev_trace(verdict, "shadow", False))   # the task copied the turn's context; lands only if the record is still open
         except Exception as err:
             LOG.warning("jev_shadow_failed class=%s", type(err).__name__)
 
@@ -906,12 +1000,30 @@ class Adapter:
             raise web.HTTPBadRequest(text="invalid text")
         if self.intents is None or self.intent_mode == "off":
             return web.json_response(intent_route.NONE.as_json())
-        if body.get("shadow") is True:
-            return web.json_response(self.intents.shadow(text, "pre").as_json())   # classify only: executes nothing
-        if self.intent_mode != "on":
+        shadow = body.get("shadow") is True
+        if not shadow and self.intent_mode != "on":
             return web.json_response(intent_route.NONE.as_json())
-        route = await self.intents.route("quasar", text, phase="pre", via_quasar=True)
-        return web.json_response(route.as_json())
+        trace = utterance_trace.start("hook-shadow" if shadow else "hook", text)   # the quasar hook knows no station
+        layer, reply, listen = "none", None, False
+        try:
+            if shadow:
+                route = self.intents.shadow(text, "pre")   # classify only: executes nothing
+                verdict = self.intents.classify(text, "pre")
+                if verdict is not None:
+                    trace.note(**self.intents.trace_fields(verdict))
+            else:
+                route = await self.intents.route("quasar", text, phase="pre", via_quasar=True)
+                if route.kind != "none":
+                    layer = "skill" if route.source == "skill" else "grammar"
+                    reply, listen = route.text, route.listen
+                    trace.note(route=route.kind, volume=route.volume)
+            return web.json_response(route.as_json())
+        except Exception as exc:
+            trace.error(type(exc).__name__)
+            layer = "error"
+            raise
+        finally:
+            self._store_trace(trace, layer, reply, listen)
 
     async def music_play(self, request):
         """Voice «включи <артист/трек/альбом>»: search Music Assistant and play on the speaker.

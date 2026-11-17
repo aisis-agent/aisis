@@ -45,6 +45,9 @@ from pathlib import Path
 
 import clipbot
 import cliptruth
+import dialogstore
+import session_links
+import trace_view
 import voiceclips
 
 LOG = logging.getLogger("aisis.clipfeed")
@@ -56,7 +59,9 @@ RETRY_FAILED_S = 300      # a clip whose send kept failing is tried again this o
 MAX_ATTEMPTS = 3
 SEND_TIMEOUT_S = 120
 FAILURE_PAUSE_S = 30
-CAPTION_CHARS = 900        # tg adds a header; Telegram caps a caption at 1024
+CAPTION_CHARS = 880        # tg adds a header and the bot appends the owner's verdict; Telegram caps a caption at 1024
+MAX_LINE_CHARS = 220
+ACTIVATION_GAP_S = 15      # a wake-word segment this long before an unlinked request is that request's activation
 HEALTH_PORT = int(os.environ.get("AISIS_CLIPFEED_PORT") or 31124)
 FULL_SCALE = 32768
 MAX_GAIN = 60
@@ -217,8 +222,7 @@ WAKE_WORDS = ("алис", "яндекс")
 CUT_BY = {"vad": "закрыто по паузе (VAD)", "finish": "поток закончила станция (EOF)", "idle": "закрыто по таймауту потока",
           voiceclips.SPOTTER_TRIGGER: "распознано самой колонкой (споттер команд); запись из лога споттера, текст не от Whisper"}
 SHORT_SPEECH_MS = 700
-REPLY_FOOTER = ("Реплай на это сообщение = что сказали на самом деле; «=» — расшифровка верна, «шум» — речи не было. "
-                "Могли говорить издалека, начало или конец могло обрезаться.")
+REPLY_FOOTER = "↩ Реплай = что сказали на самом деле («=» верно, «шум» — речи не было)."
 
 
 def window_end(conn: sqlite3.Connection, clip: dict) -> float:
@@ -241,22 +245,108 @@ def endpoint_hints(clip: dict) -> list[str]:
     if clip.get("voiced_ms") is not None and clip["voiced_ms"] < SHORT_SPEECH_MS:
         lines.append("⚠ речи всего %s мс: начало или конец могли обрезаться" % clip["voiced_ms"])
     first = _norm(heard).split(" ")[0] if heard else ""
-    if clip.get("first_in_dialog") and first and not first.startswith(WAKE_WORDS):
+    if clip.get("first_in_dialog") and not clip.get("activation") and first and not first.startswith(WAKE_WORDS):
         lines.append("⚠ первая реплика диалога начинается с «%s», а не со слова активации: «Алиса» могла исказиться" % first)
     return lines
 
 
-def build_caption(clip: dict, result: str, gain: int, test: bool = False, footer: str = REPLY_FOOTER) -> str:
+def activation_line(clip: dict) -> str | None:
+    """The wake word of this request: its own segment before the request (an activation event) or cut off its head (`wake_cut:`)."""
+    activation = clip.get("activation")
+    if activation:
+        gap = clip["ts"] - activation["ts"]
+        raw = (activation.get("transcript") or "").strip()
+        return "🔔 активация %s%s · запрос через %.1f с" % (time.strftime("%H:%M:%S", time.localtime(activation["ts"])),
+                                                             " («%s»)" % raw if raw else "", gap)
+    cut = clip.get("reason") or ""
+    if clip["status"] == "sent" and cut.startswith("wake_cut:"):
+        return "🔔 слово активации «%s» было в начале записи и вырезано; в разбор ушло остальное" % cut[len("wake_cut:"):]
+    return None
+
+
+def trace_caption_lines(clip: dict, traces: list[dict]) -> list[tuple[int, str]]:
+    """Ranked caption lines of the adapter's records for the clip (trace_view); a phrase the adapter never saw says so."""
+    if not traces:
+        if clip["status"] == "sent" and clip.get("trigger") != voiceclips.SPOTTER_TRIGGER and (clip.get("transcript") or "").strip():
+            return [(2, "🧭 адаптер не вызывали: фразу обработал квазар сам (быстрый интент) или она не дошла")]
+        return []
+    out: list[tuple[int, str]] = []
+    for trace in traces:
+        ranked = trace_view.ranked_lines(trace, compact=True)
+        mark = "🧭 " + (trace_view.VIA.get(trace.get("via"), "") + ": " if len(traces) > 1 else "")
+        out.append((ranked[0][0], mark + ranked[0][1]))
+        out.extend(ranked[1:])
+    return out
+
+
+def link_line(clip: dict, base: str | None) -> str:
+    path = session_links.session_path(clip.get("dialog_id"), clip["id"])
+    return "🔗 " + (base + path if base else "адрес дашборда не определён, путь " + path)
+
+
+def activation_of(conn: sqlite3.Connection, clip: dict) -> dict | None:
+    """The activation event (a wake-word-only segment) that opened this request: the latest one in its dialog before it, else one
+    right before it that no dialog holds yet."""
+    if clip.get("dialog_id"):
+        row = conn.execute("SELECT id, ts, transcript FROM voice_clips WHERE status=? AND dialog_id=? AND ts<? ORDER BY ts DESC LIMIT 1",
+                           (trace_view.WAKE_STATUS, clip["dialog_id"], clip["ts"])).fetchone()
+    else:
+        row = conn.execute("SELECT id, ts, transcript FROM voice_clips WHERE status=? AND dialog_id IS NULL AND ts<? AND ts>=? "
+                           "ORDER BY ts DESC LIMIT 1", (trace_view.WAKE_STATUS, clip["ts"], clip["ts"] - ACTIVATION_GAP_S)).fetchone()
+    return dict(row) if row else None
+
+
+def processing_lines(conn: sqlite3.Connection, clip: dict, end: float) -> list[tuple[int, str]]:
+    """How the adapter processed the clip, as ranked caption lines. Diagnostics must never keep a clip from the owner: a failure shows as a line."""
+    try:
+        traces = dialogstore.traces_between(conn, clip["ts"] - trace_view.MATCH_BEFORE_S, end + trace_view.MATCH_AFTER_S)
+        return trace_caption_lines(clip, trace_view.traces_of_clip(clip, traces, end))
+    except Exception as exc:
+        LOG.warning("clip_feed_diag_failed clip=%s class=%s", clip["id"], type(exc).__name__)
+        return [(1, "⚠ диагностика обработки недоступна (%s)" % type(exc).__name__)]
+
+
+def post_context(conn: sqlite3.Connection, clip: dict) -> tuple[str, list[tuple[int, str]], str]:
+    """(result line, processing lines, session link line) of an archived clip: all a post says besides the clip's own facts. Marks the clip
+    with what the caption needs (`first_in_dialog`, `activation`)."""
+    clip["first_in_dialog"] = bool(clip.get("dialog_id")) and conn.execute(
+        "SELECT 1 FROM voice_clips WHERE dialog_id=? AND ts<? LIMIT 1", (clip["dialog_id"], clip["ts"])).fetchone() is None
+    end = window_end(conn, clip)
+    result = describe_result(clip, load_dialog(conn, clip.get("dialog_id")), end)
+    clip["activation"] = activation_of(conn, clip)
+    return result, processing_lines(conn, clip, end), link_line(clip, session_links.base_url())
+
+
+def build_caption(clip: dict, result: str, gain: int, test: bool = False, footer: str = REPLY_FOOTER,
+                  diag: list[tuple[int, str]] | None = None, link: str | None = None, limit: int = CAPTION_CHARS) -> str:
+    """The post's text. Always kept: the recognized text, the result, the session link and the clip id. The rest (route and parameters,
+    calls, latencies, VAD facts, engine, footer) is added by rank while it fits (Telegram caps a caption at 1024); the session
+    page the link opens has all of it."""
     heard = (clip.get("transcript") or "").strip()
     text = ("«%s»" % heard) if heard else "— текста нет —"
     if len(text) > 250:
         text = text[:249] + "…"
     stamp = time.strftime("%H:%M:%S", time.localtime(clip["ts"]))
-    parts = ["%s%s" % ("TEST · " if test else "", text), result, *endpoint_hints(clip),
-             "🕒 %s · пик %s · rms %s" % (stamp, clip.get("peak", "—"), clip.get("rms", "—")),
-             "⚙ %s%s" % (clip.get("engine") or "?", " · усилено ×%d" % gain if gain > 1 else ""),
-             "id %s" % clip["id"], footer]
-    return "\n".join(parts)[:CAPTION_CHARS]
+    hints = endpoint_hints(clip)
+    asr = " · ASR %s мс" % clip["asr_ms"] if clip.get("asr_ms") is not None else ""
+    wake = activation_line(clip)
+    always = [("%s%s" % ("TEST · " if test else "", text)), result[:300]]
+    tail = ([link] if link else []) + ["id %s" % clip["id"]]          # never the lines that are dropped
+    optional = [*(diag or []),
+                *([(1, wake)] if wake else []),
+                (2, hints[0]), *[(1, h) for h in hints[1:]],
+                (3, "🕒 %s · пик %s · rms %s" % (stamp, clip.get("peak", "—"), clip.get("rms", "—"))),
+                (2, "⚙ %s%s%s" % (clip.get("engine") or "?", asr, " · усилено ×%d" % gain if gain > 1 else "")),
+                (3, footer)]
+    optional = [(rank, line if len(line) <= MAX_LINE_CHARS else line[:MAX_LINE_CHARS - 1] + "…") for rank, line in optional]
+    room = limit - sum(len(line) + 1 for line in [*always, *tail])
+    kept = set()
+    for index in sorted(range(len(optional)), key=lambda i: (optional[i][0], i)):   # most important first, post order kept
+        size = len(optional[index][1]) + 1
+        if size <= room:
+            kept.add(index)
+            room -= size
+    return "\n".join([*always, *[line for index, (_, line) in enumerate(optional) if index in kept], *tail])
 
 
 def boost_for(peak: int | None) -> int:
@@ -315,18 +405,19 @@ def tg_send(settings: dict, caption: str, audio: Path | None) -> int | None:
     return int(match.group(1))
 
 
-def send_clip(settings: dict, clip: dict, path: Path, result: str, test: bool = False, send=tg_send, bot=None) -> tuple[str, int | None, str]:
+def send_clip(settings: dict, clip: dict, path: Path, result: str, test: bool = False, send=tg_send, bot=None,
+              diag: list[tuple[int, str]] | None = None, link: str | None = None) -> tuple[str, int | None, str]:
     """Post one clip: through the feed's own bot (voice note with buttons) when it can deliver, else through the tg CLI.
-    Returns (via, message id, caption as posted)."""
+    `diag`: ranked processing lines (trace_caption_lines), `link`: the session link line. Returns (via, message id, caption as posted)."""
     with tempfile.TemporaryDirectory(prefix="clipfeed-") as tmp:
         audio, gain = prepare_audio(path, Path(tmp), clip["id"], boost_for(clip.get("peak")))
         if bot is not None and bot.available():
-            caption = build_caption(clip, result, gain, test, footer=clipbot.BOT_FOOTER)
+            caption = build_caption(clip, result, gain, test, footer=clipbot.BOT_FOOTER, diag=diag, link=link)
             try:
                 return "bot", bot.post(clip, caption, audio), caption
             except clipbot.BotUnavailable:
                 pass  # not started / API down: the tg CLI delivers this one
-        caption = build_caption(clip, result, gain, test)
+        caption = build_caption(clip, result, gain, test, diag=diag, link=link)
         return "tg", send(settings, caption, audio), caption
 
 
@@ -352,6 +443,8 @@ class Feed:
         cliptruth.record_feed(conn, clip_id, state, why, msg, self.now(), via, caption)
 
     def skip_reason(self, settings: dict, clip: dict) -> str | None:
+        if clip["status"] == trace_view.WAKE_STATUS:   # the wake word alone: an activation, shown inside its request's post
+            return "activation"
         rejected = clip["status"] != "sent" or not (clip.get("transcript") or "").strip()
         if rejected and not settings["include_rejected"]:
             return "rejected"
@@ -431,11 +524,9 @@ class Feed:
         if path is None:
             self._record(conn, clip["id"], "skipped", "nofile")
             return False
-        clip["first_in_dialog"] = bool(clip.get("dialog_id")) and conn.execute(
-            "SELECT 1 FROM voice_clips WHERE dialog_id=? AND ts<? LIMIT 1", (clip["dialog_id"], clip["ts"])).fetchone() is None
-        result = describe_result(clip, load_dialog(conn, clip.get("dialog_id")), window_end(conn, clip))
+        result, diag, link = post_context(conn, clip)
         try:
-            via, msg, caption = send_clip(settings, clip, path, result, send=self.send, bot=self.bot)
+            via, msg, caption = send_clip(settings, clip, path, result, send=self.send, bot=self.bot, diag=diag, link=link)
         except Exception as exc:
             self.attempts[clip["id"]] = self.attempts.get(clip["id"], 0) + 1
             self.last_error = "%s: %s" % (type(exc).__name__, str(exc)[:160])
@@ -565,6 +656,24 @@ def send_test(db: str) -> int:
     return 0
 
 
+def send_replay(db: str, clip_id: str) -> int:
+    """Post an archived clip exactly as the feed does (its diagnostics and session link), labelled TEST and kept out of the ledger:
+    the check that a post carries what the owner needs, without waiting for the next utterance."""
+    conn = cliptruth.connect(db)
+    try:
+        clip = voiceclips.clip_by_id(db, clip_id)
+        path = voiceclips.clip_file(db, clip_id) if clip else None
+        if clip is None or path is None:
+            print("клип %s не найден в архиве" % clip_id, file=sys.stderr)
+            return 1
+        result, diag, link = post_context(conn, clip)
+    finally:
+        conn.close()
+    via, msg, _ = send_clip(load_settings(), clip, path, result, test=True, bot=clipbot.BotService(db), diag=diag, link=link)
+    print("OK %s#%s %s %s" % ("bot" if via == "bot" else "tg", msg, clip_id, link))
+    return 0
+
+
 def _tg_query(flag: str) -> str:
     """One of tg's identity queries (`--session-id`, `--session-topic`); empty when tg is unavailable or has no answer."""
     try:
@@ -636,7 +745,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("once", help="one poll")
     sub.add_parser("status", help="settings and counters as JSON")
     sub.add_parser("reconcile", help="archive vs feed ledger: sent / pending / failed / skipped (with reasons)")
-    sub.add_parser("test", help="send one synthetic TEST clip to the owner chat")
+    test = sub.add_parser("test", help="send one synthetic TEST clip to the owner chat (or, with --clip, an archived clip as the feed would post it)")
+    test.add_argument("--clip", help="archived clip id to post with its diagnostics and session link")
     truth = sub.add_parser("truth", help="record the owner's verdict for a clip (clip-truth)")
     truth.add_argument("--clip", help="clip id instead of a Telegram message id")
     truth.add_argument("--last", action="store_true", help="the most recent clip that was posted")
@@ -660,7 +770,7 @@ def main(argv: list[str] | None = None) -> int:
             conn.close()
         return 0
     if command == "test":
-        return send_test(db_path())
+        return send_replay(db_path(), args.clip) if args.clip else send_test(db_path())
     return apply_truth(db_path(), args.text, args.clip, args.last)
 
 

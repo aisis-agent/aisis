@@ -4,6 +4,8 @@ import re, subprocess, html, json, time, os, urllib.request, threading, http.cli
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 import dialogstore
+import session_pages
+import trace_view
 import voiceclips
 import clipfeed
 import cliptruth
@@ -208,6 +210,33 @@ def events_json(limit=50, before=None, q=None, since=None, until=None):
         return d
     except Exception as e:
         return {"error": str(e)[:200]}
+
+def session_html(dialog_id=None, clip_id=None):
+    """(status, html) of one session page: by dialog id, or by clip id (a clip without a dialog still has its page)."""
+    key = dialog_id or clip_id or ""
+    clip = None
+    if clip_id:
+        clip = voiceclips.clip_by_id(dialogstore.DB_PATH, clip_id)
+        if clip is not None and clip.get("dialog_id"):
+            dialog_id = clip["dialog_id"]
+    conn = dialogstore.connect(dialogstore.DB_PATH)
+    try:
+        dialog = dialogstore.get_dialog(conn, dialog_id) if dialog_id else None
+        if dialog is not None:
+            clips = voiceclips.clips_for_dialog(dialogstore.DB_PATH, dialog_id)   # links the clips that have settled first
+            traces = dialog["traces"]
+        elif clip is not None:
+            clips = [clip]
+            traces = trace_view.traces_of_clip(clip, dialogstore.traces_between(conn, clip["ts"] - 3, clip["ts"] + 45))
+        else:
+            clips, traces = [], []
+    finally:
+        conn.close()
+    cliptruth.annotate(dialogstore.DB_PATH, clips)
+    for c in clips:
+        c["gain"] = clipfeed.boost_for(c.get("peak"))
+    found = dialog is not None or bool(clips)
+    return (200 if found else 404), session_pages.render_session(dialog, clips, traces, focus_clip=clip_id, key=key)
 
 def dialogs_stats():
     conn = dialogstore.connect()
@@ -829,7 +858,7 @@ def static_cache_control(url_path, full):
 
 def is_spa_route(path):
     return not (path == "/events.json" or path == "/api" or path.startswith("/api/")
-                or path == "/yse" or path.startswith("/yse/"))
+                or path == "/yse" or path.startswith("/yse/") or path == "/grammar" or path.startswith("/session/"))
 
 # ---------- music / AirPlay (music_airplay.py, wired by lazy import) ----------
 AIRPLAY_KEYS = ("enabled", "name", "volume_db", "output_delay_ms", "restart", "bluetooth_pairing", "bluetooth_seconds")
@@ -1084,6 +1113,13 @@ class H(BaseHTTPRequestHandler):
             if wav is None:
                 return self._json({"err": "404"}, 404)
             self._send(200, "audio/wav", wav)
+        elif p == "/grammar":
+            self._send(200, "text/html; charset=utf-8", session_pages.render_intents())
+        elif p.startswith("/session/"):
+            rest = unquote(p[len("/session/"):])
+            clip = rest.startswith("clip/")
+            status, body = session_html(clip_id=rest[5:]) if clip else session_html(dialog_id=rest)
+            self._send(status, "text/html; charset=utf-8", body)
         elif is_spa_route(p):
             self._serve_static(p)
         else:

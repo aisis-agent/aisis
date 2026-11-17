@@ -103,6 +103,7 @@ class AdapterRoutingTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.adapter = Adapter({"AISIS_STATE_DB": self.tmp.name + "/state.db", "AISIS_ALLOWED_STATIONS": "a",
+                                "AISIS_UTTERANCE_TRACE": "off",
                                 "AISIS_MEMORY": "0", "AISIS_CHATGPT_COMMAND": '["brain"]',
                                 "AISIS_WEATHER_COMMAND": '["true"]'})
         self.adapter.turn = mock.AsyncMock(return_value="brain reply")

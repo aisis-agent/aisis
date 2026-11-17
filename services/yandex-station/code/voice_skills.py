@@ -22,8 +22,11 @@ import os
 import re
 import shutil
 import signal
+import time
 from pathlib import Path
 from typing import Any
+
+import utterance_trace
 
 LOG = logging.getLogger(__name__)
 
@@ -320,10 +323,17 @@ class Skills:
         return [found] if found else None
 
     async def weather(self, mode: str) -> str:
+        started = time.monotonic()
+        reply = await self._weather(mode)
+        utterance_trace.call("weather-cli", argv=f"weather say --{mode}", ok=reply != WEATHER_FAILED, ms=int((time.monotonic() - started) * 1000))
+        return reply
+
+    async def _weather(self, mode: str) -> str:
         env = weather_child_env(self.env, self.ha_url)
         command = self.weather_command(env["PATH"])
         if command is None:
             LOG.warning("weather_failed reason=weather_cli_not_found hint=run scripts/install-weather-cli.sh")
+            utterance_trace.error("weather-cli: not installed")
             return WEATHER_FAILED
         try:
             proc = await asyncio.create_subprocess_exec(*command, "say", f"--{mode}", env=env,
@@ -331,6 +341,7 @@ class Skills:
                 start_new_session=True)
         except OSError as err:  # missing or non-executable configured command
             LOG.warning("weather_failed reason=launch err=%s", err)
+            utterance_trace.error("weather-cli: launch failed")
             return WEATHER_FAILED
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), WEATHER_TIMEOUT_S)
@@ -338,6 +349,7 @@ class Skills:
             _kill_group(proc.pid)
             await proc.wait()
             LOG.warning("weather_failed reason=timeout mode=%s", mode)
+            utterance_trace.error(f"weather-cli: timeout {WEATHER_TIMEOUT_S:g} s")
             return WEATHER_FAILED
         except asyncio.CancelledError:
             _kill_group(proc.pid)
@@ -347,20 +359,24 @@ class Skills:
         if proc.returncode or not reply:
             err = stderr.decode("utf-8", "replace").strip()
             LOG.warning("weather_failed reason=exit_%s mode=%s err=%s", proc.returncode, mode, err[:200])
+            utterance_trace.error(f"weather-cli: exit {proc.returncode}" + ("" if reply else ", empty answer"))
             return WEATHER_FAILED
         LOG.info("weather_answered mode=%s", mode)
         return reply
 
     async def music(self) -> str:
         import music_airplay
+        started = time.monotonic()
         result: dict[str, Any] = await asyncio.get_running_loop().run_in_executor(None, music_airplay.music_any)
+        matched = result.get("matched") or {}
+        utterance_trace.call("music", ok=bool(result.get("ok")), action=result.get("action"), name=matched.get("name"),
+                             error=None if result.get("ok") else str(result.get("err"))[:80], ms=int((time.monotonic() - started) * 1000))
         if not result.get("ok"):
             LOG.warning("music_any_failed err=%s", str(result.get("err"))[:200])
             return MUSIC_FAILED if result.get("err") == "empty_library" else MUSIC_UNAVAILABLE
         action = result.get("action")
         if action == "already":
             return "Музыка уже играет."
-        matched = result.get("matched") or {}
         LOG.info("music_any_started name=%s", matched.get("name"))
         if not matched.get("name"):
             return "Включаю."

@@ -229,6 +229,19 @@ def clips_for_dialog(db_path: str, dialog_id: str, link: bool = True) -> list[di
         conn.close()
 
 
+def clip_by_id(db_path: str, clip_id: str) -> dict | None:
+    """One archived clip row (links its dialog first when it has none), or None for an unknown id."""
+    if not CLIP_ID.match(clip_id):
+        return None
+    link_dialogs(db_path)
+    conn = connect(db_path)
+    try:
+        rows = _rows(conn, "id=?", (clip_id,))
+    finally:
+        conn.close()
+    return rows[0] if rows else None
+
+
 def usage(db_path: str) -> dict:
     """Totals for the Services tab: clip count, bytes on disk, oldest clip, retention window."""
     conn = connect(db_path)

@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS voice_scores(
   verdict TEXT, mode TEXT, ms REAL, model TEXT);
 CREATE INDEX IF NOT EXISTS voice_scores_ts ON voice_scores(ts);
 """
+# one record per adapter call (utterance_trace.py): how an utterance was routed; linked to a dialog by time at read time
+TRACE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS utterance_traces(
+  id INTEGER PRIMARY KEY, ts REAL NOT NULL, station TEXT, via TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', trace TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS utterance_traces_ts ON utterance_traces(ts);
+"""
+SCHEMA += TRACE_SCHEMA
 
 
 def to_ts(ts):
@@ -409,6 +416,7 @@ def prune(conn, days=RETENTION_DAYS):
     conn.execute("DELETE FROM dialog_turns WHERE ts<?", (cut,))
     conn.execute("DELETE FROM dialogs WHERE ts_start<?", (cut,))
     conn.execute("DELETE FROM voice_scores WHERE ts<?", (cut,))
+    conn.execute("DELETE FROM utterance_traces WHERE ts<?", (cut,))
     conn.commit()
 
 
@@ -688,12 +696,99 @@ def page(conn, limit=50, before=None, q=None, since=None, until=None):
     rows = _filtered(conn, limit, before, q, since, until, None)
     out = rows[:limit]
     _attach_voice(conn, out)
+    _attach_traces(conn, out)
     return {"dialogs": out, "hasMore": len(rows) > limit, "nextBefore": out[-1]["ts"] if out else None}
 
 
 def search(conn, q, since=None, until=None, limit=20, station=None):
     """API-shaped dialogs (newest first) whose text contains q (case-insensitive), within the date range."""
     return _filtered(conn, max(1, min(int(limit), 200)) - 1, None, q, since, until, station)
+
+
+TRACE_LEAD_S = 5      # an adapter call can start this long before the dialog's "started" log line
+TRACE_TAIL_S = 15     # ...and the last one runs this long after its "ended" line
+
+
+def add_trace(path, record, timeout=2.0):
+    """Store one utterance trace of the adapter (utterance_trace.py). Own short connection, no migration state: the table is
+    created here when the dashboard's ingester has not done it yet. Raises on failure; the adapter logs and goes on."""
+    conn = sqlite3.connect(path, timeout=timeout)
+    try:
+        conn.executescript(TRACE_SCHEMA)
+        conn.execute("INSERT INTO utterance_traces(ts,station,via,text,trace) VALUES(?,?,?,?,?)",
+                     (record["ts"], record.get("station"), record["via"], record.get("text", ""),
+                      json.dumps(record, ensure_ascii=False, separators=(",", ":"))))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _trace_owner(conn, ts):
+    """The id of the quasar dialog an adapter call belongs to, whichever dialogs a caller happens to hold: the one that started last at
+    or before the call and has not ended more than TRACE_TAIL_S earlier, else the first that starts within TRACE_LEAD_S after it
+    (the call can precede the dialog's "started" line). Brain/adapter pseudo-dialogs never own calls: they copy turns onto these."""
+    row = conn.execute(
+        "SELECT id FROM dialogs WHERE src LIKE 'docker:%' AND ts_start<=? AND ?<=COALESCE(ts_end, ts_start+3600)+? "
+        "ORDER BY ts_start DESC, id LIMIT 1", (ts, ts, TRACE_TAIL_S)).fetchone()
+    if row is None:
+        row = conn.execute("SELECT id FROM dialogs WHERE src LIKE 'docker:%' AND ts_start>? AND ts_start<=? ORDER BY ts_start, id LIMIT 1",
+                           (ts, ts + TRACE_LEAD_S)).fetchone()
+    return row["id"] if row else None
+
+
+def _attach_traces(conn, dialogs):
+    """d["traces"]: the adapter's records of the calls that belong to the dialog (`_trace_owner`), oldest first; a call belongs to
+    one dialog only, and to the same one whether the page holds a single dialog or fifty."""
+    for d in dialogs:
+        d["traces"] = []
+    if not dialogs:
+        return
+    by_id = {d["id"]: d for d in dialogs}
+    lo = min(d["ts"] for d in dialogs) - TRACE_LEAD_S
+    hi = max((d["ts"] + 3600 if d["end"] == "" else d["ts"] + d["dur"]) for d in dialogs) + TRACE_TAIL_S
+    try:
+        rows = conn.execute("SELECT id, ts, trace FROM utterance_traces WHERE ts BETWEEN ? AND ? ORDER BY ts, id", (lo, hi)).fetchall()
+    except sqlite3.OperationalError:   # the table is created by the first adapter call or ingester start
+        return
+    for r in rows:
+        owner = by_id.get(_trace_owner(conn, r["ts"]))
+        if owner is None:
+            continue
+        try:
+            record = json.loads(r["trace"])
+        except ValueError:
+            continue
+        record["id"] = r["id"]
+        owner["traces"].append(record)
+
+
+def get_dialog(conn, dialog_id):
+    """One API-shaped dialog with turns, speaker scores and traces (the session page), or None."""
+    r = conn.execute("SELECT * FROM dialogs WHERE id=?", (dialog_id,)).fetchone()
+    if r is None:
+        return None
+    d = row_to_api(r, time.time())
+    _attach_turns(conn, [d])
+    _attach_voice(conn, [d])
+    _attach_traces(conn, [d])
+    return d
+
+
+def traces_between(conn, lo, hi):
+    """The adapter's records that started in [lo, hi], oldest first (a clip's page or caption when it has no dialog)."""
+    try:
+        rows = conn.execute("SELECT id, ts, trace FROM utterance_traces WHERE ts BETWEEN ? AND ? ORDER BY ts, id", (lo, hi)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    out = []
+    for r in rows:
+        try:
+            record = json.loads(r["trace"])
+        except ValueError:
+            continue
+        record["id"] = r["id"]
+        out.append(record)
+    return out
 
 
 def _attach_voice(conn, dialogs):
