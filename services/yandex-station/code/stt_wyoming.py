@@ -29,6 +29,8 @@ import speech_frontend
 import spotter_clips
 import stt_tuning
 import voice_vocab
+import voiceclips
+import wake_word
 
 LOG = logging.getLogger("aisis.stt")
 FRAME_MS = 20
@@ -61,6 +63,10 @@ WEAK_CONTRAST = 3.0
 # Distrusted transcripts of audio that WAS speech (a short «да» captioned «Спасибо.», a stuck loop): unlike a
 # hallucination on silence, the owner talked, so the empty end-of-stream final carries the reason (see finish()).
 UNCLEAR_SPEECH = ("weak_filler", "repetition", "too_many_words")
+# What the recognizer heard was only the activation word (wake_word.py): not a request. Mid-stream the gateway drops it and keeps
+# listening (the request follows in the same session); at the end of the stream it is the empty final of an unanswered window.
+WAKE_ONLY = "wake_word"
+MAX_HELD = 4   # cuts kept behind a running recognition; a stream of them behind a slow recognizer drops the newest, never grows the heap
 
 
 def _fold(text):
@@ -436,7 +442,6 @@ class STTGateway:
         """Retention: at most once a day, from whichever path just archived a clip (gateway utterance or spotter upload)."""
         if time.time() - self.pruned_at > 86400:
             self.pruned_at = time.time()
-            import voiceclips
             voiceclips.prune(self.db_path())
 
     def archive(self, utt, meta):
@@ -448,7 +453,6 @@ class STTGateway:
                     contrast=None if utt.contrast is None else round(utt.contrast, 2),
                     engine=self.env.get("AISIS_STT_ENGINE", "faster-whisper large-v3-turbo (wyoming)"))
         def work():
-            import voiceclips
             voiceclips.save(self.db_path(), utt.speech_pcm, utt.rate, meta)
             self.prune_archive()
         job = asyncio.get_running_loop().run_in_executor(None, work)
@@ -596,6 +600,7 @@ class STTGateway:
         final_sent = False
         cancelled = False
         eof = False  # the station asked for the final: nothing may keep the turn open any longer
+        held = deque()  # cuts that came while an earlier one was still being recognised (a dropped activation word, noise)
         stats = {"bytes": 0, "bin": 0, "voiced": 0, "peak": 0, "squares": 0, "samples": 0}
         LOG.info("stt_session_open")
         self.tv_activation()
@@ -604,7 +609,7 @@ class STTGateway:
             """One utterance -> one final. `rejected` is the gate's verdict (None = send it to the recognizer)."""
             nonlocal final_sent, recognition, unclear
             try:
-                text = heard = ""
+                text = heard = wake_cut = ""
                 speaker = None
                 asr_ms = None
                 if utt is not None and rejected is None:
@@ -630,25 +635,36 @@ class STTGateway:
                     rejected = distrust(heard, utt)
                     if rejected == "empty":
                         rejected = None
+                    named = wake_word.split(heard) if rejected is None else None
+                    if named is not None and named.only:
+                        rejected = WAKE_ONLY
                     if rejected is None:
-                        text = heard
+                        text, wake_cut = named.clean, named.head
                         speaker = await self.speaker_result(speaker_task, utt.speech_pcm, rate, text)
                     else:
                         speaker_task.cancel()
                 if rejected:
                     LOG.info("stt_rejected reason=%s trigger=%s heard=%r", rejected, trigger, heard)
+                if wake_cut:
+                    LOG.info("stt_wake cut=%r heard=%r", wake_cut, heard)
                 if utt is not None:
-                    self.archive(utt, {"trigger": trigger, "status": "sent" if rejected is None else ("gate" if asr_ms is None else "blacklist"),
-                        "reason": rejected, "transcript": heard, "asr_ms": asr_ms,
+                    activation = rejected == WAKE_ONLY
+                    self.archive(utt, {"trigger": trigger, "status": voiceclips.ACTIVATION if activation else "sent" if rejected is None else ("gate" if asr_ms is None else "blacklist"),
+                        "reason": "wake" if activation else "wake_cut:" + wake_cut if wake_cut else rejected,
+                        "transcript": text if rejected is None else heard, "asr_ms": asr_ms,
                         "final_ms": None if asr_ms is None else utt.trailing_ms + asr_ms})
-                if rejected and trigger == "vad" and not eof and not ws.closed and not cancelled:
-                    # Noise/caption mid-stream: the station may still be waiting for the real command. Drop it, keep listening.
+                dropped = rejected and (trigger == "vad" or trigger == "idle" and rejected == WAKE_ONLY) and not eof
+                if (dropped or held and not text) and not ws.closed and not cancelled:
+                    # Noise/caption/activation word mid-stream: the station may still be waiting for the real command. Drop it,
+                    # keep listening, and take up what was cut meanwhile.
                     recognition = None
-                    if rejected in UNCLEAR_SPEECH:
+                    if rejected in UNCLEAR_SPEECH or rejected == WAKE_ONLY:
                         unclear = rejected
+                    drain()
                     return
                 if not ws.closed and not cancelled and not final_sent:
                     final_sent = True
+                    held.clear()
                     LOG.info("stt_final pcm=%dB text=%r asr_ms=%s end_to_final_ms=%s", len(utt.pcm) if utt else 0, text, asr_ms,
                              None if asr_ms is None else utt.trailing_ms + asr_ms)
                     reply = {"text": text, "end_of_utt": True}
@@ -681,14 +697,25 @@ class STTGateway:
                 reason, len(utt.pcm) if utt else 0, endpoint.speech_frames, stats["peak"], rms, stats["bytes"], stats["bin"],
                 utt.voiced_ms if utt else 0, "%.1f" % utt.floor_rms if utt and utt.floor_rms is not None else "-",
                 "%.1f" % utt.contrast if utt and utt.contrast is not None else "-")
-            if recognition is not None or final_sent:
+            if final_sent:
                 return
             rejected = judge(utt, tuning) if utt else None
-            if reason == "vad" and rejected and not eof:
+            if reason == "vad" and rejected and not eof:   # noise: dropped now, never queued (it must not push a request out of `held`)
                 LOG.info("stt_gate reason=%s voiced_ms=%d rms=%.1f", rejected, utt.voiced_ms, utt.voiced_rms)
                 self.archive(utt, {"trigger": reason, "status": "gate", "reason": rejected})
                 return
+            if recognition is not None:
+                if utt is not None:
+                    if len(held) < MAX_HELD:   # the earliest cuts stay: the request comes right after the name, what overflows is later noise
+                        held.append((utt, reason, rejected))   # recognised after the running one, unless that one becomes the final
+                return
             recognition = asyncio.create_task(finish(utt, reason, rejected))
+
+        def drain():
+            nonlocal recognition
+            if held and recognition is None and not final_sent and not cancelled:
+                utt, reason, rejected = held.popleft()
+                recognition = asyncio.create_task(finish(utt, reason, rejected))
 
         try:
             while not ws.closed:

@@ -36,6 +36,8 @@ intents:
     max_tokens: 4              # the utterance has at most this many words (catch-alls keep to short phrases)
     slots:
       level: {type: number, range: [0, 10], required: true, ask: "Какую громкость поставить?"}
+      # a `text` slot may also say `no_time: true` (a value holding «через <duration>» is no reading) and
+      # `reject: [word, ..]` (a value made only of those words is no reading): reminder.in uses both
     patterns: ["{set_verb}? громкост* (на|до)? {level}"]
     guards: [not_question]     # not_negated | not_question | is_question | has:<set> | not_has:<set> (any word in a lexicon set);
                                # acting tiers (execute, confirm) get not_negated by default

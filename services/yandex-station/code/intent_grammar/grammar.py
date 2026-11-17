@@ -21,7 +21,7 @@ from typing import Any, Callable, Mapping
 
 from .normalize import Canon, Normalised, normalise
 from .pattern import Alt, Matcher, Node, PatternError, Resolver, SLOT_TYPES, Word, compile_forms, parse_pattern
-from .timewords import duration_ru
+from .timewords import duration_ru, parse_duration
 
 PHASES = ("pre", "post")   # pre: safe to answer before the quasar container's own handlers; post: only when they found nothing
 MAX_CLAUSES = 8           # a compound command has at most this many clauses; a longer chain is never split (the search is quadratic)
@@ -35,7 +35,7 @@ SET_GUARDS = ("has:", "not_has:")   # has:<lexicon set> / not_has:<lexicon set>:
 REPLY_KINDS = ("canned", "template", "earcon", "none")
 _INTENT_KEYS = {"id", "tier", "labels", "priority", "patterns", "slots", "guards", "allow_negation", "fuzzy_ok", "max_tokens", "phase",
                 "action", "reply", "examples", "negatives", "note"}
-_SLOT_KEYS = {"type", "range", "required", "default", "ask", "values"}
+_SLOT_KEYS = {"type", "range", "required", "default", "ask", "values", "no_time", "reject"}
 _TOP_KEYS = {"version", "locale", "lexicon", "intents", "backtest", "gate"}
 
 
@@ -51,6 +51,8 @@ class SlotSpec:
     required: bool = False
     default: Any = None
     ask: str | None = None
+    no_time: bool = False          # a text value holding «через <duration>» is no reading: it is a second time, two readings of «когда»
+    reject: tuple[str, ...] = ()   # a text value made only of these words is no reading («нам всем» as the whole note)
 
 
 @dataclass(frozen=True)
@@ -319,6 +321,8 @@ class Grammar:
 
 def _slot_ok(intent: Intent, name: str, value: object) -> bool:
     spec = intent.slots.get(name)
+    if spec is not None and isinstance(value, str) and ((spec.reject and all(word in spec.reject for word in value.split())) or (spec.no_time and _holds_time(value))):
+        return False
     if spec is None or spec.range is None:
         return True
     amount = value.get("amount") if isinstance(value, dict) else value
@@ -448,6 +452,15 @@ def from_data(data: Any, sha256: str) -> Grammar:
                    sha256=sha256, lexicon_forms=forms, sets=resolver.sets)
 
 
+def _holds_time(value: str) -> bool:
+    tokens = value.split()
+    return any(token == "через" and parse_duration(tokens, at + 1) for at, token in enumerate(tokens))
+
+
+def _words(value: Any) -> tuple[str, ...]:
+    return tuple(str(word).lower().replace("ё", "е") for word in value or ())
+
+
 def _intent(raw: Any, resolver: Resolver) -> Intent:
     if not isinstance(raw, dict) or "id" not in raw:
         raise GrammarError("every intent is a mapping with an id")
@@ -471,7 +484,7 @@ def _intent(raw: Any, resolver: Resolver) -> Intent:
         if rng is not None and (not isinstance(rng, list) or len(rng) != 2):
             raise GrammarError(f"{iid}: slot {name} range must be [low, high]")
         slots[name] = SlotSpec(name, spec["type"], tuple(rng) if rng else None, bool(spec.get("required", False)),
-                               spec.get("default"), spec.get("ask"))
+                               spec.get("default"), spec.get("ask"), bool(spec.get("no_time", False)), _words(spec.get("reject")))
     local = Resolver(sets=resolver.sets, keyed=resolver.keyed, slot_types={n: s.type for n, s in slots.items()})
     pattern_text = [str(p) for p in (raw.get("patterns") or [])]
     if not pattern_text:

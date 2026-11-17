@@ -47,6 +47,9 @@ COLUMNS = ("id", "ts", "dialog_id", "path", "dur", "rate", "bytes", "rms", "peak
 # transcript is the speaker's own recognition and must not count as Whisper's in the recognizer-quality numbers.
 SPOTTER_TRIGGER = "spotter"
 SPOTTER_ENGINE = "колонка сама (споттер команд)"
+# A segment that was only the activation word (wake_word.py): an event of the session, not an utterance. Its row is kept (audio,
+# what Whisper wrote in `transcript`, `reason='wake'`) but it is no request: the clip feed never posts it alone, the ASR bench skips it.
+ACTIVATION = "activation"
 
 
 def root() -> Path:

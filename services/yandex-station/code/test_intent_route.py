@@ -517,6 +517,23 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         off = router()
         self.assertEqual((await off.route("st", "поставь таймер на пять минут")).text, intent_route.TIMERS_OFF)
 
+    async def test_a_reminder_with_everything_said_is_set_not_asked_about(self):
+        """tg#30177: «Напомню, выключить грелку через десять минут.» (Whisper's «напомню») got «Скажи, когда напомнить»."""
+        timers = FakeTimers()
+        r = router(timers=timers)
+        for text in ("Напомню, выключить грелку через десять минут.", "напомни выключить грелку через десять минут"):
+            route = await r.route("st", text)
+            self.assertEqual((route.kind, route.text, route.listen, route.intent), ("reply", "Напомню через 10 минут.", False, "reminder.in"), text)
+        self.assertEqual(timers.calls, [("start", 600, "выключить грелку")] * 2)
+        asked = await r.route("st", "напомни купить хлеб")                  # no time said: asking when is still right
+        self.assertEqual((asked.intent, asked.text), ("reminder.help", "Скажи, когда напомнить. Например: напомни через десять минут выключить плиту."))
+
+    async def test_a_mishearing_of_the_name_alone_is_no_garbled_request(self):
+        """tg#30176: «Малис.» was answered «Не расслышал. Повтори, пожалуйста.» and the speaker's real request was lost."""
+        route = await router().route("st", "Малис.")
+        self.assertEqual((route.intent, route.listen), ("smalltalk.wake", False))
+        self.assertNotIn("расслышал", route.text)
+
     async def test_the_confirmation_says_the_duration_in_the_accusative(self):
         r = router(timers=FakeTimers(), monotonic=lambda: 100.0)
         for text, want in (("поставь таймер на минуту", "Таймер на 1 минуту."),
