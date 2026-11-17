@@ -101,6 +101,15 @@ def _row_id(basis: str, occurrence: int) -> str:
     return hashlib.sha1(f"{basis}|{occurrence}".encode("utf-8")).hexdigest()[:12]
 
 
+def corpus_source(name: str) -> str | None:
+    """The source (`synthetic` / `real`) of a corpus file by its name; None for a file the back-test does not read."""
+    if name == "intents-ru.jsonl":
+        return "synthetic"
+    if name.startswith("real-voice-") or name.endswith("-labelled.jsonl"):
+        return "real"
+    return None
+
+
 def load_rows(directory: Path, grammar: Grammar) -> tuple[list[Row], list[dict[str, Any]]]:
     """All rows of every known corpus file under `directory`, plus the file manifest (name, sha256, rows)."""
     percent = holdout_percent(grammar)
@@ -114,11 +123,8 @@ def load_rows(directory: Path, grammar: Grammar) -> tuple[list[Row], list[dict[s
             manifest.append({"file": name, "source": "replay", "rows": len(replay or {}),
                              "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
             continue
-        if name == "intents-ru.jsonl":
-            source = "synthetic"
-        elif name.startswith("real-voice-") or name.endswith("-labelled.jsonl"):
-            source = "real"
-        else:
+        source = corpus_source(name)
+        if source is None:
             continue
         data = path.read_bytes()
         count = 0

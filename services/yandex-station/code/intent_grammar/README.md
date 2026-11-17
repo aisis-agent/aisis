@@ -217,6 +217,62 @@ written atomically (temp file, then replace) under a lock, names carry the clock
 report folder are created independently. `--no-latest` never promotes. The shipped `gate:` floors are ratchets: raise them when a change
 holds a higher number, never lower them to make a change pass (see the comment in `grammar/ru.yaml`).
 
+## Nightly loop
+
+```
+python3 -m intent_grammar nightly prepare [--hours 24] [--jev] [--dry-run]   # corpus growth, measurement, clusters, the brief: the day's private working directory
+python3 -m intent_grammar nightly run     [--hours 24] [--jev] [--dry-run]   # prepare, then launch the omp session that proposes and lands changes
+python3 -m intent_grammar nightly status                                      # summary (and handoff) of the newest run
+python3 -m intent_grammar nightly morning                                     # hand the night's hatch requests to the owner through the harness
+python3 -m intent_grammar nightly label "<phrase>" <TRUTH>                    # queue an owner label for the real corpus
+```
+
+Every night at 03:30 (`systemd/aisis-intent-nightly.timer`, `Persistent=true` so a missed night runs at the next boot; `systemd/aisis-intent-nightly.service` runs `nightly run`):
+
+1. **Extract** the last 24 h of spoken utterances from the dialog store with the layer that answered each (quasar fast layer / brain / nothing).
+2. **Grow the corpus** (see below), then **measure**: the production route over the labelled corpora with the previous promoted report as baseline (`--route combined`,
+   the grammar's `gate:` with the held-out ratchet `gate.holdout`, the emergency safety set `gate.safety`, and the reported 90 % `gate.goal`). The report is written to the
+   day's directory (mode 0600: it holds the dev utterances) and becomes `latest.json` only when the gate held, as in `backtest`. The nightly run never makes a baseline itself: without a usable
+   `latest.json` (none yet, another route, split definition or schema) the gate is blocked with `no baseline`. The owner starts it once with `backtest --route combined --gate --no-text --init-baseline REASON`.
+   The summary carries the per-row comparison (`regressed`, `lost_rows`, `relabelled`) and the superseded held-out floor as `legacy_floor`.
+3. **Cluster** what only the brain answered (stem-set similarity); with `--jev` ask Jev for the nearest existing intent of each cluster.
+4. **Brief** an omp session through the sanctioned detached launcher (skill `rig-detached-omp`, environment stripped of keys and tokens).
+   - Gate **green**: the session proposes new/merged/improved intents, only if the gate still holds, and lands them through the **normal merge path**: its own worktree, tests,
+     the back-test gate, ONE `review diff --staged --task 107 --commit --detach` (shared board and queue; no hatch), a pull request with `Refs #107`, then
+     `gh ship <PR> --task '#107'` from the repository root. Nothing is merged any other way and no gate flag is skipped. It comments the aggregates on the open issue
+     «Nightly intent loop reports», sends **one** Telegram message and writes `handoff.json`. Nothing survives the gate, or the diff is trivial: nothing is proposed and the report says why.
+   - Gate **red** before the night's change (a failed rule, a failed safety phrase, or no corpus to measure on): the brief is the blocked one. The session runs
+     `review brainstorm "<failed rules>" --task 107`, works the fix out in its worktree and leaves `proposal.patch`, `brainstorm.md` and `report.md`; it makes no commit, push, PR or
+     `gh ship`. The loop sends the owner one Telegram line (a safety failure is called out as such). A gate that fails is satisfied, never bypassed.
+   - A gate that blocks the session later (back-test, test, review finding, CI, `gh ship`): it does not bypass it and does not stop; it runs `review brainstorm`, satisfies the gate the way
+     that discussion settles, a refactor included, and records the outcome in the PR body. Only a gate that is demonstrably broken (refuses a correct state, command and output as evidence)
+     gets a ticket (`task new`) and a line in `<date>/hatch-requests.md`. The session never sets a `RIG_HATCH_REQUEST_*` variable and the `require-review-before-commit` hatch is never an option.
+5. **Morning** (`systemd/aisis-intent-morning.timer`, 08:30): `nightly morning` turns each night's `hatch-requests.md` into one harness ticket (`harness tasks new`), once per file (a `hatch-asked` marker
+   beside it; a refused ask is reported and repeated the next morning). The owner decides there; the loop grants nothing.
+
+**Corpus growth.** Each `prepare` appends the newly labelled real rows to `real-voice-nightly-labelled.jsonl` in the corpus directory (a real source by name; the owner's hand-labelled files are never touched).
+Sources: the owner's feedback inbox `<out>/owner-labels.jsonl` (lines `{"text", "truth", "ts"?}`, filled by `nightly label`; `labeller: "owner"`), and, only with `--jev`, the cluster
+representatives Jev maps to an existing intent with confidence ≥ 0.8 (`truth` = that intent's first label, `labeller: "jev"`, the choice and confidence in `note`). A row is added only when no real
+file already has its canonical text (`backtest.split_key`: case, ё, punctuation, whitespace), so the file is append-only and deduplicated; no row is ever rewritten or removed, the file is
+mode 0600, and new rows get `verdict: "unverified"` so they never count as handled by the quasar layer. The held-out side of a row is the stable hash of its text, computed by the loader. An inbox line
+that cannot be used (not JSON, no text or truth, unknown label) is listed in the summary and on stderr with its line number and stays where it is. A corpus with an unreadable line is not appended to at all:
+the run stops with the lines named, because the line could be the duplicate of a candidate.
+
+**Jev is opt-in and off by default**: it sends private household utterances to Vercel. The unit does not pass `--jev`. To enable it put `AISIS_NIGHTLY_ARGS=--jev` and `VERCEL_JEV_KEY=...` in
+`~/.config/aisis/intent-nightly.env` (mode 0600; the unit reads it as an optional `EnvironmentFile` and expands `$AISIS_NIGHTLY_ARGS` in `ExecStart`), and delete the line to switch it off. `--jev` without the key,
+or without the Jev module, stops the run with exit 2 and a Telegram line; failed Jev calls are counted in the summary and warned about on stderr; none of it is silent. The key stays in this process.
+
+**`--dry-run`** prepares and writes the brief and nothing else outside the day's private directory: no corpus row (the summary says how many would be added), no baseline promotion, no report lock,
+no Jev call (with `--jev` only the key and module are checked), no session, no Telegram. Read `brief.md`, `summary.json` and `backtest.json` in `<out>/<date>/` to see what a live night would do.
+
+A merged grammar takes effect at the next restart of the station adapter (it loads the committed JSON bundle at start); the nightly session does not restart the adapter. The service sets `KillMode=process` so
+the detached omp session is not killed when the oneshot unit ends.
+
+All working files (`~/.local/share/aisis/intent-nightly/<date>/`, mode 0600) hold real utterances and never leave the machine; only aggregates and intent ids reach git, a PR, an issue or Telegram.
+
+**Why a systemd timer.** omp has no scheduling facility: `omp --help`, the omp docs (CLI reference, slash commands, SDK, settings, tools), the installed skills and `~/.omp` contain only an interactive loop mode and advisor
+review cadences, nothing that starts a session at a time. A user timer that launches a detached omp session is the established pattern on this host, and `aisis-whisper-prompt.timer` is the in-repo precedent for a nightly job.
+
 ## Provenance
 
 Canonicaliser (ё fold, edge-only courtesy strip, span map, single-edit typo repair), the suffix stemmer and the clock/duration

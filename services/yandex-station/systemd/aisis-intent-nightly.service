@@ -1,0 +1,31 @@
+[Unit]
+Description=AISIS nightly intent loop: grow the labelled corpus, measure, brief an omp session that proposes grammar changes and lands them through the normal merge path (ticket #107)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/xp/aisis/services/yandex-station/code
+# omp, tg, rig and gh live in ~/.local/bin; the user manager's PATH does not carry it.
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+# Optional file, absent by default. It is the only place where the loop is configured beyond this unit:
+#   AISIS_NIGHTLY_ARGS=--jev           OPT-IN Jev labelling (default OFF). Private utterances of the household are sent to Vercel (Jev) when it is on:
+#                                      the preparation step asks Jev for the nearest existing intent of each cluster and rows it labels confidently join the
+#                                      real corpus (marked labeller=jev). It needs the next line; a missing key with --jev stops the run loudly (exit 2,
+#                                      a Telegram line), it never silently runs without labels.
+#   VERCEL_JEV_KEY=...                 the key; keep the file at mode 0600. It stays in this process: the launcher hands the omp session an
+#                                      environment without keys or tokens.
+# To enable: create ~/.config/aisis/intent-nightly.env with both lines (or `systemctl --user edit aisis-intent-nightly.service` with
+# [Service] / EnvironmentFile=%h/.config/aisis/intent-nightly.env), then `systemctl --user daemon-reload`. To disable: remove the AISIS_NIGHTLY_ARGS line.
+EnvironmentFile=-%h/.config/aisis/intent-nightly.env
+Nice=15
+IOSchedulingClass=idle
+# The launcher nohup-detaches the omp session inside this unit's cgroup and returns. With the default KillMode=control-group systemd would kill it as soon
+# as this oneshot ends; KillMode=process stops only the main process, so the session runs on (the launcher logs it as intent-nightly-<date>.log).
+KillMode=process
+UMask=0077
+# Preparation (a few seconds) plus the detached launch; the omp session itself (worktree, tests, back-test gate, review, PR, gh ship) runs on after this unit exits.
+TimeoutStartSec=15min
+# $AISIS_NIGHTLY_ARGS is empty unless the file above sets it: no --jev by default.
+ExecStart=%h/.local/share/aisis/venv/bin/python -m intent_grammar nightly run $AISIS_NIGHTLY_ARGS
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes

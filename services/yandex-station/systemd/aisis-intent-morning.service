@@ -1,0 +1,15 @@
+[Unit]
+Description=AISIS intent loop, morning: put the hatch requests the nightly session collected in front of the owner through the harness (ticket #107)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/xp/aisis/services/yandex-station/code
+# harness lives in ~/.local/bin; the user manager's PATH does not carry it.
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Nice=15
+UMask=0077
+TimeoutStartSec=2min
+ExecStart=%h/.local/share/aisis/venv/bin/python -m intent_grammar nightly morning
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=yes
