@@ -60,7 +60,7 @@ docker run --rm --network none --entrypoint /node_modules/.bin/tsx \
   -v "$OVERLAY/backend/ha-intents.ts:/src/backend/ha-intents.ts:ro" \
   -v "$OVERLAY/backend/asr-correct.ts:/src/backend/asr-correct.ts:ro" \
   -v "$OVERLAY/backend/grammar-hook.ts:/src/backend/grammar-hook.ts:ro" "$IMAGE" /src/backend/check_grammar_hook.mts   # ИТОГ 34/34
-../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar-$(date -u +%Y%m%d-%H%M%S)      # base = the active color's image; the tag is unique per run
+../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar-$(date -u +%Y%m%dT%H%M%SZ)      # base = the active color's image; the tag is unique per run
 ```
 
 Nothing here deploys or restarts anything (the quasar deploys belong to the deploy owner). `check_grammar_hook.mts` serves a stub adapter and a
@@ -108,7 +108,7 @@ python3 ../weather-via-cli/prepare_overlay.py --baseline "$BASE/backend/entity-i
 python3 prepare_overlay.py --ha-intents "$OVERLAY/backend/ha-intents.ts" --asr-correct "$BASE/backend/asr-correct.ts" --output-dir "$OVERLAY.intent"
 cp "$OVERLAY.weather/backend/entity-index.ts" "$OVERLAY.intent/backend/asr-correct.ts" "$OVERLAY.intent/backend/grammar-hook.ts" "$OVERLAY/backend/"
 cp "$OVERLAY.intent/backend/ha-intents.ts" "$OVERLAY/backend/ha-intents.ts"                      # speaker-room + grammar hook
-../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar-speaker-room-weather-$(date -u +%Y%m%d-%H%M%S)   # docker tags cannot contain "+"; unique per run: a failed deploy must never overwrite the tag of the running image
+../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar-speaker-room-weather-$(date -u +%Y%m%dT%H%M%SZ)   # docker tags cannot contain "+"; unique per run: a failed deploy must never overwrite the tag of the running image
 ```
 
 The in-container check passes on the combined `ha-intents.ts` too (`ИТОГ 34/34`, with the speaker-room `speaker-room.ts`
