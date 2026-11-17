@@ -26,9 +26,12 @@ import announcement_cache
 import asr_correct
 import dialog_context
 import dialogstore
+import ha_actions
+import intent_route
 import led_animation
 import reply_guard
 import user_prompt
+import timers
 import tts_settings
 import uniproxy_tts
 import voice_skills
@@ -136,6 +139,16 @@ class Adapter:
         if not self.allowed:
             raise ValueError("AISIS_ALLOWED_STATIONS must contain at least one speaker ID")
         self.skills = voice_skills.Skills(self.env)
+        # Grammar route before the brain (intent_route.py): canned lines, reprompts, clock, timers, HA climate/colour.
+        # AISIS_INTENT_GRAMMAR=on|shadow|off (shadow logs the decision, never acts); AISIS_INTENT_CATCHALL=off keeps the
+        # catch-all «не расслышал» reprompts away. Any failure leaves calc -> skills -> brain as it was.
+        self.intent_mode = self.env.get("AISIS_INTENT_GRAMMAR", "on").lower()
+        self.intents: intent_route.IntentRouter | None = None
+        self.timers: timers.TimerBook | None = None
+        self.hacli_session: ClientSession | None = None
+        self.intent_ha_url = self.env.get("AISIS_HACLI_URL", "http://127.0.0.1:8795").rstrip("/")
+        if self.intent_mode != "off":
+            self.intents = self._build_intents()
         self.chatgpt_timeout: float | None = self._chatgpt_timeout()
         self.store = Store(self.env.get("AISIS_STATE_DB", str(Path.home()/".local/state/aisis/adapter.sqlite3")))
         self.command = json.loads(self.env.get("AISIS_CHATGPT_COMMAND", "[]"))
@@ -170,6 +183,40 @@ class Adapter:
         self.corrector_http: ClientSession | None = None
         self.warm_task: asyncio.Task | None = None
         self.catalog_cache: tuple[float, voice_vocab.Catalog] | None = None
+
+    def _build_intents(self) -> intent_route.IntentRouter | None:
+        grammar = intent_route.load_grammar(self.env.get("AISIS_INTENT_BUNDLE") or None)
+        if grammar is None:
+            return None
+        tts_entity, player = self.env.get("AISIS_TIMER_TTS_ENTITY"), self.env.get("AISIS_TIMER_PLAYER")
+        if tts_entity and player:
+            self.timers = timers.TimerBook(self.env.get("AISIS_TIMERS_DB", str(Path.home()/".local/state/aisis/timers.json")),
+                timers.HaAnnouncer(self._ha_post_status, tts_entity, player))
+        ha = ha_actions.HaActions(self._ha_get_json, self._ha_post_json) if self.env.get("AISIS_HA_ACTIONS", "on") != "off" else None
+        return intent_route.IntentRouter(grammar, self.skills, self.timers, ha,
+                                         catchall=self.env.get("AISIS_INTENT_CATCHALL", "on") != "off")
+
+    def _hacli(self) -> ClientSession:
+        """One short-timeout session for ha-cli calls: a stuck Home Assistant must not stall a voice turn for a minute."""
+        if self.hacli_session is None:
+            self.hacli_session = ClientSession(timeout=ClientTimeout(total=3), trust_env=False)
+        return self.hacli_session
+
+    async def _ha_get_json(self, path: str):
+        async with self._hacli().get(self.intent_ha_url + path) as result:
+            result.raise_for_status()
+            return await result.json(content_type=None)
+
+    async def _ha_post_json(self, path: str, body: dict):
+        async with self._hacli().post(self.intent_ha_url + path, json=body) as result:
+            text = await result.text()
+            try:
+                return result.status, json.loads(text) if text else None
+            except ValueError:
+                return result.status, text
+
+    async def _ha_post_status(self, path: str, body: dict) -> int:
+        return (await self._ha_post_json(path, body))[0]
 
     def _chatgpt_timeout(self):
         if not self.env.get("AISIS_PM_URL"):
@@ -207,6 +254,8 @@ class Adapter:
     async def start(self, _app):
         self.http = ClientSession(timeout=ClientTimeout(total=60))
         self._asr_corrector()  # opens the keep-alive connection before the first phrase needs it
+        if self.timers is not None:
+            await self.timers.resume()
         if self.env.get("AISIS_LED_ANIMATION") == "on":  # adb on the speaker: opt-in per process (not in tests/stage)
             led_animation.start_watcher()  # sound-start animation on the clock display, fire-and-forget
 
@@ -220,6 +269,10 @@ class Adapter:
         if self.remember_task and not self.remember_task.done():
             self.remember_task.cancel()
             await asyncio.gather(self.remember_task, return_exceptions=True)
+        if self.timers is not None:
+            await self.timers.close()
+        if self.hacli_session is not None:
+            await self.hacli_session.close()
         if self.http is not None:
             await self.http.close()
         if self.corrector_http is not None:
@@ -242,7 +295,9 @@ class Adapter:
     async def health(self, request):
         return web.json_response({"service": "aisis", "processor_configured": bool(self.command),
             "tts_configured": bool(self.fish_key()), "automatic_retries": False,
-            "tts_voice": tts_settings.load()["tts_voice"], "alice_tts": self.alice_last})
+            "tts_voice": tts_settings.load()["tts_voice"], "alice_tts": self.alice_last,
+            "intent_grammar": {"mode": self.intent_mode, "loaded": self.intents is not None,
+                               "routes": dict(self.intents.stats) if self.intents else {}}})
 
     async def turn(self, station: str, text: str):
         if not self.command:
@@ -428,6 +483,9 @@ class Adapter:
         return station, text
 
     async def _process_turn(self, ws, data):
+        listen = False      # the grammar's question («На сколько поставить таймер?») keeps the microphone open
+        from_brain = False  # the reply is the brain's own (the router treats a question of its as one a short answer belongs to)
+        station = None     # set once _turn_input has accepted the turn: a rejected one still gets its error reply
         try:
             station, text = self._turn_input(data)
             if text is None:
@@ -435,21 +493,35 @@ class Adapter:
                     await ws.send_json({"type": "partialResponse", "data": {"text": NO_SPEECH_REPLY,
                         "directives": [], "finished": True, "shouldListen": False}})
                 return
-            # Instant arithmetic never wakes the slow browser brain; neither do weather and «включи музыку»,
-            # which the brain cannot do and would refuse (voice_skills.py).
-            reply = calc_evaluate(text)
+            # The grammar route answers what needs no model: canned lines, reprompts, the clock, timers, climate and
+            # colour, then arithmetic and weather (intent_route.py). Instant arithmetic never wakes the slow browser
+            # brain; neither do weather and «включи музыку», which the brain cannot do and would refuse.
+            reply = None
+            if self.intents is not None and self.intent_mode == "shadow":
+                decision = self.intents.classify(text)       # decide only: no timer, Home Assistant call or reprompt cooldown
+                LOG.info("intent_shadow intent=%s tier=%s", decision.intent if decision else None, decision.tier if decision else None)
+            elif self.intents is not None:
+                route = await self.intents.route(station, text)
+                if route.kind in ("reply", "silent"):
+                    reply = route.text or ""
+                    listen = route.listen
+            if reply is None:
+                reply = calc_evaluate(text)
             if reply is None:
                 reply = await self.skills.answer(text)
             if reply is None:
                 reply = await self.turn(station, text)
+                from_brain = True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             LOG.warning("processor_failed class=%s", type(exc).__name__)
             reply = ERROR_REPLY
+        if self.intents is not None and station is not None:
+            self.intents.note_reply(station, reply, brain=from_brain)
         if not ws.closed:
             await ws.send_json({"type": "partialResponse", "data": {"text": reply,
-                "directives": [], "finished": True, "shouldListen": False}})
+                "directives": [], "finished": True, "shouldListen": listen}})
 
     async def processor(self, request):
         self.authorize(request)
@@ -723,11 +795,35 @@ class Adapter:
             raise web.HTTPBadRequest(text="invalid alternatives")
         if not (isinstance(recent, list) and len(recent) <= 8 and all(isinstance(t, dict) for t in recent)):
             raise web.HTTPBadRequest(text="invalid recent")
+        if self.intent_mode == "on" and self.intents is not None and self.intents.classify(text, "pre") is not None:
+            # The grammar already knows this phrase (canned line, clock, timer, …): the ~0.85 s Haiku repair would only delay it.
+            return web.json_response({"text": text.strip(), "confidence": 0.0, "intent": "grammar", "changed": False,
+                                      "mode": "ignore", "status": "grammar", "ms": 0})
         corrector = self._asr_corrector()
         if corrector is None:
             return web.json_response({"text": text.strip(), "confidence": 0.0, "intent": "unclear", "changed": False,
                                       "mode": "ignore", "status": "unavailable", "ms": 0})
         return web.json_response(await corrector.correct(text, alternatives, recent, str(body.get("source", ""))[:40]))
+
+    async def intent_decide(self, request):
+        """The quasar overlay's first question for a phrase: does the grammar answer it before the container's own handlers?
+
+        Always 200. `route: "none"` (grammar off, abstain, nothing the adapter may do before the quasar layer, any error)
+        tells the caller to carry on with its own code; the overlay (overlays/intent-grammar) gives this call 250 ms.
+        """
+        self.authorize(request)
+        body = await request.json()
+        text = body.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text) > 400:
+            raise web.HTTPBadRequest(text="invalid text")
+        if self.intents is None or self.intent_mode == "off":
+            return web.json_response(intent_route.NONE.as_json())
+        if body.get("shadow") is True:
+            return web.json_response(self.intents.shadow(text, "pre").as_json())   # classify only: executes nothing
+        if self.intent_mode != "on":
+            return web.json_response(intent_route.NONE.as_json())
+        route = await self.intents.route("quasar", text, phase="pre", via_quasar=True)
+        return web.json_response(route.as_json())
 
     async def music_play(self, request):
         """Voice «включи <артист/трек/альбом>»: search Music Assistant and play on the speaker.
@@ -777,6 +873,7 @@ class Adapter:
         app.router.add_get("/v1/remote-announcements/status", self.announcement_status)
         app.router.add_post("/laya", self.laya)
         app.router.add_post("/asr/correct", self.asr_correct)
+        app.router.add_post("/intent/decide", self.intent_decide)
         app.router.add_post("/music/play", self.music_play)
         app.router.add_post("/music/control", self.music_control)
         app.on_startup.append(self.start)

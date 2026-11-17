@@ -3,18 +3,21 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
+import intent_grammar.grammar as engine
 from intent_grammar import GrammarError, backtest, cli, loads
 from intent_grammar.grammar import load, render_reply
 from intent_grammar.normalize import Canon, edit_distance_le1, normalise, phonetic_key, repair_typo, stem, tokenize
 from intent_grammar.numerals import parse_number, parse_ordinal
-from intent_grammar.timewords import duration_ru, parse_clock, parse_duration
+from intent_grammar.timewords import duration_ru, parse_clock, parse_duration, plural
 
 SHIPPED = Path(__file__).parent / "intent_grammar" / "grammar" / "ru.yaml"
 
@@ -229,7 +232,7 @@ intents:
     patterns: ["сколько будет _"]
   - id: calc.b
     tier: query
-    patterns: ["сколько _ будет"]
+    patterns: ["сколько _ два"]
   - id: rel.up
     tier: execute
     slots: {d: {type: delta}}
@@ -319,10 +322,9 @@ class GrammarTests(unittest.TestCase):
         self.assertEqual(self.g.say(self.g.decide("спасибо")), "Пожалуйста.")
 
     def test_two_equal_readings_abstain(self):
-        text = "сколько будет будет"
-        self.assertEqual({c.intent for c in self.g.candidates(text)}, {"calc.a", "calc.b"})
-        self.assertIsNone(self.g.decide(text))
-        self.assertEqual({c.intent for c in self.g.candidates("сколько будет два")}, {"calc.a"})
+        self.assertIsNone(self.g.decide("сколько будет два"))                 # calc.a and calc.b read it equally well
+        self.assertEqual({c.intent for c in self.g.candidates("сколько будет два")}, {"calc.a", "calc.b"})
+        self.assertEqual(self.g.decide("сколько будет три").intent, "calc.a")
 
     def test_a_tied_utterance_is_not_split_into_a_compound(self):
         g = loads(TIE)
@@ -382,6 +384,67 @@ class GrammarTests(unittest.TestCase):
         self.assertEqual(g.decide("Ёжик").intent, "name")
 
 
+EXTENSION_INTENTS = '''  - id: early.hello
+    tier: canned
+    phase: pre
+    patterns: ["привет"]
+    reply: {kind: canned, say: ["Здравствуй."]}
+  - id: chatter.short
+    tier: reprompt
+    priority: -10
+    max_tokens: 2
+    guards: [not_question, "not_has:chat_markers"]
+    patterns: ["..."]
+    reply: {kind: canned, say: ["Не расслышал."]}
+'''
+MINI_EXT = MINI.replace("  rooms:", "  chat_markers: [расскажи, хочу]\n  rooms:", 1).replace("backtest:", EXTENSION_INTENTS + "backtest:", 1)
+
+
+class EngineExtensionTests(unittest.TestCase):
+    """Phases, priority bands, token caps, lexicon-set guards and the repaired-typo flag."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.g = loads(MINI_EXT)
+
+    def test_phase_selects_the_intents_that_may_answer_early(self):
+        self.assertEqual(self.g.decide("привет", phase="pre").intent, "early.hello")
+        self.assertIsNone(self.g.decide("включи свет", phase="pre"))
+        self.assertEqual(self.g.decide("включи свет", phase="post").intent, "light.on")
+        self.assertEqual(self.g.decide("привет", phase="post").intent, "chatter.short")   # the early intent is out of this phase
+
+    def test_priority_bands_separate_real_intents_from_catch_alls(self):
+        self.assertIsNone(self.g.decide("абракадабра ляля", min_priority=0))
+        self.assertEqual(self.g.decide("абракадабра ляля", max_priority=-1).intent, "chatter.short")
+        self.assertEqual(self.g.decide("включи свет", min_priority=0).intent, "light.on")
+
+    def test_token_cap_and_set_guards_keep_the_catch_all_narrow(self):
+        self.assertIsNone(self.g.decide("абракадабра ляля тополя"))               # three tokens: over max_tokens
+        self.assertIsNone(self.g.decide("хочу ляля"))                             # a chat marker is in the utterance
+        self.assertIsNone(self.g.decide("что ляля"))                              # a question
+        self.assertEqual(self.g.decide("ляля").intent, "chatter.short")
+
+    def test_unknown_set_guard_is_rejected(self):
+        with self.assertRaises(GrammarError):
+            loads(MINI_EXT.replace('"not_has:chat_markers"', '"not_has:nope"'))
+
+    def test_typo_repair_makes_the_reading_fuzzy(self):
+        g = loads(MINI_EXT.replace("  fillers: [пожалуйста]", "  fillers: [пожалуйста]\n  typo_vocabulary: [включи, выключи]"))
+        exact = g.decide("включи свет")
+        self.assertEqual((exact.tier, exact.fuzzy), ("execute", False))
+        repaired = g.decide("включии свет")
+        self.assertEqual((repaired.intent, repaired.tier, repaired.fuzzy, repaired.confidence), ("light.on", "confirm", True, 0.8))
+
+    def test_core_text_gives_back_the_raw_words_without_wake_and_punctuation(self):
+        got = self.g.normalise("Алиса, 12+12.")
+        self.assertEqual(got.core_text(), "12+12")
+        self.assertEqual(self.g.normalise("...").core_text(), "")
+
+    def test_plural_forms(self):
+        self.assertEqual([plural(n, "минута", "минуты", "минут") for n in (1, 2, 5, 11, 21, 22, 25)],
+                         ["минута", "минуты", "минут", "минут", "минута", "минуты", "минут"])
+
+
 class SchemaErrorTests(unittest.TestCase):
     def fails(self, text, needle):
         with self.assertRaises(GrammarError) as raised:
@@ -397,6 +460,7 @@ class SchemaErrorTests(unittest.TestCase):
         self.fails("version: 1\nintents: [{id: a, tier: execute, patterns: ['(x']}]", "missing ')'")
         self.fails("version: 1\nintents: [{id: a, tier: execute, patterns: ['{nope}']}]", "neither a lexicon set")
         self.fails("version: 1\nintents: [{id: a, tier: execute, patterns: [x], guards: [zzz]}]", "guard")
+        self.fails("version: 1\nintents: [{id: a, tier: execute, patterns: [x], phase: sideways}]", "phase")
         self.fails("version: 1\nintents: [{id: a, tier: canned, patterns: [x]}]", "canned reply")
         self.fails("version: 1\nintents: [{id: a, tier: execute, patterns: [x]}, {id: a, tier: execute, patterns: [y]}]", "duplicate")
         self.fails("version: 1\nintents: [{id: a, tier: execute, patterns: [x], slots: {v: {type: nope}}}]", "unknown type")
@@ -404,10 +468,61 @@ class SchemaErrorTests(unittest.TestCase):
 
 
 class ShippedGrammarTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.grammar = load(SHIPPED)
+
     def test_pinned_examples_hold_and_nothing_conflicts(self):
-        grammar = load(SHIPPED)
-        self.assertEqual(grammar.self_check(), [])
-        self.assertEqual(cli._conflicts(grammar), [])
+        self.assertEqual(self.grammar.self_check(), [])
+        self.assertEqual(cli._conflicts(self.grammar), [])
+
+    def intent(self, text, **band):
+        decision = self.grammar.decide(text, **band)
+        return decision and decision.intent
+
+    def test_hallucinated_captions_are_dropped_not_answered(self):
+        for text in ("Продолжение следует...", "Субтитры сделал DimaTorzok", "Редактор субтитров А.Семкин", "Спасибо за просмотр!",
+                     "Подписывайтесь на канал", "Thanks for watching"):
+            with self.subTest(text=text):
+                self.assertEqual(self.grammar.decide(text).tier, "drop")
+
+    def test_negation_is_a_noop_never_the_opposite_action(self):
+        for text in ("не включай свет", "не выключай музыку", "не делай громче", "не надо включать свет"):
+            with self.subTest(text=text):
+                self.assertEqual(self.intent(text), "negation.noop")
+        self.assertEqual(self.intent("не надо"), "dialog.dismiss")                  # a plain «no thanks» still ends the dialog
+
+    def test_spoken_numerals_in_every_case_reach_the_slots(self):
+        self.assertEqual(self.grammar.decide("громкость на двадцать пять процентов").slots, {"percent": 25})
+        self.assertIsNone(self.grammar.decide("громкость пятнадцать", min_priority=0))   # a level is 0..10, never a guessed percent
+        self.assertEqual(self.grammar.decide("громкость десять").slots, {"level": 10})
+        self.assertEqual(self.grammar.decide("поставь таймер на две минуты тридцать секунд").slots, {"duration": 150})
+        self.assertEqual(self.grammar.decide("таймер на полтора часа").slots, {"duration": 5400})
+        self.assertEqual(self.grammar.decide("убавь громкость на пять процентов").slots, {"percent": 5})
+        self.assertEqual(self.grammar.decide("кондиционер в спальне на охлаждение двадцать два градуса").slots,
+                         {"room": "bedroom", "mode": "cool", "temp": 22})
+
+    def test_clock_alarms(self):
+        for text, want in (("поставь будильник на семь утра", "07:00"), ("разбуди меня в половине седьмого", "06:30"),
+                           ("заведи будильник на 7:30", "07:30"), ("будильник на без пятнадцати восемь", "07:45")):
+            with self.subTest(text=text):
+                self.assertEqual(self.grammar.decide(text).slots["time"]["text"], want)
+
+    def test_compound_commands(self):
+        decision = self.grammar.decide("включи свет и выключи чайник")
+        self.assertEqual((decision.intent, [part.intent for part in decision.parts]), ("compound", ["light.on", "device.off"]))
+        self.assertEqual([part.slots.get("device") for part in decision.parts], [None, "kettle"])
+        self.assertIsNone(self.grammar.decide("включи свет и расскажи анекдот про кота и собаку"))
+
+    def test_questions_the_brain_must_answer_stay_with_the_brain(self):
+        for text in ("что такое фотосинтез", "кто лучше собаки или кошки", "расскажи мне про динозавров", "почему небо голубое",
+                     "мне скучно", "как приготовить борщ"):
+            with self.subTest(text=text):
+                self.assertIsNone(self.grammar.decide(text))
+
+    def test_the_real_intents_do_not_depend_on_the_catch_alls(self):
+        self.assertIsNone(self.intent("голи со спортом", min_priority=0))
+        self.assertEqual(self.intent("голи со спортом", max_priority=-1), "asr.garbage_short")
 
 
 class ShippedBehaviourTests(unittest.TestCase):
@@ -419,6 +534,13 @@ class ShippedBehaviourTests(unittest.TestCase):
         decision = self.g.decide(text)
         self.assertIsNotNone(decision, text)
         return decision.action["args"]
+
+    def assertNoRealReading(self, text):
+        """No real intent (priority >= 0) reads it. Phase 2's catch-alls (priority < 0: the «Не расслышал» reprompt, the
+        «Какую громкость?» question) may still answer a short unreadable phrase; none of them acts."""
+        self.assertIsNone(self.g.decide(text, min_priority=0), text)
+        decision = self.g.decide(text)
+        self.assertTrue(decision is None or decision.action is None, text)
 
     def test_volume_keeps_its_unit(self):
         self.assertEqual(self.args("громкость 10%"), {"percent": 10})
@@ -433,23 +555,25 @@ class ShippedBehaviourTests(unittest.TestCase):
             self.assertFalse({"level", "percent"} <= set(args), text)
 
     def test_a_bare_number_off_the_speaker_scale_is_not_a_level(self):
-        self.assertIsNone(self.g.decide("громкость 50"))
-        self.assertIsNone(self.g.decide("громкость 150%"))
-        self.assertIsNone(self.g.decide("громкость -5"))
-        self.assertIsNone(self.g.decide("громкость 5" + "0" * 400))
+        for text in ("громкость 50", "громкость 150%", "громкость -5", "громкость 5" + "0" * 400):
+            with self.subTest(text=text[:20]):
+                self.assertNoRealReading(text)
 
     def test_past_tense_and_questions_do_not_act(self):
         for text in ("выключил свет?", "включил свет?", "Включил свет.", "выключил свет", "Включить свет?", "Выключить свет?",
-                     "остановил музыку", "поставил паузу"):
-            self.assertIsNone(self.g.decide(text), text)
+                     "включил чайник", "Включить чайник?", "остановил музыку", "поставил паузу"):
+            self.assertNoRealReading(text)
         self.assertEqual(self.g.decide("выключи свет").intent, "light.off")
         self.assertEqual(self.g.decide("включи свет").intent, "light.on")
-        self.assertIsNone(self.g.decide("Продолжить воспроизведение?"))
+        self.assertNoRealReading("Продолжить воспроизведение?")
         self.assertEqual(self.g.decide("продолжи воспроизведение").intent, "media.resume")
 
     def test_fragments_do_not_act(self):
-        for text in ("Поставь.", "Убери.", "Полный.", "Полная", "Полно", "полная громкость"):
-            self.assertIsNone(self.g.decide(text), text)
+        for text in ("Убери.", "Полный.", "Полная", "Полно", "полная громкость"):
+            self.assertNoRealReading(text)
+        # Phase 2 answers a bare «Поставь.» on purpose with the clarifying «Что именно?» (asr.dangling_verb): it asks, never acts
+        dangling = self.g.decide("Поставь.")
+        self.assertEqual((dangling.intent, dangling.tier, dangling.action), ("asr.dangling_verb", "clarify", None))
         self.assertEqual(self.g.decide("поставь музыку").intent, "music.generic")
         self.assertEqual(self.g.decide("убери громкость").intent, "volume.down")
         self.assertEqual(self.g.decide("громкость на полную").intent, "volume.max")
@@ -463,6 +587,61 @@ class ShippedBehaviourTests(unittest.TestCase):
         gate = self.g.gate
         self.assertEqual((gate["max_false_triggers"], gate["max_wrong_actions"], gate["max_p95_us"]), (2, 6, 25000))
         self.assertTrue(gate["min_coverage"])
+
+    def test_relative_volume_takes_a_plain_level_or_a_percent_and_nothing_else(self):
+        for text in ("прибавь два градуса", "сделай громче на два градуса", "убавь на три градуса", "убавь на пять единиц",
+                     "прибавь на тридцать", "убавь громкость на пятьдесят", "прибавь громкость на сто"):
+            with self.subTest(text=text):
+                decision = self.g.decide(text, phase="pre")
+                self.assertTrue(decision is None or decision.intent not in ("volume.delta_up", "volume.delta_down"), text)
+        self.assertEqual(self.g.decide("прибавь два градуса").intent, "climate.warmer")      # degrees belong to the AC
+        self.assertEqual(self.g.decide("убавь на три градуса").intent, "climate.cooler")
+        self.assertEqual(self.args("прибавь громкость на десять"), {"direction": 1, "levels": 10, "percent": None})
+        self.assertEqual(self.args("убавь звук на двадцать процентов"), {"direction": -1, "levels": None, "percent": 20})
+        self.assertEqual(self.args("сделай громче на два"), {"direction": 1, "levels": 2, "percent": None})
+
+    def test_refusals_leave_media_and_knowledge_requests_alone(self):
+        for text in ("включи фильм Идиот", "поставь Сука любовь", "включи Тупой и ещё тупее", "включи матч Медведева",
+                     "расскажи про трамплин", "прыжки с трамплина"):
+            with self.subTest(text=text):
+                self.assertIsNone(self.g.decide(text, phase="pre"), text)      # nothing answers before the quasar layer
+        for text, intent in (("Алиса, путин пидор.", "refuse.insult"), ("ты тупая", "refuse.insult"),
+                             ("Путин молодец", "refuse.politics"), ("Трамп молодец", "refuse.politics")):
+            with self.subTest(text=text):
+                self.assertEqual(self.g.decide(text, phase="pre").intent, intent)
+
+    def test_hardware_commands_are_no_questions(self):
+        for text in ("Поставить температуру 30?", "Сделать свет красным?", "Сделать теплее?", "Сделать холоднее?",
+                     "Яркость пятьдесят?"):
+            with self.subTest(text=text):
+                self.assertNoRealReading(text)
+        for text, intent in (("поставь температуру 30", "climate.set"), ("сделай свет красным", "light.color"),
+                             ("сделай теплее", "climate.warmer"), ("яркость пятьдесят", "light.brightness")):
+            self.assertEqual(self.g.decide(text).intent, intent, text)
+
+    def test_chains_joined_by_any_connector_are_split_by_their_real_boundaries(self):
+        clauses = ["включи свет", "выключи свет", "включи свет", "выключи свет", "включи свет"]
+        for joiner in (" и ", " потом ", " а потом "):                 # «а потом» registers two overlapping cuts per boundary
+            with self.subTest(joiner=joiner):
+                decision = self.g.decide(joiner.join(clauses))
+                self.assertEqual((decision.intent, len(decision.parts)), ("compound", 5))
+        too_long = " а потом ".join(["включи свет"] * 9)
+        decision = self.g.decide(too_long, min_priority=0)
+        self.assertTrue(decision is None or decision.intent != "compound")
+
+    def test_a_long_chain_of_clauses_is_answered_at_once(self):
+        for connector_word in ("путин", "закрой"):
+            text = " и ".join([connector_word] * 30) + " и что"
+            for phase in (None, "pre"):
+                started = time.perf_counter()
+                self.g.decide(text, phase=phase)
+                self.assertLess(time.perf_counter() - started, 0.5, (connector_word, phase))
+        # below the clause cap the search itself must not repeat a failing start: 1.9^k paths otherwise
+        with mock.patch.object(engine, "MAX_CLAUSES", 1000, create=True):
+            text = " и ".join(["путин"] * 14) + " и что"
+            started = time.perf_counter()
+            self.g.decide(text)
+            self.assertLess(time.perf_counter() - started, 1.0)
 
 
 class BundleTests(unittest.TestCase):
@@ -494,6 +673,10 @@ class BacktestTests(unittest.TestCase):
         (self.dir / "real-voice-2026-11-labelled.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in real))
         synth = [{"text": "поставь таймер на пять минут", "expect": {"kind": "llm", "domain": "TIMER"}}]
         (self.dir / "intents-ru.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in synth))
+        self.reports = self.dir.parent / (self.dir.name + "-reports")
+        patcher = mock.patch.dict(os.environ, {backtest.ENV_REPORT_DIR: str(self.reports)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.mini = self.dir / "mini.yaml"
         self.mini.write_text(MINI)
 
@@ -502,6 +685,7 @@ class BacktestTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+        shutil.rmtree(self.reports, ignore_errors=True)
 
     def report(self, grammar=None, previous=None):
         grammar = grammar or self.grammar
@@ -577,7 +761,7 @@ class BacktestTests(unittest.TestCase):
         regressed = after["compare"]["regressed"]
         self.assertTrue(regressed)
         self.assertFalse(after["gate"]["ok"])
-        self.assertTrue(any("regressed" in line for line in after["gate"]["failures"]))
+        self.assertTrue(any("got worse" in line for line in after["gate"]["failures"]))
         clean = self.report(previous=before)
         self.assertEqual(clean["compare"]["regressed"], [])
         self.assertTrue(clean["gate"]["ok"])
@@ -594,10 +778,10 @@ class BacktestTests(unittest.TestCase):
             rc = cli.main(["--grammar", str(self.mini), "backtest", "--corpus", str(self.dir), "--no-text"])
         self.assertEqual(rc, 0)
         self.assertIn("real/all", out.getvalue())
-        saved = json.loads((self.dir / "reports" / "latest.json").read_text())
+        saved = json.loads((self.reports / "latest.json").read_text())
         self.assertTrue(saved["dev_misses"])
         self.assertTrue(all("text" not in miss for miss in saved["dev_misses"]))
-        self.assertEqual(len(list((self.dir / "reports").glob("backtest-*.json"))), 1)
+        self.assertEqual(len(list(self.reports.glob("backtest-*.json"))), 1)
 
     def test_cli_exit_codes(self):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -605,7 +789,9 @@ class BacktestTests(unittest.TestCase):
             self.assertEqual(cli.main(["--grammar", str(self.dir / "nope.yaml"), "check"]), 2)
             self.assertEqual(cli.main(["check"]), 0)
             self.assertEqual(cli.main(["--grammar", str(self.mini), "backtest", "--corpus", str(self.dir), "--gate",
-                                       "--no-latest", "--out", str(self.dir / "x.json")]), 0)
+                                       "--init-baseline", "test start", "--no-latest", "--out", str(self.dir / "x.json")]), 0)
+            gated = ["backtest", "--corpus", str(self.dir), "--gate", "--no-latest", "--out", str(self.dir / "x.json")]
+            self.assertEqual(cli.main(gated), 1)       # the shipped grammar's coverage floors do not hold on this tiny corpus
 
     def backtest_cli(self, grammar_path, *extra):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -614,32 +800,106 @@ class BacktestTests(unittest.TestCase):
     def test_failed_gate_does_not_replace_the_baseline(self):
         worse = self.dir / "worse.yaml"
         worse.write_text(MINI.replace("(на|в)? {room}?", "(на|в)? {room}"))    # «включи свет» is no longer read
-        reports = self.dir / "reports"
-        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 0)
+        reports = self.reports
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 1)             # no baseline yet: not a pass
+        self.assertFalse((reports / "latest.json").exists())
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "first run of the combined route"), 0)
         baseline = (reports / "latest.json").read_text()
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "again"), 2)    # refused while a baseline exists
+        reports_before = len(list(reports.glob("backtest-*.json")))
         self.assertEqual(self.backtest_cli(worse, "--gate"), 1)
         self.assertEqual((reports / "latest.json").read_text(), baseline)
         self.assertEqual(self.backtest_cli(worse, "--gate"), 1)                # an identical rerun fails again
         self.assertEqual((reports / "latest.json").read_text(), baseline)
-        self.assertEqual(len(list(reports.glob("backtest-*.json"))), 3)       # failing runs are still archived
+        self.assertEqual(len(list(reports.glob("backtest-*.json"))) - reports_before, 2)   # failing runs are still archived
         self.assertEqual(self.backtest_cli(self.mini, "--gate"), 0)
         self.assertNotEqual((reports / "latest.json").read_text(), baseline)   # a passing run is promoted
+
+    def corpus_rows(self):
+        path = self.dir / "real-voice-2026-11-labelled.jsonl"
+        return path, [json.loads(line) for line in path.read_text().splitlines()]
+
+    @staticmethod
+    def write_rows(path, rows):
+        path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows))
+
+    def test_the_owner_can_rebaseline_after_a_row_was_relabelled(self):
+        latest = self.reports / "latest.json"
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "first run"), 0)
+        path, rows = self.corpus_rows()
+        rows[5]["truth"] = "CHITCHAT"      # «Включи карусель» had been labelled a light command by mistake
+        self.write_rows(path, rows)
+        baseline = latest.read_text()
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 1)         # relabelled: red until the owner decides
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 1)
+        self.assertEqual(latest.read_text(), baseline)
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "row 6 was a chat question"), 0)
+        block = json.loads(latest.read_text())["baseline"]
+        self.assertEqual((block["init_reason"], block["rebaselined"]), ("row 6 was a chat question", {"lost_rows": 0, "relabelled": 1}))
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 0)         # the new baseline holds without the flag
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "again"), 2)   # nothing left to accept: refused
+
+    def test_a_baseline_scored_by_an_older_rule_is_unusable_until_the_owner_restarts_it(self):
+        latest = self.reports / "latest.json"
+        older = self.report()
+        older["schema"] = backtest.REPORT_SCHEMA - 1             # saved before rows were scored the way they are now
+        latest.parent.mkdir(parents=True, exist_ok=True)
+        latest.write_text(json.dumps(older))
+        self.assertEqual(backtest.REPORT_SCHEMA, 3)
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 1)          # «another schema»: not silently compared
+        self.assertEqual(json.loads(latest.read_text())["schema"], older["schema"])
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "scoring changed"), 0)   # nothing lost or relabelled
+        block = json.loads(latest.read_text())
+        self.assertEqual((block["schema"], block["baseline"]["init_reason"]), (backtest.REPORT_SCHEMA, "scoring changed"))
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 0)
+
+    def test_a_rebaseline_accepts_lost_rows_but_never_a_regression(self):
+        latest = self.reports / "latest.json"
+        worse = self.dir / "worse.yaml"
+        worse.write_text(MINI.replace("(на|в)? {room}?", "(на|в)? {room}"))    # «включи свет» is no longer read
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "first run"), 0)
+        baseline = latest.read_text()
+        path, rows = self.corpus_rows()
+        self.write_rows(path, rows[:-1])                                       # the last row is removed from the corpus
+        self.assertEqual(self.backtest_cli(self.mini, "--gate"), 1)
+        self.assertEqual(self.backtest_cli(worse, "--gate", "--init-baseline", "dropped a row"), 1)   # a regression still fails
+        self.assertEqual(latest.read_text(), baseline)
+        self.assertEqual(self.backtest_cli(self.mini, "--gate", "--init-baseline", "dropped a row"), 0)
+        block = json.loads(latest.read_text())["baseline"]
+        self.assertEqual(block["rebaselined"], {"lost_rows": 1, "relabelled": 0})
+        grammar = self.grammar
+        rows_, manifest = backtest.load_rows(self.dir, grammar)
+        no_baseline = backtest.build_report(grammar, rows_, manifest)
+        self.assertFalse(backtest.accept_rebaseline(no_baseline, grammar, "nothing to compare"))   # only against a compatible baseline
+
+    def test_the_replay_carries_how_the_quasar_layer_answered(self):
+        replay = [{"text": "Громкость на пять", "handled": True, "via": "fast-clarify"},
+                  {"text": "Включи свет.", "handled": True, "via": "media-key"},
+                  {"text": "Выключи свет в спальне", "handled": True, "via": "fast-confirm"},
+                  {"text": "Включи карусель", "handled": False, "via": None}]
+        (self.dir / backtest.REPLAY_FILE).write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in replay))
+        by_text = {row.text: row for row in self.rows()}
+        got = {text: (row.quasar, row.quasar_via, row.quasar_tier) for text, row in by_text.items()}
+        self.assertEqual(got["Громкость на пять"], (True, "fast-clarify", "clarify"))
+        self.assertEqual(got["Включи свет."], (True, "media-key", "execute"))
+        self.assertEqual(got["Выключи свет в спальне"], (True, "fast-confirm", "confirm"))
+        self.assertEqual(got["Включи карусель"], (False, None, "execute"))
 
     def test_a_failing_first_run_leaves_no_baseline(self):
         gated = self.dir / "gated.yaml"
         gated.write_text(MINI + "gate: {min_coverage: {all/all: 0.99}}\n")
         self.assertEqual(self.backtest_cli(gated, "--gate"), 1)
-        self.assertFalse((self.dir / "reports" / "latest.json").exists())
-        self.assertEqual(len(list((self.dir / "reports").glob("backtest-*.json"))), 1)
+        self.assertFalse((self.reports / "latest.json").exists())
+        self.assertEqual(len(list(self.reports.glob("backtest-*.json"))), 1)
 
     def test_out_on_a_fresh_corpus_still_writes_the_baseline(self):
         out = self.dir / "elsewhere" / "deep" / "result.json"
         self.assertEqual(self.backtest_cli(self.mini, "--out", str(out)), 0)
         self.assertTrue(out.exists())
-        self.assertTrue((self.dir / "reports" / "latest.json").exists())
+        self.assertTrue((self.reports / "latest.json").exists())
 
     def test_baseline_is_replaced_atomically(self):
-        latest = self.dir / "reports" / "latest.json"
+        latest = self.reports / "latest.json"
         latest.parent.mkdir()
         latest.write_text('{"old": true}')
         real_replace = os.replace
@@ -651,7 +911,7 @@ class BacktestTests(unittest.TestCase):
             real_replace(src, dst)
 
         with mock.patch.object(backtest.os, "replace", spy):
-            backtest.save_report(self.report(), self.dir / "reports" / "one.json", latest=latest)
+            backtest.save_report(self.report(), self.reports / "one.json", latest=latest)
         self.assertEqual(seen, [{"old": True}])
         self.assertEqual(json.loads(latest.read_text())["schema"], backtest.REPORT_SCHEMA)
         self.assertEqual(sorted(p.name for p in latest.parent.iterdir()), ["latest.json", "one.json"])
@@ -672,7 +932,7 @@ class BacktestTests(unittest.TestCase):
         with (self.dir / "real-voice-2026-11-labelled.jsonl").open("a") as handle:
             handle.write("\n" + json.dumps({"text": "включи свет", "truth": "HALLUCINATION", "ts": 9}, ensure_ascii=False))
         self.assertEqual(self.backtest_cli(gated, "--gate"), 1)
-        self.assertFalse((self.dir / "reports" / "latest.json").exists())
+        self.assertFalse((self.reports / "latest.json").exists())
 
     def test_coverage_floor_fails_when_its_split_is_missing_or_unmeasured(self):
         grammar = loads(MINI + "gate: {min_coverage: {real/holdout: 0.5}}\n")
@@ -695,15 +955,51 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(grown["compare"]["deltas"]["all/holdout"]["coverage"], 0.0)
         self.assertFalse(any("held-out" in f for f in grown["gate"]["failures"]), grown["gate"])
 
-    def test_removing_rows_cannot_hide_a_held_out_drop(self):
-        worse = loads(MINI.replace("(на|в)? {room}?", "(на|в)? {room}"))    # «включи свет» is no longer read
-        before = [self.hand("a", "включи свет"), self.hand("b", "громкость на пять", "VOLUME"),
-                  self.hand("c", "включи карусель")]
+    def test_removing_rows_cannot_hide_a_drop(self):
+        before = [self.hand("a", "включи свет"), self.hand("b", "громкость на пять", "VOLUME"), self.hand("c", "включи карусель")]
         base = backtest.build_report(self.grammar, before, [])
-        after = before + [self.hand(f"n{i}", "громкость на пять", "VOLUME") for i in range(5)]
-        report = backtest.build_report(worse, after, [], previous=base)
-        self.assertLess(report["compare"]["deltas"]["all/holdout"]["coverage"], 0)
-        self.assertTrue(any("held-out coverage dropped" in f for f in report["gate"]["failures"]), report["gate"])
+        report = backtest.build_report(self.grammar, before[1:], [], previous=base)       # the handled row «a» is deleted
+        self.assertEqual(report["compare"]["lost_rows"], {"real": 1})
+        self.assertTrue(any("gone from the corpus" in f for f in report["gate"]["failures"]), report["gate"])
+
+    def test_a_row_that_gets_worse_fails_and_one_that_gets_better_does_not(self):
+        worse = loads(MINI.replace("(на|в)? {room}?", "(на|в)? {room}"))    # «включи свет» is no longer read
+        rows = [self.hand("a", "включи свет"), self.hand("b", "громкость на пять", "VOLUME")]
+        base = backtest.build_report(self.grammar, rows, [])
+        report = backtest.build_report(worse, rows, [], previous=base)
+        self.assertEqual([r["id"] for r in report["compare"]["regressed"]], ["a"])
+        self.assertTrue(any("got worse" in f for f in report["gate"]["failures"]))
+        healed = backtest.build_report(self.grammar, rows, [], previous=report)
+        self.assertEqual((healed["compare"]["regressed"], healed["compare"]["fixed"]), ([], 1))
+
+    def test_turning_a_wrong_answer_into_an_abstention_is_not_a_regression_but_the_reverse_is(self):
+        wrong = {"outcome": "wrong", "split": "holdout", "source": "real", "truth": "X", "intent": "a", "addressed": True, "completed": False}
+        missed = dict(wrong, outcome="missed", intent=None)
+        correct = dict(wrong, outcome="correct", completed=True)
+        base = {"schema": backtest.REPORT_SCHEMA, "route": "combined", "split": {}, "splits": {}, "rows": {"r": wrong}}
+        def compared(before_row, now_row):
+            before = dict(base, rows={"r": before_row})
+            now = {"schema": backtest.REPORT_SCHEMA, "route": "combined", "split": {}, "splits": {}, "rows": {"r": now_row}}
+            return backtest.compare(now, before)["regressed"]
+        self.assertEqual(compared(wrong, missed), [])
+        self.assertEqual(len(compared(missed, wrong)), 1)
+        self.assertEqual(len(compared(correct, missed)), 1)
+        self.assertEqual(compared(missed, correct), [])
+
+    def test_a_relabelled_row_and_an_incompatible_baseline_fail(self):
+        rows = [self.hand("a", "включи свет")]
+        base = backtest.build_report(self.grammar, rows, [], route="combined")
+        relabelled = backtest.build_report(self.grammar, [self.hand("a", "включи свет", "VOLUME")], [], previous=base, route="combined")
+        self.assertEqual(relabelled["compare"]["relabelled"], ["a"])
+        self.assertTrue(any("changed their label" in f for f in relabelled["gate"]["failures"]))
+        other_route = backtest.build_report(self.grammar, rows, [], previous=base, route="grammar")
+        self.assertTrue(any("baseline unusable" in f for f in other_route["gate"]["failures"]))
+
+    def test_gate_without_a_baseline_fails_when_one_is_required(self):
+        rows = [self.hand("a", "включи свет")]
+        self.assertTrue(backtest.build_report(self.grammar, rows, [])["gate"]["ok"])
+        required = backtest.build_report(self.grammar, rows, [], require_baseline=True)
+        self.assertTrue(any("no baseline" in f for f in required["gate"]["failures"]))
 
     def test_compound_wrong_actions_count_over_every_part(self):
         row = backtest.Row("t", "спасибо и включи свет", "CHITCHAT", "real", "dev")
@@ -738,7 +1034,7 @@ intents:
         return {o.row.id: o.outcome for o in backtest.evaluate(loads(self.EXPECT), rows)}
 
     def expected(self, ident, text, domain, **expect):
-        return backtest.Row(ident, text, domain, "synthetic", "dev", {"kind": "cmd", "domain": domain, **expect})
+        return backtest.Row(ident, text, domain, "synthetic", "dev", expect={"kind": "cmd", "domain": domain, **expect})
 
     def test_corpus_expectations_are_compared(self):
         rows = [
@@ -758,6 +1054,85 @@ intents:
     def test_percent_is_not_a_level_in_the_corpus_comparison(self):
         percent = self.expected("p", "громкость 7 процентов", "volume_partial", tier="execute", action="volume:7")
         self.assertEqual(self.outcomes([percent]), {"p": "wrong"})
+
+
+class HoldoutGateTests(unittest.TestCase):
+    """The held-out split is tiny: row-by-row ratchet everywhere, and an absolute floor that switches on with n."""
+
+    def split(self, addressed, answered, correct):
+        return {"addressed": addressed, "answered_without_llm": answered, "correct": correct,
+                "coverage": answered / addressed, "correct_rate": correct / addressed}
+
+    def report(self, holdout):
+        return {"splits": {"real/holdout": holdout}, "self_check_failures": [], "compare": None}
+
+    RULE = {"splits": ["real/holdout"], "ci_min_addressed": 20, "floor_min_addressed": 60, "floor": {"coverage": 0.85, "correct": 0.80}}
+
+    def test_today_s_n_is_not_gated_on_a_hand_picked_rate(self):
+        self.assertEqual(backtest._holdout_failures(self.report(self.split(18, 15, 14)), self.RULE), [])
+
+    def test_a_clearly_low_rate_fails_from_the_interval_test_before_the_point_floor(self):
+        failures = backtest._holdout_failures(self.report(self.split(24, 15, 14)), self.RULE)
+        self.assertEqual(len(failures), 2)
+        self.assertIn("clearly below", failures[0])
+        self.assertEqual(backtest._holdout_failures(self.report(self.split(24, 20, 19)), self.RULE), [])   # 0.83 coverage: inside the interval
+
+    def test_the_point_floor_turns_on_with_enough_rows(self):
+        failures = backtest._holdout_failures(self.report(self.split(60, 50, 46)), self.RULE)
+        self.assertEqual(len(failures), 2)
+        self.assertIn("< 0.85", failures[0])
+        self.assertEqual(backtest._holdout_failures(self.report(self.split(60, 54, 50)), self.RULE), [])
+
+    def test_a_missing_holdout_fails(self):
+        self.assertTrue(backtest._holdout_failures({"splits": {}, "self_check_failures": [], "compare": None}, self.RULE))
+
+    def test_the_legacy_floor_stays_visible(self):
+        grammar = loads(MINI + "gate: {holdout: {legacy_floor: {split: real/holdout, coverage: 0.85}}}\n")
+        status = backtest.legacy_floor_status({"splits": {"real/holdout": self.split(18, 15, 14)}}, grammar)
+        self.assertEqual((status["met"], status["coverage"], status["addressed"]), (False, 15 / 18, 18))
+
+    def test_the_goal_is_reported_with_an_interval_and_never_gated(self):
+        grammar = loads(MINI + "gate: {goal: {split: real/all, coverage: 0.9, correct: 0.9}}\n")
+        report = {"splits": {"real/all": self.split(79, 68, 65), "real/holdout": self.split(18, 15, 14)}}
+        goal = backtest.goal_status(report, grammar)
+        self.assertFalse(goal["all"]["coverage"]["met"])
+        self.assertAlmostEqual(goal["all"]["coverage"]["gap"], 0.9 - 68 / 79, places=3)
+        low, high = goal["holdout"]["coverage"]["ci95"]
+        self.assertTrue(low < 15 / 18 < high and high - low > 0.3)
+
+
+class EmergencySafetyTests(unittest.TestCase):
+    """SAFETY: the emergency intent always wins and its must-pass set is part of the gate."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.grammar = load(Path(__file__).parent / "intent_grammar" / "grammar" / "ru.json")
+
+    def test_every_safety_phrase_is_the_emergency_intent(self):
+        self.assertEqual(backtest._safety_failures(self.grammar, self.grammar.gate["safety"]), [])
+        self.assertGreater(len(self.grammar.gate["safety"]["phrases"]), 20)
+
+    def test_it_wins_over_calls_compounds_and_every_other_band(self):
+        for text in ("Мне плохо, вызови скорую.", "позвони в полицию", "включи свет и вызови скорую", "Алиса, мне плохо"):
+            decision = self.grammar.decide(text)
+            self.assertEqual((decision.intent, decision.tier), ("refuse.emergency", "canned"), text)
+
+    def test_the_reply_gives_the_number_and_does_not_promise_a_call(self):
+        reply = self.grammar.decide("вызови скорую").reply["say"][0]
+        self.assertIn("не могу никому позвонить", reply)
+        self.assertIn("сто двенадцать", reply)
+        self.assertIn("сто девяносто четыре", reply)
+
+    def test_ordinary_speech_is_left_alone(self):
+        for text in ("мне плохо видно", "позвони маме", "помоги мне найти песню", "горит ли свет на кухне", "до скорой встречи"):
+            decision = self.grammar.decide(text)
+            self.assertTrue(decision is None or decision.intent != "refuse.emergency", text)
+
+    def test_a_missing_safety_phrase_fails_the_gate(self):
+        rule = {"intent": "refuse.emergency", "phrases": ["вызови скорую", "расскажи анекдот"]}
+        failures = backtest._safety_failures(self.grammar, rule)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("SAFETY", failures[0])
 
 
 if __name__ == "__main__":
