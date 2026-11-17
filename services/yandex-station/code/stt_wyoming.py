@@ -30,6 +30,7 @@ import spotter_clips
 import stt_tuning
 import voice_vocab
 import voiceclips
+import wake_window
 import wake_word
 
 LOG = logging.getLogger("aisis.stt")
@@ -172,6 +173,7 @@ class Tuning:
     compressor: bool = False
     highpass_hz: float = 0.0
     ab_percent: float = 10.0     # share of utterances also sent to the recognizer UNprocessed, in the background, for the A/B counters
+    wake_cut: bool = True        # cut the activation word from the audio before the recognizer (wake_window.py); off: the text-level strip only
 
     @classmethod
     def from_env(cls, env):
@@ -191,6 +193,7 @@ class Tuning:
                    dsp_enabled=bool(number("AISIS_STT_DSP", int(cls.dsp_enabled), int)),
                    compressor=bool(number("AISIS_STT_COMPRESSOR", int(cls.compressor), int)),
                    highpass_hz=max(0.0, number("AISIS_STT_HIGHPASS_HZ", cls.highpass_hz, float)),
+                   wake_cut=bool(number("AISIS_STT_WAKE_WINDOW", int(cls.wake_cut), int)),
                    ab_percent=min(100.0, max(0.0, number("AISIS_STT_AB_PERCENT", cls.ab_percent, float))))
 
 
@@ -206,6 +209,8 @@ class Utterance:
     voiced_rms: float
     floor_rms: float | None      # median RMS of the non-speech frames (None when too few to tell)
     swing: float = 0.0           # p90/p10 of the speech frames' RMS: speech rises and falls, hum/hiss/fan do not
+    lead_pcm: bytes = b""        # the activation word the wake window cut off in front of this utterance: never recognised, still the speaker's voice
+    lead_voiced_ms: int = 0
 
     @property
     def duration_ms(self):
@@ -220,6 +225,11 @@ class Utterance:
         return self.pcm[:len(self.pcm) - cut] if cut else self.pcm
 
     @property
+    def speaker_pcm(self):
+        """What the speaker check hears: the activation word (cut from the recognizer's audio) and the utterance, as before the cut existed."""
+        return self.lead_pcm + self.speech_pcm
+
+    @property
     def voiced_ms(self):
         return self.voiced * FRAME_MS
 
@@ -228,9 +238,18 @@ class Utterance:
         return None if self.floor_rms is None else self.voiced_rms / max(self.floor_rms, 1.0)
 
 
+def activation_utterance(pcm, rate, voiced_ms):
+    """The audio the wake window cut away (the activation event: never recognised), shaped as an Utterance for the archive row."""
+    samples = array.array("h")
+    samples.frombytes(pcm[:len(pcm) // 2 * 2])
+    return Utterance(pcm=pcm, rate=rate, voiced=voiced_ms // FRAME_MS, trailing_ms=0,
+                     rms=int(math.sqrt(sum(map(operator.mul, samples, samples)) / len(samples))) if samples else 0,
+                     peak=max(map(abs, samples), default=0), voiced_rms=0.0, floor_rms=None)
+
+
 def judge(utt, tuning):
     """Reason this utterance must NOT reach the recognizer, or None. Whisper invents text on non-speech."""
-    if utt.voiced_ms < tuning.min_voiced_ms:
+    if utt.voiced_ms + utt.lead_voiced_ms < tuning.min_voiced_ms:   # a one-word request after a cut name is as long as the pair was before the cut
         return "short"
     if utt.voiced_rms < tuning.min_rms:
         return "silence"
@@ -302,6 +321,16 @@ class Endpoint:
         if gain <= 1.0:
             return frame
         return array.array("h", [int(sample * gain) for sample in samples]).tobytes()
+
+    def prime(self, pcm):
+        """Let the VAD hear audio that belongs to no utterance (the activation word the wake window cut away): its noise model adapts to
+        the stream as it did before the cut existed, so the request right behind the name is judged the way it always was."""
+        size = self.frame_size
+        for offset in range(0, len(pcm) - size + 1, size):
+            frame = bytes(pcm[offset:offset + size])
+            samples = array.array("h")
+            samples.frombytes(frame)
+            self.vad.is_speech(self.boosted(frame, samples, max(map(abs, samples))), self.rate)
 
     def feed(self, chunk):
         self.pending.extend(chunk)
@@ -375,9 +404,10 @@ class STTGateway:
     SPEAKER_GRACE = 2.0
     SPEAKER_RETRY_AFTER = 60.0
 
-    def __init__(self, env=None, vad_factory=None, recognizer=transcribe, verifier=None, tv=None, archive=True, domain_catalog=None):
+    def __init__(self, env=None, vad_factory=None, recognizer=transcribe, verifier=None, tv=None, archive=True, domain_catalog=None, clock=time.monotonic):
         self.env = dict(os.environ) if env is None else env
         self.tuning = Tuning.from_env(self.env)
+        self.clock = clock            # the stream's age (wake_window.Gate); a test owns it
         self.vad_factory = vad_factory
         self.recognizer = recognizer
         # Domain bias for the recognizer, opt-in (AISIS_STT_DOMAIN_CONTEXT=1): only an stt-cli recognizer reads it.
@@ -660,6 +690,35 @@ class STTGateway:
         stats = {"bytes": 0, "bin": 0, "voiced": 0, "peak": 0, "squares": 0, "samples": 0}
         LOG.info("stt_session_open")
         self.tv_activation()
+        gate = wake_window.Gate(16000, enabled=False)   # the real one is made when the sample rate arrives
+        opened = self.clock()
+        window_noted = False
+        name_lead = None   # (audio, voiced ms) of the cut name until the next utterance takes it
+
+        def elapsed_ms():
+            return int((self.clock() - opened) * 1000)
+
+        def window_audio(audio):
+            """`audio` as the gate let it out. The first time it holds a verdict: archive the audio it cut away (the activation event,
+            never recognised) and remember that the turn so far was only the name, so an empty final says so."""
+            nonlocal unclear, window_noted, name_lead
+            if gate.located is not None and not window_noted:
+                window_noted = True
+                if gate.removed is None:
+                    LOG.info("stt_wake_window history_ms=%d skipped=%s", gate.history, gate.located.reason)
+                else:
+                    unclear = WAKE_ONLY
+                    name_lead = (gate.name, gate.located.voiced_ms)
+                    endpoint.prime(gate.removed)
+                    LOG.info("stt_wake_window history_ms=%d cut_ms=%d voiced_ms=%d", gate.history, len(gate.removed) * 1000 // (2 * gate.rate),
+                             gate.located.voiced_ms)
+                    self.archive(activation_utterance(gate.removed, gate.rate, gate.located.voiced_ms),
+                                 {"trigger": "vad", "status": voiceclips.ACTIVATION, "reason": "wake_window", "transcript": None})
+            return audio
+
+        def feed_gate(audio):
+            for utt in endpoint.feed(audio):
+                finalize(utt, "vad")
 
         async def finish(utt, trigger, rejected):
             """One utterance -> one final. `rejected` is the gate's verdict (None = send it to the recognizer)."""
@@ -671,7 +730,7 @@ class STTGateway:
                 if utt is not None and rejected is None:
                     rate = utt.rate
                     # Speaker check runs in a worker thread beside the recognizer, so it adds no latency.
-                    speaker_task = asyncio.ensure_future(self.speaker_check(utt.speech_pcm, rate))
+                    speaker_task = asyncio.ensure_future(self.speaker_check(utt.speaker_pcm, rate))
                     recognizer_pcm, info = frontend_for_recognizer(utt.speech_pcm, utt.voiced_rms, tuning)
                     gain_db = info["gain_db"]
                     if recognizer_pcm is not utt.speech_pcm:
@@ -696,7 +755,7 @@ class STTGateway:
                         rejected = WAKE_ONLY
                     if rejected is None:
                         text, wake_cut = named.clean, named.head
-                        speaker = await self.speaker_result(speaker_task, utt.speech_pcm, rate, text)
+                        speaker = await self.speaker_result(speaker_task, utt.speaker_pcm, rate, text)
                     else:
                         speaker_task.cancel()
                 if rejected:
@@ -734,7 +793,7 @@ class STTGateway:
                         reply = {"text": "", "end_of_utt": True, "rejected": "foreign_voice", "score": speaker["score"]}
                     await ws.send_json(reply)
                 if speaker:
-                    self.speaker_record(utt.speech_pcm, utt.rate, text, speaker)
+                    self.speaker_record(utt.speaker_pcm, utt.rate, text, speaker)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -743,7 +802,7 @@ class STTGateway:
                     await ws.close(code=1011, message=b"recognizer unavailable")
 
         def finalize(utt, reason):
-            nonlocal recognition
+            nonlocal recognition, name_lead
             # Exactly one final per Quasar STT session. Native finish, VAD, and idle endpointing all
             # converge here; a VAD cut that fails the gate is dropped and the session keeps listening.
             # Level of everything received so far: tells "silence" (a follow-up window nobody
@@ -755,6 +814,8 @@ class STTGateway:
                 "%.1f" % utt.contrast if utt and utt.contrast is not None else "-")
             if final_sent:
                 return
+            if utt is not None and name_lead is not None:
+                utt, name_lead = replace(utt, lead_pcm=name_lead[0], lead_voiced_ms=name_lead[1]), None
             rejected = judge(utt, tuning) if utt else None
             if reason == "vad" and rejected and not eof:   # noise: dropped now, never queued (it must not push a request out of `held`)
                 LOG.info("stt_gate reason=%s voiced_ms=%d rms=%.1f", rejected, utt.voiced_ms, utt.voiced_rms)
@@ -778,6 +839,8 @@ class STTGateway:
                 try:
                     message = await ws.receive(timeout=1.2)
                 except asyncio.TimeoutError:
+                    if not final_sent and initialized:
+                        feed_gate(window_audio(gate.release(elapsed_ms())))
                     if endpoint.audio and recognition is None:
                         finalize(endpoint.flush(include_partial=True), "idle")
                     if time.monotonic() - last_audio > 40:
@@ -792,6 +855,8 @@ class STTGateway:
                     if config.get("type") == "finish":
                         # Normal native EOF flushes immediately; it never cancels
                         # an ASR call already started by VAD.
+                        if not final_sent and initialized:
+                            feed_gate(window_audio(gate.release(elapsed_ms())))
                         eof = True
                         finalize(endpoint.flush(include_partial=True), "finish")
                         continue
@@ -800,6 +865,7 @@ class STTGateway:
                         await ws.close(code=1008, message=b"invalid sample rate")
                         break
                     endpoint = Endpoint(factory(), rate, silence_ms=tuning.silence_ms, vad_gain=tuning.vad_gain)
+                    gate = wake_window.Gate(rate, enabled=tuning.wake_cut)
                     initialized = True
                     LOG.info("stt_init rate=%d", rate)
                 elif message.type == WSMsgType.BINARY:
@@ -816,8 +882,7 @@ class STTGateway:
                         stats["squares"] += sum(sample * sample for sample in samples)
                         stats["samples"] += len(samples)
                     if not final_sent:
-                        for utt in endpoint.feed(message.data):
-                            finalize(utt, "vad")
+                        feed_gate(window_audio(gate.push(message.data, elapsed_ms())))
                 elif message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
                     break
         except asyncio.CancelledError:

@@ -210,8 +210,10 @@ def render_session(dialog: dict | None, clips: list[dict], traces: list[dict], f
     if dialog and dialog.get("err"):
         body.append(f"<div class='card bad'>⚠ {e(dialog['err'])}</div>")
     for clip in wake:
+        heard = clip.get("transcript")
+        how = f"распознано как «{e(heard)}»" if heard else "вырезано из звука, не распознавалось"
         body.append(f"<div class=card><h2>🔔 Активация {hms(clip['ts'])}</h2>"
-                    f"<div class=dim>слово активации (распознано как «{e(clip.get('transcript') or '')}»); сама по себе фразой не считается, "
+                    f"<div class=dim>слово активации ({how}); сама по себе фразой не считается, "
                     f"сессия ждёт запрос. {e(clip.get('reason') or '')}</div>"
                     f"<audio controls preload=none src='{CLIP_AUDIO}{e(clip['id'])}'></audio></div>")
     used: set[int] = set()
