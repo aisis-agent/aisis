@@ -263,3 +263,11 @@ jev_shadow utterance=talk tier=fast effort=none conf=0.97 tier_conf=0.81 effort_
 
 Rollback: `AISIS_JEV=off` (or drop the key), restart `aisis-station-adapter`; `/healthz` `jev` shows the mode, `acting`, the switches, the
 threshold and the call counters.
+
+### Nightly loop
+
+`code/intent_grammar` also runs a nightly loop (`systemd/aisis-intent-nightly.timer`, 03:30, plus `aisis-intent-morning.timer`, 08:30): it appends newly labelled real rows to the private corpus, measures the
+production route against the gate (held-out ratchet, emergency safety set, 90 % goal reported), and briefs a detached omp session. With a green gate the session lands grammar changes through the normal merge path
+(`review`, PR with `Refs #107`, `gh ship <PR> --task '#107'`); with a red gate it runs `review brainstorm` and lands nothing; a blocked gate is never bypassed. Hatch requests are put in front of the owner in the
+morning through the harness. `python3 -m intent_grammar nightly run --dry-run` changes nothing outside the day's private working directory. Jev labelling is **opt-in** (`AISIS_NIGHTLY_ARGS=--jev` and `VERCEL_JEV_KEY`
+in `~/.config/aisis/intent-nightly.env`): it sends private utterances to Vercel, so the unit does not enable it. Details: `code/intent_grammar/README.md`, «Nightly loop».
