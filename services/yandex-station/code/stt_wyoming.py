@@ -68,7 +68,6 @@ UNCLEAR_SPEECH = ("weak_filler", "repetition", "too_many_words")
 # listening (the request follows in the same session); at the end of the stream it is the empty final of an unanswered window.
 WAKE_ONLY = "wake_word"
 LEAD_MIN_OWN_MS = 120   # the cut name counts for an utterance only when the utterance itself has this much speech (webrtcvad's hangover after the cut is at most 100 ms)
-LEAD_MAX_AGE_MS = 3000  # … and only when it starts within this long of the cut decision: later speech is not the request that followed the name
 MAX_HELD = 4   # cuts kept behind a running recognition; a stream of them behind a slow recognizer drops the newest, never grows the heap
 PROBE_RATE = 16000                    # /healthz/asr: half a second of 16-bit mono silence, enough to run a whole transcription
 PROBE_PCM_BYTES = PROBE_RATE
@@ -695,7 +694,7 @@ class STTGateway:
         gate = wake_window.Gate(16000, enabled=False)   # the real one is made when the sample rate arrives
         opened = self.clock()
         window_noted = False
-        name_lead = None   # (audio, voiced ms, stream time) of the cut name until the first real utterance after it takes it
+        name_lead = None   # (audio, voiced ms) of the cut name until the first real utterance after it takes it
 
         def elapsed_ms():
             return int((self.clock() - opened) * 1000)
@@ -710,7 +709,7 @@ class STTGateway:
                     LOG.info("stt_wake_window history_ms=%d skipped=%s", gate.history, gate.located.reason)
                 else:
                     unclear = WAKE_ONLY
-                    name_lead = (gate.name, gate.located.voiced_ms, elapsed_ms())
+                    name_lead = (gate.name, gate.located.voiced_ms)
                     endpoint.prime(gate.removed)
                     LOG.info("stt_wake_window history_ms=%d cut_ms=%d voiced_ms=%d", gate.history, len(gate.removed) * 1000 // (2 * gate.rate),
                              gate.located.voiced_ms)
@@ -816,8 +815,7 @@ class STTGateway:
                 "%.1f" % utt.contrast if utt and utt.contrast is not None else "-")
             if final_sent:
                 return
-            if utt is not None and name_lead is not None and utt.voiced_ms >= LEAD_MIN_OWN_MS \
-                    and elapsed_ms() - utt.duration_ms - name_lead[2] <= LEAD_MAX_AGE_MS:
+            if utt is not None and name_lead is not None and utt.voiced_ms >= LEAD_MIN_OWN_MS:
                 # The first stretch of real speech after the cut is the request: it counts the name's length and voice, as the pair did before
                 # the cut. A blip (the VAD's hangover at the cut, a click) or noise the gate rejects neither borrows the name nor uses it up.
                 led = replace(utt, lead_pcm=name_lead[0], lead_voiced_ms=name_lead[1])

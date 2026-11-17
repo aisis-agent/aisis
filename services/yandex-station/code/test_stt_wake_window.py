@@ -284,6 +284,23 @@ class Replay(unittest.TestCase):
         self.assertEqual(len(heard), 1)
         self.assertTrue(self.heard_the_name(heard[0]))
 
+    def test_an_utterance_with_less_speech_than_the_vad_hangover_does_not_get_the_name(self):
+        """100 ms of speech after the cut (5 frames) is what a hangover alone can make: no credit, dropped as a blip."""
+        pcm = squares(activation_stream(request_ms=100))
+        messages, calls, rows = self.session(pcm, [])
+        self.assertEqual(calls, [])
+        self.assertIn(("gate", "short"), [row[:2] for row in rows])
+
+    def test_noise_the_gate_rejects_does_not_use_up_the_name_credit(self):
+        """600 ms of flat loud noise after the name is rejected (steady noise) whatever the credit; the request seconds later still has the name."""
+        levels = activation_stream(request_ms=140, gap_ms=2500, live_ms=4500)
+        noise = HISTORY // 20 + 20
+        levels[noise:noise + 30] = [5000.0] * 30
+        messages, calls, rows = self.session(squares(levels), ["Стоп."])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(messages, [{"text": "Стоп.", "end_of_utt": True}])
+        self.assertIn(("gate", "steady_noise"), [row[:2] for row in rows])
+
     def test_the_cut_can_be_switched_off(self):
         pcm = squares(activation_stream())
         messages, calls, rows = self.session(pcm, ["Алиса, включи свет в студии."], env={"AISIS_STT_WAKE_WINDOW": "0"})
