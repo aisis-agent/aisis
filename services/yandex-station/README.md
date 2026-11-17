@@ -123,14 +123,25 @@ query string, which `weather.get_forecasts?return_response` needs.
   The recognizer's temp audio lives in `~/.cache/aisis-asr-tmp` (`wyoming-whisper.service.d/20-disk-tmpdir.conf`:
   `CacheDirectory=` + `TMPDIR`, swept at every start), not on the quota-limited `/tmp`.
 - **Activation word**: the name that woke the station (`wake_word.py`, names = the grammar's `lexicon.wake`) is never request
-  content. The STT gateway cuts it from the head of a transcript before the final goes to quasar (`wake_cut:<name>` in the
-  clip's `reason`; the clip's `transcript` is the cleaned text, the one the dialog log and the feed's «ответ» line match on;
-  the ASR bench therefore scores a cut clip's engine output with the name as an error: read those WERs with that in mind). A segment that is only the name (Whisper writes «Алиса.», «Малис.», «Лисы.») is an
+  content, and the recognizer does not hear it. An activation stream opens with the ~2.3 s the station buffered before its
+  spotter fired, sent faster than real time (98 of 103 sessions of the gateway journal 2026-11-10 … 11-17: 2.32 s, sd 0.04 s),
+  then live audio; a follow-up turn (no wake word) has no such history. The name ends 0.2-0.4 s before the end of the history
+  and the request's first word can start 0.08 s after it, so the gateway (`wake_window.py`) holds the first 0.6 s of a stream,
+  reads the history from the arrival times of the frames, finds the pause behind the name in the frame levels of the history
+  and hands the Endpoint (VAD, recognizer) only what follows it. The cut audio becomes a clip with `status='activation'`,
+  `reason='wake_window'` and no transcript (it was never recognised); the stream's final, if nothing else is said, is the
+  empty one with `rejected: wake_word`. When the name cannot be told from the request (no pause behind it, speech running
+  through the whole window, a quiet history, a stream that ends before the decision) nothing is cut and the text-level strip
+  below is the fallback (`stt_wake_window skipped=<reason>` in the gateway log). `AISIS_STT_WAKE_WINDOW=0` switches the cut off.
+  The text-level strip: the STT gateway cuts the name from the head of a transcript before the final goes to quasar
+  (`wake_cut:<name>` in the clip's `reason`; the clip's `transcript` is the cleaned text, the one the dialog log and the
+  feed's «ответ» line match on; the ASR bench therefore scores a cut clip's engine output with the name as an error: read
+  those WERs with that in mind). A segment that is only the name (Whisper writes «Алиса.», «Малис.», «Лисы.») is an
   activation event: clip `status='activation'`, `reason='wake'`, no final to quasar, the session keeps listening, so the
   request that follows lands in the same session and dialog (tg#30176/30177: the name used to be answered «Не расслышал»
-  and the request came in a second session). The gateway has no wake-word timestamps (quasar does not forward the
-  device's spotter spans), so the name is found in the transcript, not cut from the audio; the recognizer still hears it.
-  An activation nobody followed ends the turn silently (the empty final carries `rejected: wake_word`). Python-only: restart `aisis-station-stt`.
+  and the request came in a second session). The device's own spotter spans never reach the gateway (the quasar overlay
+  does not forward them), which is why the cut reads the stream instead of a span. An activation nobody followed ends the
+  turn silently (the empty final carries `rejected: wake_word`). Python-only: restart `aisis-station-stt`.
 - **Whisper prompt**: `aisis-whisper-prompt.timer` regenerates the recognizer's
   initial prompt every 6 h (code/refresh-whisper-prompt.sh -> `voice_vocab.py prompt`).
   It is home vocabulary only (fixed example commands, HA room and device names, library

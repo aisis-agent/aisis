@@ -5,8 +5,11 @@ sometimes still holds the name («Алиса, включи свет»), and a sp
 name and nothing else («Малис.»). Both are activation, never request content: the name is cut from the text before any
 routing, and a text that is only the name is an activation event the gateway drops without answering.
 
-The gateway has no wake-word timestamps (quasar does not forward the device's spotter spans), so the name is recognised in
-the transcript, not in the audio. Whisper is never asked for it: the recognizer prompt carries no wake word (voice_vocab).
+The audio cut comes first (wake_window.py: the gateway reads the name's place in the stream from the arrival times of the frames
+and never hands it to the recognizer). This text-level strip is what remains when that cut cannot be made without guessing (no
+pause behind the name, a stream that ends early) and the backstop for a name the cut left a piece of; quasar does not forward the
+device's spotter spans, so no span can replace either. Whisper is never asked for the name: the recognizer prompt carries no wake
+word (voice_vocab).
 
 One list of names: the intent grammar's `lexicon.wake` (grammar/ru.json), cut wherever it stands at the head. On top of it a
 bounded sound rule recognises a mishearing the list has not seen yet («Малисан», «Лиса»): within two edits of «алиса» and

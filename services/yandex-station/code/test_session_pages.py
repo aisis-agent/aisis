@@ -52,6 +52,14 @@ class Rendering(unittest.TestCase):
         self.assertIn("<a href='/grammar#intent-reminder.help'>reminder.help</a>", page)
         self.assertEqual(page.count("Малис."), 1, "the activation is not listed again as a request")
 
+    def test_an_activation_cut_from_the_audio_says_it_was_never_recognised(self):
+        wake = clip("20261117T160328-c20733", NOW + 1, "activation", None, reason="wake_window")
+        request = clip("20261117T160337-f7efcc", NOW + 9, "sent", "Включи свет.")
+        page = session_pages.render_session(dialog(), [wake, request], [TRACE], key=DIALOG)
+        self.assertIn("🔔 Активация", page)
+        self.assertIn("вырезано из звука, не распознавалось", page)
+        self.assertNotIn("распознано как «»", page)
+
     def test_an_id_that_is_not_a_grammar_intent_is_text_not_a_link(self):
         page = session_pages.render_session(dialog(), [clip("20261117T160337-f7efcc", NOW + 9, "sent", "два плюс два")],
                                             [{**TRACE, "layer": "skill", "intent": "skill.zzz.unknown"}])

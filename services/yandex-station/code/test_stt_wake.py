@@ -56,7 +56,8 @@ class GatewayReplay(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db = os.path.join(self.tmp.name, "dialogs.sqlite3")
-        self.env = {"AISIS_WYOMING_URI": "tcp://127.0.0.1:1", "AISIS_DIALOGS_DB": self.db, "AISIS_STT_AB_PERCENT": "0", "AISIS_STT_DSP": "0"}
+        self.env = {"AISIS_WYOMING_URI": "tcp://127.0.0.1:1", "AISIS_DIALOGS_DB": self.db, "AISIS_STT_AB_PERCENT": "0", "AISIS_STT_DSP": "0",
+                    "AISIS_STT_WAKE_WINDOW": "0"}   # these sessions test the text-level strip on a real clock: the audio cut stays out of it
         previous = os.environ.get("AISIS_VOICE_ARCHIVE")
         os.environ["AISIS_VOICE_ARCHIVE"] = os.path.join(self.tmp.name, "archive")
         self.addCleanup(lambda: os.environ.pop("AISIS_VOICE_ARCHIVE", None) if previous is None
