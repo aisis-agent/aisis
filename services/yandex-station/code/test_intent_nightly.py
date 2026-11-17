@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,11 +28,11 @@ UNREACHABLE_FLOOR = {"min_coverage": {"real/all": 1.01}}       # no corpus can h
 
 def make_store(path, dialogs):
     db = sqlite3.connect(path)
-    db.executescript("""CREATE TABLE dialogs(id TEXT PRIMARY KEY, kind TEXT NOT NULL, ts_start REAL NOT NULL);
+    db.executescript("""CREATE TABLE dialogs(id TEXT PRIMARY KEY, kind TEXT NOT NULL, ts_start REAL NOT NULL, ts_end REAL);
                         CREATE TABLE dialog_turns(id INTEGER PRIMARY KEY, dialog_id TEXT NOT NULL, ts REAL NOT NULL, role TEXT NOT NULL,
                                                   kind TEXT NOT NULL, text TEXT NOT NULL DEFAULT '', res TEXT NOT NULL DEFAULT '');""")
     for index, (kind, ts, turns) in enumerate(dialogs):
-        db.execute("INSERT INTO dialogs VALUES (?,?,?)", (f"d{index}", kind, ts))
+        db.execute("INSERT INTO dialogs VALUES (?,?,?,?)", (f"d{index}", kind, ts, ts + max(len(turns) - 1, 0)))
         for offset, (role, tkind, text) in enumerate(turns):
             db.execute("INSERT INTO dialog_turns(dialog_id, ts, role, kind, text) VALUES (?,?,?,?,?)", (f"d{index}", ts + offset, role, tkind, text))
     db.commit()
@@ -123,6 +124,20 @@ class ExtractTests(StoreFixture):
         self.assertNotIn("слишком давно", by_text)
         self.assertNotIn("это текстовый диалог", by_text)
 
+    def test_the_window_filters_utterance_times_not_dialog_starts(self):
+        db = self.dir / "edges.sqlite3"
+        make_store(db, [
+            ("voice", 100, [("user", "speech", "до окна"), ("assistant", "reply", "…"), ("user", "speech", "внутри окна"), ("assistant", "reply", "…")]),
+            ("voice", 1000, [("user", "speech", "ровно на границе"), ("user", "speech", "после окна")]),
+        ])
+        by_text = {h.text: h.layer for h in nightly.extract(db, 102, 1001)}
+        self.assertEqual(by_text, {"внутри окна": "brain", "ровно на границе": "none"})     # [since, until): the end is open, the start closed
+
+    def test_a_dialog_ending_before_the_window_contributes_nothing(self):
+        db = self.dir / "old.sqlite3"
+        make_store(db, [("voice", 10, [("user", "speech", "давно"), ("assistant", "reply", "…")])])
+        self.assertEqual(nightly.extract(db, 500, 600), [])
+
     def test_missing_store(self):
         with self.assertRaises(FileNotFoundError):
             nightly.extract(self.dir / "none.sqlite3", 0)
@@ -145,6 +160,9 @@ class CorpusGrowthTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.corpus = Path(self.tmp.name) / "corpus"
         self.corpus.mkdir()
+        env = mock.patch.dict(os.environ, {backtest.ENV_REPORT_DIR: str(Path(self.tmp.name) / "reports")})
+        env.start()
+        self.addCleanup(env.stop)
         self.hand = self.corpus / "real-voice-2026-11-labelled.jsonl"
         self.hand.write_text(jsonl({"text": "Включи свет!", "truth": "LIGHT_CMD", "ts": 1, "labeller": "IntentAudit-manual"}), encoding="utf-8")
         self.grammar = load(BUNDLE)
@@ -229,6 +247,22 @@ class CorpusGrowthTests(unittest.TestCase):
         after = {r.id for r in backtest.load_rows(self.corpus, self.grammar)[0]}
         self.assertTrue(before < after)
 
+    def test_two_overlapping_runs_add_a_phrase_once(self):
+        barrier = threading.Barrier(2)
+        results = []
+
+        def run():
+            barrier.wait()
+            results.append(nightly.grow_corpus(self.corpus, [self.row("сделай потише", "VOLUME")]))
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(r["new"] for r in results), [0, 1])
+        self.assertEqual([r["text"] for r in self.nightly_rows()], ["сделай потише"])
+
     def test_a_dry_run_appends_nothing(self):
         snapshot = tree(self.corpus)
         result = nightly.grow_corpus(self.corpus, [self.row("сделай потише", "VOLUME")], dry_run=True)
@@ -303,6 +337,30 @@ class PrepareTests(StoreFixture):
         self.assertTrue(summary["gate"]["ok"])
         self.assertNotIn("динозавр", json.dumps(summary, ensure_ascii=False))     # aggregates only
         self.assertIn("динозавр", (out / "clusters.json").read_text(encoding="utf-8"))
+
+    def test_held_out_phrases_never_reach_the_clusters_or_the_working_files(self):
+        held, dev = "включи режим сон на кухне", "включи режим сон в спальне"
+        holdout = backtest.holdout_percent(load(BUNDLE))
+        self.assertEqual(backtest.split_of(held, holdout), "holdout")
+        self.assertEqual(backtest.split_of(dev, holdout), "dev")
+        out = self.prepare()
+        for name in ("clusters.json", "today.jsonl", "brief.md"):
+            self.assertNotIn(held, (out / name).read_text(encoding="utf-8"), name)
+        self.assertIn(dev, (out / "today.jsonl").read_text(encoding="utf-8"))
+        summary = self.summary(out)
+        self.assertGreaterEqual(summary["held_out_withheld"], 2)       # that phrase and «Алиса»
+        self.assertEqual(summary["utterances"], 7)                      # still counted in the aggregates
+
+    def test_a_decision_the_runtime_would_not_execute_is_not_counted_as_answered(self):
+        db = self.dir / "route.sqlite3"
+        make_store(db, [
+            ("voice", NOW - 100, [("user", "speech", "включи свет в студии"), ("assistant", "reply", "…")]),
+            ("voice", NOW - 200, [("user", "speech", "который час"), ("assistant", "reply", "…")]),
+        ])
+        self.write_corpus()
+        out = nightly.prepare(grammar_path=self.bundle({}), corpus=str(self.corpus), db=str(db), hours=1.0, out_root=str(self.out), now=NOW)
+        summary = self.summary(out)
+        self.assertEqual(summary["grammar_would_answer_now"], 1)       # the time question; the light command is classified but not executable
 
     def test_the_goal_is_reported_with_its_gap_and_never_gated(self):
         out = self.prepare(gate={"goal": {"split": "real/all", "coverage": 0.9, "correct": 0.9}})

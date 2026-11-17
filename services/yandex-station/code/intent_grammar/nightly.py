@@ -23,6 +23,7 @@ import time
 from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass
+from types import SimpleNamespace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -61,21 +62,25 @@ class Heard:
 
 
 def extract(db_path: str | Path, since: float, until: float | None = None) -> list[Heard]:
-    """Spoken utterances of a time window with the layer that answered each (the dialog store's turn log)."""
+    """Spoken utterances of the window [since, until) with the layer that answered each (the dialog store's turn log).
+
+    The window applies to the utterance's own timestamp, not to its dialog's start: a dialog that crosses either edge
+    contributes exactly the speech turns inside the window, and its later turns still attribute the answering layer."""
     path = Path(db_path).expanduser()
     if not path.exists():
         raise FileNotFoundError("dialog store not found")
+    end = until if until is not None else time.time() + 1
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
     try:
         dialogs = connection.execute(
-            "SELECT id FROM dialogs WHERE kind='voice' AND ts_start >= ? AND ts_start < ? ORDER BY ts_start",
-            (since, until if until is not None else time.time() + 1)).fetchall()
+            "SELECT id FROM dialogs WHERE kind='voice' AND ts_start < ? AND (ts_end IS NULL OR ts_end >= ?) ORDER BY ts_start",
+            (end, since)).fetchall()
         heard: list[Heard] = []
         for (dialog_id,) in dialogs:
             turns = connection.execute("SELECT ts, role, kind, text FROM dialog_turns WHERE dialog_id=? ORDER BY ts, id",
                                        (dialog_id,)).fetchall()
             for index, (ts, role, kind, text) in enumerate(turns):
-                if role != "user" or kind != "speech" or not text.strip():
+                if role != "user" or kind != "speech" or not text.strip() or not since <= ts < end:
                     continue
                 layer = "none"
                 for _ts, nrole, nkind, _text in turns[index + 1:]:
@@ -250,33 +255,31 @@ def grow_corpus(corpus_dir: Path, candidates: list[Labelled], *, dry_run: bool =
 
     Append only: no row is rewritten or removed, a duplicate is skipped (counted), and a corpus with an unreadable line is
     not appended to at all (the line could be the duplicate), the error names the lines. The held-out side of a new row is
-    the stable hash of its text, which `backtest.load_rows` computes; nothing here chooses it."""
-    keys, _truths, corrupt = scan_corpus(corpus_dir) if corpus_dir.is_dir() else (set(), set(), [])
-    if corrupt:
-        raise NightlyError("the real corpus has unreadable lines, they stay as they are and nothing was appended: " + ", ".join(corrupt))
-    fresh: list[Labelled] = []
-    duplicates = 0
-    for candidate in candidates:
-        key = backtest.split_key(candidate.text)
-        if key in keys:
-            duplicates += 1
-            continue
-        keys.add(key)
-        fresh.append(candidate)
-    if fresh and not dry_run:
-        corpus_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        _append_lines(corpus_dir / CORPUS_FILE, [
-            {"text": row.text, "truth": row.truth, "layer": row.layer, "verdict": "unverified", "note": row.note, "ts": row.ts,
-             "labeller": row.labeller} for row in fresh])
+    the stable hash of its text, which `backtest.load_rows` computes; nothing here chooses it. Scan, deduplicate and
+    append are one step under the reports lock (`backtest.baseline_lock`), so two overlapping runs cannot both add a phrase;
+    a dry run writes nothing and takes no lock. The lock is not reentrant: callers must not hold it."""
+    with nullcontext() if dry_run else backtest.baseline_lock():
+        keys, _truths, corrupt = scan_corpus(corpus_dir) if corpus_dir.is_dir() else (set(), set(), [])
+        if corrupt:
+            raise NightlyError("the real corpus has unreadable lines, they stay as they are and nothing was appended: " + ", ".join(corrupt))
+        fresh: list[Labelled] = []
+        duplicates = 0
+        for candidate in candidates:
+            key = backtest.split_key(candidate.text)
+            if key in keys:
+                duplicates += 1
+                continue
+            keys.add(key)
+            fresh.append(candidate)
+        if fresh and not dry_run:
+            corpus_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _append_lines(corpus_dir / CORPUS_FILE, [
+                {"text": row.text, "truth": row.truth, "layer": row.layer, "verdict": "unverified", "note": row.note, "ts": row.ts,
+                 "labeller": row.labeller} for row in fresh])
     return {"candidates": len(candidates), "new": len(fresh), "appended": 0 if dry_run else len(fresh), "duplicates": duplicates}
 
 
 # ── preparation ─────────────────────────────────────────────────────────────
-
-def _router(grammar: Grammar):
-    import intent_route  # code/: the production route (grammar -> arithmetic -> weather -> catch-alls)
-    return intent_route.IntentRouter(grammar)
-
 
 def prepare(*, grammar_path: str | Path | None, corpus: str | None, db: str, hours: float, out_root: str,
             label: Callable[[str, dict[str, str]], tuple[str, float] | None] | None = None,
@@ -293,11 +296,16 @@ def prepare(*, grammar_path: str | Path | None, corpus: str | None, db: str, hou
     out.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     heard = extract(db, now - hours * 3600, now)
-    router = _router(grammar)
-    classified = [(item, router.classify(item.text)) for item in heard]
+    decide = _measured(grammar)        # the production route: a decision counts only where the runtime would act on it
+    holdout = backtest.holdout_percent(grammar)
+    # Held-out phrases are the grammar's exam: they never reach the clusters, the examples Jev or the agent see, or today.jsonl.
+    visible = [item for item in heard if backtest.split_of(item.text, holdout) != "holdout"]
+    withheld = len(heard) - len(visible)
+    classified = [(item, decide(SimpleNamespace(text=item.text, quasar=False, quasar_tier=None))) for item in heard]
     by_layer = Counter(item.layer for item in heard)
     answered_now = [item for item, decision in classified if decision is not None and item.layer != "fast"]
-    open_items = [item for item, decision in classified if item.layer != "fast" and (decision is None or decision.intent.startswith(("asr.", "refuse.unknown")))]
+    open_items = [item for item, decision in classified if item.layer != "fast" and (decision is None or decision.intent.startswith(("asr.", "refuse.unknown")))
+                  and backtest.split_of(item.text, holdout) != "holdout"]
     clusters = cluster_texts(grammar, [item.text for item in open_items])[:MAX_CLUSTERS]
 
     descriptions = {i.id: "; ".join(example.say for example in i.examples[:2]) for i in grammar.intents if i.examples}
@@ -345,7 +353,7 @@ def prepare(*, grammar_path: str | Path | None, corpus: str | None, db: str, hou
     summary: dict[str, Any] = {
         "date": day, "dry_run": dry_run, "window_hours": hours, "grammar_sha256": grammar.sha256,
         "utterances": len(heard), "by_layer": dict(by_layer),
-        "grammar_would_answer_now": len(answered_now), "open": len(open_items), "clusters": len(clusters),
+        "grammar_would_answer_now": len(answered_now), "open": len(open_items), "clusters": len(clusters), "held_out_withheld": withheld,
         "answered_without_model_share": round((by_layer["fast"] + len(answered_now)) / len(heard), 4) if heard else None,
         "corpus_growth": growth, "jev": jev,
         "backtest": None if report is None else {name: {k: v for k, v in split.items() if k in ("rows", "addressed", "coverage", "correct_rate", "completed_rate", "wrong_actions", "false_triggers")}
@@ -359,7 +367,7 @@ def prepare(*, grammar_path: str | Path | None, corpus: str | None, db: str, hou
     }
     _write(out / "summary.json", summary)
     _write(out / "clusters.json", cluster_rows)
-    _write(out / "today.jsonl", [{"text": i.text, "ts": i.ts, "layer": i.layer} for i in heard], lines=True)
+    _write(out / "today.jsonl", [{"text": i.text, "ts": i.ts, "layer": i.layer} for i in visible], lines=True)
     brief = out / "brief.md"
     brief.write_text(render_brief(summary, out, corpus_dir), encoding="utf-8")
     os.chmod(brief, 0o600)
