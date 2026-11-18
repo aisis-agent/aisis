@@ -1,0 +1,12 @@
+{
+  "captured_at": "2026-11-18T21:18:49.381208+00:00",
+  "source": "read-only docker cp from aisis-quasar-prod-blue",
+  "comparison": "both prod blue and green hashes matched before capture",
+  "files": {
+    "routers/alice/base-provider.ts": "9d67c34303b94b9d0ca90c778036ad1afddab1d92d4ca1e24f0c62279e7605b2",
+    "routers/alice/directives.ts": "31ab8702fbe61f933ccf12454d3643ef68bec9bcae895a24ee3f8c0aec2942c5",
+    "protobuf.ts": "5d98cb8d215c65eaff73ca0bcef31bffc5da26651d22103f810461c7912147fa"
+  },
+  "zod": "4.4.3",
+  "tsx": "4.21.0"
+}
