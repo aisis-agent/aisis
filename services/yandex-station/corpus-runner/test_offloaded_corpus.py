@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -97,15 +98,17 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual((self.destination / "src/example.ts").stat().st_mode & 0o777, 0o664)
 
     def test_paths_links_and_bytes_cannot_escape_the_declared_payload(self):
-        cases = [("../outside", b"one", tarfile.REGTYPE),
-                 ("src/undeclared.ts", b"one", tarfile.REGTYPE),
-                 ("src/example.ts", b"two", tarfile.REGTYPE),
-                 ("src/example.ts", b"", tarfile.LNKTYPE)]
-        for name, data, kind in cases:
+        cases = [("../outside", b"one", tarfile.REGTYPE, "unsafe archive path"),
+                 ("src/undeclared.ts", b"one", tarfile.REGTYPE, "unexpected archive member"),
+                 ("src/example.ts", b"two", tarfile.REGTYPE, "file content differs"),
+                 ("src/example.ts", b"", tarfile.LNKTYPE, "unsafe archive member type")]
+        for index, (name, data, kind, error) in enumerate(cases):
             with self.subTest(name=name, kind=kind):
                 self.archive_file(name, data, kind=kind)
-                with self.assertRaises(ValueError):
-                    gate.extract_payload(self.archive, self.destination, self.entries)
+                destination = self.root / str(index)
+                destination.mkdir()
+                with self.assertRaisesRegex(ValueError, error):
+                    gate.extract_payload(self.archive, destination, self.entries)
 
     def test_archive_mode_mismatch_is_not_silently_normalized(self):
         self.entries["src/example.ts"]["mode"] = 0o644
@@ -115,6 +118,37 @@ class ArchiveTests(unittest.TestCase):
 
 
 class NativeEvidenceTests(unittest.TestCase):
+    def test_explicit_native_identity_selects_one_success_after_a_failed_attempt(self):
+        command = ["python3", "offloaded_corpus.py", "run"]
+        base = {"event": "run", "cmd": "python3 offloaded_corpus.py run", "command_s": 12}
+        failed = (json.dumps({**base, "pod_id": "previous", "exit": 124}) + "\n").encode()
+        chosen = (json.dumps({**base, "pod_id": "chosen", "exit": 0}) + "\n").encode()
+        another = (json.dumps({**base, "pod_id": "other", "exit": 0}) + "\n").encode()
+        row, line_sha = gate.matching_ledger(failed + chosen + another, command, "chosen", gate.digest(chosen))
+        self.assertEqual(row["pod_id"], "chosen")
+        self.assertEqual(line_sha, gate.digest(chosen))
+        with self.assertRaises(ValueError):
+            gate.matching_ledger(failed + chosen, command, "previous", gate.digest(failed))
+
+    def test_lifecycle_requires_the_whole_ordered_selected_native_execution(self):
+        row = {"pod_id": "chosen", "cmd": "python3 offloaded_corpus.py run"}
+        command = ["python3", "offloaded_corpus.py", "run"]
+        run_path = Path("/owner/.cache/runpod-run/runs/real.log")
+        output = b"real command output\n"
+        pieces = ["runpod-run: waiting for pod chosen to answer ssh…\n",
+                  "runpod-run: running as runner: python3 offloaded_corpus.py run\n",
+                  output.decode(),
+                  "runpod-run: exit 0 after 25s (log: /owner/.cache/runpod-run/runs/real.log)\n",
+                  "runpod-run: pod chosen terminated\n"]
+        gate.validate_lifecycle("".join(pieces).encode(), row, command, run_path, output)
+        invalid = [pieces[-1], "".join(reversed(pieces)),
+                   "".join(pieces).replace("real.log", "another.log"),
+                   "".join(pieces).replace("real command output", "copied success"),
+                   "".join(pieces) + "runpod-run: COULD NOT terminate pod chosen\n"]
+        for text in invalid:
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                gate.validate_lifecycle(text.encode(), row, command, run_path, output)
+
     def test_native_record_must_be_real_success_and_unambiguous(self):
         command = ["python3", "offloaded_corpus.py", "run"]
         row = {"event": "run", "cmd": "python3 offloaded_corpus.py run", "pod_id": "pod-one",
@@ -180,6 +214,69 @@ class ContainerBoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "mount"):
                 gate.verify_container({}, "aisis-quasar-stage-blue")
             run.assert_not_called()
+
+
+class DependencyInspectionTests(unittest.TestCase):
+    """Run only the metadata inspector against inert temporary files in CI."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.package = self.root / "package"
+        self.package.mkdir()
+        (self.package / "index.js").write_bytes(b"unchanged")
+        self.want = {"type": "file", "mode": 0o644, "bytes": 9, "sha256": gate.digest(b"unchanged")}
+        (self.package / "index.js").chmod(0o644)
+        self.spec = {"entries": {str(self.package / "index.js").lstrip("/"): self.want},
+                     "packages": [{"root": str(self.package), "entries": [{"path": "index.js"}]}],
+                     "excluded": [], "sources": []}
+
+    def inspect(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "CI must provide the existing Node test runtime")
+        return subprocess.run([node, "-e", gate.CONTAINER_CHECK], input=json.dumps(self.spec),
+                              env={"PATH": os.environ.get("PATH", ""), "HOME": str(self.root)},
+                              capture_output=True, text=True, timeout=5)
+
+    def test_positive_declared_package_and_explicit_mode(self):
+        result = self.inspect()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Missing mode must stay missing, never masquerade as stage 'off'.
+        self.assertIsNone(json.loads(result.stdout)["grammar_hook"])
+
+    def test_undeclared_nested_dependency_fails_even_when_original_files_match(self):
+        hidden = self.package / "node_modules/long"
+        hidden.mkdir(parents=True)
+        (hidden / "index.js").write_bytes(b"shadow")
+        self.assertNotEqual(self.inspect().returncode, 0)
+
+    def test_symlinked_package_root_is_not_a_matching_dependency(self):
+        alias = self.root / "alias"
+        alias.symlink_to(self.package, target_is_directory=True)
+        self.spec["packages"][0]["root"] = str(alias)
+        self.spec["entries"] = {str(alias / "index.js").lstrip("/"): self.want}
+        self.assertNotEqual(self.inspect().returncode, 0)
+
+    def test_only_the_declared_generated_shim_is_allowed(self):
+        shim = self.package / "node_modules/.bin/esbuild"
+        shim.parent.mkdir(parents=True)
+        shim.write_bytes(b"not executed")
+        self.spec["excluded"] = [{"path": str(shim), "bytes": 12, "sha256": gate.digest(b"not executed")}]
+        self.assertEqual(self.inspect().returncode, 0)
+        shim.write_bytes(b"changed shim")
+        self.assertNotEqual(self.inspect().returncode, 0)
+
+    def test_source_ancestor_cannot_supply_an_undeclared_dependency(self):
+        source = self.root / "source/code.js"
+        source.parent.mkdir()
+        source.write_bytes(b"unchanged")
+        source.chmod(0o644)
+        self.spec["entries"][str(source).lstrip("/")] = self.want
+        self.spec["sources"] = [str(source)]
+        self.assertEqual(self.inspect().returncode, 0)
+        (source.parent / "node_modules").mkdir()
+        self.assertNotEqual(self.inspect().returncode, 0)
 
 
 class DeploymentIntegrationTests(unittest.TestCase):

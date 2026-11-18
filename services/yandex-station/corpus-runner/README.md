@@ -57,7 +57,9 @@ hash uses `JSON.stringify` rows ordered with `localeCompare(path, 'en')`.
 The maintained overlay commit and the Quasar source/image provenance are separate
 identities. `runner_revision` binds this helper and deployment source; a normal
 squash merge is acceptable only if its complete tree equals the reviewed tree.
-The actual current fixture hashes and maintained tree are checked again at deploy.
+The pre-squash commit is retained as provenance; it need not remain reachable in
+a fresh clone. The current complete tree and clean tracked/untracked working tree
+are checked independently, as are the actual current private fixture hashes.
 An updated source, dependency, runtime, fixture, mode or image requires new evidence.
 
 ## Execute once through the native wrapper
@@ -81,6 +83,11 @@ in two clean environments: stage with `GRAMMAR_HOOK=off`, then the freshly obser
 prod mode. No host environment or token is inherited. All five adapter/settings
 endpoints are explicitly set to their audited paths on `http://127.0.0.1:9`.
 The dialog fixture retains its existing mocked fetch and dummy HA credentials.
+Ambient ancestor module directories are rejected. Node's documented
+[`--no-global-search-paths`](https://nodejs.org/download/release/v25.9.0/docs/api/cli.html#--no-global-search-paths)
+option prevents global module lookup. The deployed inspector rejects symlinked
+source/package ancestors and undeclared nested dependencies; the two recorded
+generated pnpm shims are recognized by their exact paths, bytes and hashes.
 
 Every process must actually exit0 and print exactly one complete summary:
 469 of469 corpus cases and195 of195 dialog cases, in **each** mode. A partial total,
@@ -91,25 +98,32 @@ are checked after the run as well. Native private logs retain suite output.
 
 ## Collect and consume the real evidence
 
-After the native wrapper exits, keep its actual outer lifecycle log: the canonical
-run ledger records completion before cleanup and does not contain a fabricated
-termination row. Collection requires the real `pod ... terminated` or confirmed
-already-gone message, with no termination-failure message.
+Capture the native wrapper's original combined stdout/stderr in a private raw
+lifecycle log. After it exits, retain that actual transcript: the canonical run
+ledger records completion before cleanup and does not contain a termination row.
+Collection requires the ordered waiting-for-pod, exact runner command, complete
+canonical run output, exit0 naming its actual native log, and termination or
+confirmed already-gone message. A termination failure rejects the receipt.
 
 ```sh
 python3 services/yandex-station/corpus-runner/offloaded_corpus.py collect \
   --manifest /private/input/manifest.json --bundle /private/input/payload.tar.gz \
   --run-log /home/OWNER/.cache/runpod-run/runs/ACTUAL_NATIVE_LOG.log \
   --termination-log /private/ACTUAL_OUTER_WRAPPER.log \
+  --pod-id ACTUAL_POD_ID --ledger-line-sha256 ACTUAL_LEDGER_LINE_SHA256 \
   --output /private/input/corpus-receipt.json
 ```
 
 The collector and consumer reopen the canonical account-home native ledger and
-run log, matching the actual command, successful exit, pod identity, line hash,
-result marker and log hashes. A copied success JSON alone is insufficient. Native
+run log, matching the actual command, successful exit, explicit pod and ledger-line
+identity, result marker and log hashes. The ledger line hash includes its original
+newline. A failed or separate earlier attempt cannot be selected accidentally.
+A copied success JSON or a standalone termination line is insufficient. Native
 evidence must remain private and owned by the current operator; the helper never
 changes native files or permissions. The receipt stays beside the original
 `manifest.json`; both are needed for later verification.
+This is an audit of the owner's native execution records, not cryptographic
+attestation against an owner who can rewrite the ledger and every matching log.
 
 Prefer the prebuilt immutable candidate, so deploy cannot rebuild a different ID:
 
@@ -119,10 +133,15 @@ services/yandex-station/bluegreen/deploy.sh deploy \
 ```
 
 `AISIS_CORPUS_RECEIPT` supplies the same mandatory receipt for `stage-check` and
-`adopt`. Legacy build inputs may still be used, but their resulting immutable ID
-must match the previously tested candidate before stage/production changes.
+`adopt`. Legacy build inputs may still be used, but only a build that reproduces the
+already-tested immutable ID (for example an unchanged cache hit) can continue.
+A new image ID requires its own export and isolated execution; deployment does
+not relabel old evidence for it. The prebuilt `--image` path avoids that ambiguity.
 At each stage-blue, stage-green and idle-prod gate, verification hashes current
 source/dependency bytes and Node, checks that source-altering mounts are absent,
-and compares actual grammar/default flags. This metadata-only inspection performs
+and compares explicitly reported grammar/default flags. A missing grammar value
+does not masquerade as stage-off. The known `/src/fillers` asset mount is outside
+the fixed export; other mounts overlapping source/dependency/config paths fail.
+This metadata-only inspection performs
 no corpus, API or device request. The individual existing smoke/handshake/rollback
 gates then run normally.

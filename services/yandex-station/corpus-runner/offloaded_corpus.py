@@ -248,7 +248,14 @@ def validate_inventory(manifest):
             and {x["path"] for x in inventory["source_files"]} == SOURCE_PATHS, "source closure differs")
     provider = next(x for x in inventory["source_files"] if x["path"] == "/src/routers/alice/base-provider.ts")
     require(provider["sha256"] == inventory["provider_postimage_sha256"], "provider postimage differs")
-    validate_links(inventory, validate_package_roots(inventory))
+    roots = validate_package_roots(inventory)
+    validate_links(inventory, roots)
+    expected_exclusions = {roots[name] + "/node_modules/.bin/esbuild" for name in ("tsx", "esbuild")}
+    excluded = inventory["excluded_package_paths"]
+    require(len(excluded) == 2 and {item["path"] for item in excluded} == expected_exclusions,
+            "unexpected package exclusion")
+    require(all(valid_hash(item["sha256"]) and type(item["bytes"]) is int
+                and item["bytes"] > 0 for item in excluded), "excluded shim identity missing")
     require(len(manifest["fixtures"]) == len(FIXTURES)
             and {x["name"]: x["sha256"] for x in manifest["fixtures"]} == FIXTURES,
             "unchanged fixture and runner identities required")
@@ -288,6 +295,7 @@ def verify_files(root, entries):
     root = Path(root).resolve()
     for relative, item in entries.items():
         path = root / relative
+        require(path.parent.resolve() == path.parent, "symlinked payload ancestor")
         info = path.lstat()
         if item["type"] == "symlink":
             require(stat.S_ISLNK(info.st_mode) and os.readlink(path) == item["target"], "link differs")
@@ -352,6 +360,12 @@ def extract_payload(archive, destination, entries):
     verify_files(destination, entries)
 
 
+def verify_resolution_environment(root):
+    """Undeclared ancestor modules cannot satisfy missing export dependencies."""
+    for parent in Path(root).parents:
+        require(not os.path.lexists(parent / "node_modules"), "ambient ancestor dependencies")
+
+
 def install_node(directory):
     archive = Path(directory) / "node.tar.xz"
     with urllib.request.urlopen(NODE_URL, timeout=45) as response, archive.open("xb") as output:
@@ -376,7 +390,8 @@ def run_modes(root, node, prod_mode, log):
     for name, grammar in (("stage", "off"), ("prod", prod_mode)):
         mode = {"name": name, "grammar_hook": grammar}
         env = {"PATH": str(node.parent) + ":/usr/bin:/bin", "HOME": str(root.parent),
-               "GRAMMAR_HOOK": grammar, **CLOSED_ENDPOINTS}
+               "GRAMMAR_HOOK": grammar, "NODE_OPTIONS": "--no-global-search-paths",
+               **CLOSED_ENDPOINTS}
         for suite in TOTALS:
             command = [str(node), str(root / "node_modules/tsx/dist/cli.mjs"), "run_" + suite + ".mts"]
             log("suite_start", mode=name, suite=suite)
@@ -409,6 +424,7 @@ def run_remote(args, log):
         root = Path(work) / "payload"
         root.mkdir(mode=0o700)
         extract_payload(args.bundle, root, entries)
+        verify_resolution_environment(root)
         node = install_node(work)
         result = {"schema": RESULT_SCHEMA, "execution_kind": "runpod-source",
                   "image_executed_remote": False, "manifest_sha256": args.manifest_sha256,
@@ -464,6 +480,28 @@ def matching_ledger(ledger, command, pod_id=None, line_sha=None):
     return matches[0]
 
 
+def validate_lifecycle(data, row, command, run_path, run_data):
+    """Bind cleanup to the selected native invocation's actual complete transcript."""
+    text = data.decode()
+    waiting = "runpod-run: waiting for pod " + row["pod_id"] + " to answer ssh"
+    running = "runpod-run: running as runner: " + row["cmd"]
+    require(shlex.split(row["cmd"]) == command, "lifecycle command differs")
+    waiting_at = text.find(waiting)
+    running_at = text.find(running)
+    output_at = text.find(run_data.decode(), running_at + len(running))
+    pattern = r"(?m)^runpod-run: exit 0 after [0-9]+s \(log: " + re.escape(str(run_path)) + r"\)$"
+    exits = list(re.finditer(pattern, text))
+    require(len(exits) == 1, "native lifecycle exit/log identity missing or duplicated")
+    ended_at = exits[0].start()
+    endings = (" terminated", " is already gone")
+    terminations = [text.find("runpod-run: pod " + row["pod_id"] + end, ended_at)
+                    for end in endings]
+    require(0 <= waiting_at < running_at < output_at < ended_at
+            and any(at > ended_at for at in terminations), "native lifecycle order or output differs")
+    require(output_at + len(run_data.decode()) <= ended_at, "native output overlaps exit record")
+    require("COULD NOT terminate pod " + row["pod_id"] not in text, "native termination failed")
+
+
 def validate_native(receipt, manifest):
     native = receipt["native"]
     command = fixed_command(receipt["manifest_sha256"], receipt["bundle_sha256"],
@@ -480,10 +518,7 @@ def validate_native(receipt, manifest):
                            manifest["runner_revision"]["sha256"], manifest["prod_grammar_hook"])
     lifecycle = private_bytes(native["termination_log"])
     require(digest(lifecycle) == native["termination_log_sha256"], "lifecycle log checksum differs")
-    words = lifecycle.decode()
-    require(any("runpod-run: pod " + native["pod_id"] + ending in words
-                for ending in (" terminated", " is already gone")), "native termination is unconfirmed")
-    require("COULD NOT terminate pod " + native["pod_id"] not in words, "native termination failed")
+    validate_lifecycle(lifecycle, row, command, root / "runs" / name, data)
     return result
 
 
@@ -501,6 +536,7 @@ def evidence(receipt_path):
 
 
 def collect(args, log):
+    require(Path(args.manifest).name == "manifest.json", "collector requires manifest.json")
     manifest = load_json(args.manifest)
     validate_manifest(manifest)
     require(file_digest(__file__) == manifest["runner_revision"]["sha256"], "collector source differs")
@@ -512,7 +548,8 @@ def collect(args, log):
     native_result(data, manifest_sha, bundle_sha, manifest["runner_revision"]["sha256"],
                   manifest["prod_grammar_hook"])
     command = fixed_command(manifest_sha, bundle_sha, manifest["runner_revision"]["sha256"])
-    row, line_sha = matching_ledger(private_bytes(root / "ledger.jsonl"), command)
+    row, line_sha = matching_ledger(private_bytes(root / "ledger.jsonl"), command,
+                                     args.pod_id, args.ledger_line_sha256)
     result = {"schema": RECEIPT_SCHEMA, "manifest_sha256": manifest_sha, "bundle_sha256": bundle_sha,
               "native": {"pod_id": row["pod_id"], "ledger_line_sha256": line_sha,
                          "run_log_name": name, "run_log_sha256": digest(data),
@@ -552,44 +589,83 @@ def verify_host_inputs(manifest, corpus_dir):
         directory = runner_dir if name in ("run_corpus.mts", "expected_kind.mjs") else Path(corpus_dir)
         require(file_digest(directory / name) == fixture["sha256"], "current fixture or runner differs")
     repo = runner_dir.parents[2]
-    for key in ("overlay_revision", "runner_revision"):
-        revision = manifest[key]
-        process = subprocess.run(["git", "-C", str(repo), "rev-parse", revision["commit"] + "^{tree}"],
-                                 capture_output=True, text=True, timeout=10)
-        require(process.returncode == 0 and process.stdout.strip() == revision["tree"], "source tree differs")
-    current = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"], text=True, timeout=10).strip()
+    current = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"], text=True, timeout=10).strip()
     require(current == manifest["runner_revision"]["tree"], "current maintained source tree differs")
+    dirty = subprocess.check_output(
+        ["git", "-C", str(repo), "status", "--porcelain=v1", "--untracked-files=all"],
+        text=True, timeout=10)
+    require(not dirty, "current maintained working tree differs")
+
 
 
 # This hashes bytes in the existing container. It imports no application, performs
 # no corpus or API/device call, and prints only a fixed metadata/result object.
 CONTAINER_CHECK = r'''
-const fs=require('fs'),crypto=require('crypto');
-const spec=JSON.parse(fs.readFileSync(0,'utf8'));
-async function sha(p){const h=crypto.createHash('sha256');for await(const b of fs.createReadStream(p))h.update(b);return h.digest('hex');}
-(async()=>{
- for(const [rel,want] of Object.entries(spec.entries)){
-  const p='/'+rel,s=fs.lstatSync(p);
-  if(want.type==='symlink'){
-   if(!s.isSymbolicLink()||fs.readlinkSync(p)!==want.target)throw Error('dependency link differs');
-  }else if(!s.isFile()||s.size!==want.bytes||(s.mode&511)!==want.mode||await sha(p)!==want.sha256){throw Error('source bytes or metadata differ');}
+const fs = require('fs'), crypto = require('crypto'), path = require('path');
+const spec = JSON.parse(fs.readFileSync(0, 'utf8'));
+async function sha(p) {
+ const hash = crypto.createHash('sha256');
+ for await (const bytes of fs.createReadStream(p)) hash.update(bytes);
+ return hash.digest('hex');
+}
+function directParent(p) {
+ if (fs.realpathSync(path.dirname(p)) !== path.dirname(p)) throw Error('symlinked source ancestor');
+}
+async function inspectEntry(p, want) {
+ directParent(p);
+ const info = fs.lstatSync(p);
+ if (want.type === 'symlink') {
+  const expected = path.resolve(path.dirname(p), want.target);
+  if (!info.isSymbolicLink() || fs.readlinkSync(p) !== want.target ||
+      fs.realpathSync(p) !== expected) throw Error('dependency link differs');
+ } else if (!info.isFile() || info.size !== want.bytes ||
+            (info.mode & 511) !== want.mode || await sha(p) !== want.sha256) {
+  throw Error('source bytes or metadata differ');
  }
- for(const pkg of spec.packages){
-  const actual=[];
-  function walk(dir,rel=''){
-   for(const name of fs.readdirSync(dir)){
-    if(name==='node_modules')continue;
-    const local=rel?rel+'/'+name:name,p=dir+'/'+name,s=fs.lstatSync(p);
-    if(s.isDirectory())walk(p,local);else actual.push(local);
+}
+async function inspectPackage(pkg) {
+ if (!fs.lstatSync(pkg.root).isDirectory() || fs.realpathSync(pkg.root) !== pkg.root)
+  throw Error('symlinked package root');
+ const actual = [], excluded = new Map(spec.excluded.map(item => [item.path, item]));
+ async function walk(directory, relative = '') {
+  for (const name of fs.readdirSync(directory)) {
+   const local = relative ? relative + '/' + name : name;
+   const p = directory + '/' + name, info = fs.lstatSync(p);
+   if (local.split('/').includes('node_modules')) {
+    if (info.isDirectory()) {
+     if (![...excluded.keys()].some(item => item.startsWith(p + '/')))
+      throw Error('undeclared nested dependency directory');
+    } else {
+     const allowed = excluded.get(p);
+     if (!allowed || !info.isFile() || info.size !== allowed.bytes ||
+         await sha(p) !== allowed.sha256) throw Error('undeclared nested dependency');
+     continue;
+    }
    }
+   if (info.isDirectory()) await walk(p, local); else actual.push(local);
   }
-  walk(pkg.root);
-  if(JSON.stringify(actual.sort())!==JSON.stringify(pkg.entries.map(x=>x.path).sort()))throw Error('dependency closure differs');
  }
- const flags={};
- for(const k of ['ASR_CORRECT','SEMANTIC_INTENTS','AISIS_FAST_EARCON'])flags[k]=process.env[k]??null;
- console.log(JSON.stringify({ok:true,node_sha256:await sha(process.execPath),grammar_hook:process.env.GRAMMAR_HOOK||'off',default_flags:flags}));
-})().catch(()=>{console.error('candidate source inspection failed');process.exit(1);});
+ await walk(pkg.root);
+ if (JSON.stringify(actual.sort()) !== JSON.stringify(pkg.entries.map(item => item.path).sort()))
+  throw Error('dependency closure differs');
+}
+function inspectSourceResolution(sources) {
+ for (const source of sources) {
+  for (let ancestor = path.dirname(source); ancestor !== '/'; ancestor = path.dirname(ancestor)) {
+   if (fs.existsSync(ancestor + '/node_modules')) throw Error('source dependency shadow');
+  }
+ }
+}
+(async () => {
+ for (const [relative, want] of Object.entries(spec.entries)) await inspectEntry('/' + relative, want);
+ inspectSourceResolution(spec.sources);
+ for (const pkg of spec.packages) await inspectPackage(pkg);
+ const flags = {};
+ for (const key of ['ASR_CORRECT', 'SEMANTIC_INTENTS', 'AISIS_FAST_EARCON']) flags[key] = process.env[key] ?? null;
+ console.log(JSON.stringify({ok: true, node_sha256: await sha(process.execPath),
+   grammar_hook: process.env.GRAMMAR_HOOK ?? null, default_flags: flags}));
+})().catch(() => { console.error('candidate source inspection failed'); process.exit(1); });
 '''
 
 
@@ -614,7 +690,10 @@ def verify_container(manifest, name):
     verify_mounts(data.get("Mounts", []))
     process = subprocess.run(["docker", "exec", "-i", name, "node", "-e", CONTAINER_CHECK],
                              input=canonical({"entries": inventory_entries(manifest, False),
-                                              "packages": manifest["inventory"]["packages"]}),
+                                              "packages": manifest["inventory"]["packages"],
+                                              "excluded": manifest["inventory"]["excluded_package_paths"],
+                                              "sources": [item["path"] for item in manifest["inventory"]["source_files"]
+                                                          if item["path"].startswith("/src/")]}),
                              capture_output=True, text=True, timeout=45)
     require(process.returncode == 0, "candidate source inspection failed")
     observed = json.loads(process.stdout)
@@ -642,7 +721,7 @@ def parser():
     for key in ("manifest", "bundle", "manifest-sha256", "bundle-sha256", "runner-sha256"):
         run.add_argument("--" + key, required=True)
     capture = commands.add_parser("collect", help="bind native ledger, run log and termination evidence")
-    for key in ("manifest", "bundle", "run-log", "termination-log", "output"):
+    for key in ("manifest", "bundle", "run-log", "termination-log", "pod-id", "ledger-line-sha256", "output"):
         capture.add_argument("--" + key, required=True)
     check = commands.add_parser("verify", help="read-only evidence and current candidate checks")
     check.add_argument("--receipt", required=True)
@@ -667,7 +746,7 @@ def main():
             print(canonical(row), file=sys.stderr, flush=True)
 
     log("start", log=str(logfile))
-    code = 0
+    code = 1
     try:
         args = parser().parse_args()
         actions = {"run": run_remote, "collect": collect, "verify": verify}
@@ -675,6 +754,7 @@ def main():
             log("inactive", message="Choose a documented command; no operational work performed")
         else:
             actions[args.command](args, log)
+        code = 0
     except SuiteFailure as error:
         code = error.exit_code if error.exit_code > 0 else 128 - error.exit_code
         log("failed", error_type=type(error).__name__, actual_process_exit=error.exit_code)
@@ -683,7 +763,11 @@ def main():
         log("failed", error_type="TimeoutExpired")
     except SystemExit as error:
         code = error.code if isinstance(error.code, int) else 1
-    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as error:
+    except KeyboardInterrupt:
+        code = 130
+        log("failed", error_type="KeyboardInterrupt")
+    except Exception as error:
+        # CLI boundary: report failure truthfully without leaking arbitrary input.
         code = 1
         log("failed", error_type=type(error).__name__,
             reason=str(error) if isinstance(error, ValueError) else "operation failed")
