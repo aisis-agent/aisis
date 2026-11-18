@@ -93,7 +93,8 @@ function callVolume (provider: Awaited<ReturnType<typeof loadProvider>>['provide
 }
 
 function assertVolume (result: unknown, level: number, percent: number) {
-  assert.notEqual(result, null, 'integer zero must produce a volume directive')
+  const label = level === 0 ? 'integer zero' : `integer level ${level}`
+  assert.notEqual(result, null, `${label} must produce a volume directive`)
   assert.deepEqual(result, {
     quasarDirective: {
       IsLedSilent: true,
@@ -140,10 +141,12 @@ function assertRefusals (providerFile: string, overlay: string) {
 
 async function verifyPatched (baseline: Awaited<ReturnType<typeof loadProvider>>) {
   const providerFile = join(root, 'fixtures/base-provider.ts.txt')
+  const beforeBytes = readFileSync(providerFile)
+  const before = beforeBytes.toString('utf8')
   const overlay = join(runtime, 'overlay')
   runApplier(providerFile, overlay, 0)
+  assert.deepEqual(readFileSync(providerFile), beforeBytes, 'the baseline input remains unchanged')
   const patchedFile = join(overlay, 'routers/alice/base-provider.ts')
-  const before = readFileSync(providerFile, 'utf8')
   const oldLine = '      volume: z.number().int().min(1).max(10)\n'
   const newLine = '      volume: z.number().int().min(0).max(10)\n'
   assert.equal(before.split(oldLine).length, 2, 'the exact source anchor occurs once')

@@ -85,8 +85,8 @@ jobs:
           cache-dependency-path: services/yandex-station/overlays/volume-zero/package-lock.json
       - name: install the exact regression dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: reproduce the current zero-volume rejection
-        run: npm run check:baseline
+      - name: verify the recorded rejection and the zero-volume overlay
+        run: npm run check
   whitespace:
     runs-on: ubuntu-latest
     timeout-minutes: 5
