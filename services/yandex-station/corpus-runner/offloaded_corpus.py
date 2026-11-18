@@ -34,6 +34,8 @@ CLOSED_ENDPOINTS = {
     "AISIS_SETTINGS_URL": "http://127.0.0.1:9/api/settings",
 }
 DEFAULT_FLAGS = {"ASR_CORRECT": None, "SEMANTIC_INTENTS": None, "AISIS_FAST_EARCON": None}
+TEST_RUNTIME_INPUTS = {"NODE_ENV": "production", "TSX_DISABLE_CACHE": "1",
+                       "NODE_OPTIONS": "--no-global-search-paths"}
 NODE_URL = "https://nodejs.org/dist/v25.9.0/node-v25.9.0-linux-x64.tar.xz"
 NODE_ARCHIVE_SHA = "1d8db7d6e291d167e8c467ae4094be175e1a0b3969c7ae1f8955b9f7824f7b2e"
 NODE_SHA = "7fd113446e9171a28885227b3c275ff965b2fd1f45ccf1fb3a1c20308f34e627"
@@ -390,8 +392,7 @@ def run_modes(root, node, prod_mode, log):
     for name, grammar in (("stage", "off"), ("prod", prod_mode)):
         mode = {"name": name, "grammar_hook": grammar}
         env = {"PATH": str(node.parent) + ":/usr/bin:/bin", "HOME": str(root.parent),
-               "GRAMMAR_HOOK": grammar, "NODE_OPTIONS": "--no-global-search-paths",
-               **CLOSED_ENDPOINTS}
+               "GRAMMAR_HOOK": grammar, **TEST_RUNTIME_INPUTS, **CLOSED_ENDPOINTS}
         for suite in TOTALS:
             command = [str(node), str(root / "node_modules/tsx/dist/cli.mjs"), "run_" + suite + ".mts"]
             log("suite_start", mode=name, suite=suite)
@@ -429,7 +430,7 @@ def run_remote(args, log):
         result = {"schema": RESULT_SCHEMA, "execution_kind": "runpod-source",
                   "image_executed_remote": False, "manifest_sha256": args.manifest_sha256,
                   "bundle_sha256": args.bundle_sha256, "runner_sha256": args.runner_sha256,
-                  "node_sha256": file_digest(node),
+                  "node_sha256": file_digest(node), "test_runtime_inputs": TEST_RUNTIME_INPUTS,
                   "modes": run_modes(root, node, manifest["prod_grammar_hook"], log)}
         verify_files(root, entries)
     print(MARKER + canonical(result), flush=True)
@@ -455,7 +456,8 @@ def native_result(log_data, manifest_sha, bundle_sha, runner_sha, prod_mode):
     result = json.loads(rows[0], object_pairs_hook=unique_object)
     required = {"schema": RESULT_SCHEMA, "execution_kind": "runpod-source", "image_executed_remote": False,
                 "manifest_sha256": manifest_sha, "bundle_sha256": bundle_sha,
-                "runner_sha256": runner_sha, "node_sha256": NODE_SHA}
+                "runner_sha256": runner_sha, "node_sha256": NODE_SHA,
+                "test_runtime_inputs": TEST_RUNTIME_INPUTS}
     require(all(result.get(k) == v and type(result.get(k)) is type(v) for k, v in required.items()),
             "native result identity differs")
     validate_results(result.get("modes"), prod_mode)
@@ -465,12 +467,14 @@ def native_result(log_data, manifest_sha, bundle_sha, runner_sha, prod_mode):
 def matching_ledger(ledger, command, pod_id=None, line_sha=None):
     matches = []
     for line in ledger.splitlines(keepends=True):
+        # The shared append-only ledger may end in another writer's partial row.
+        # Only the explicitly selected native row is evidence for this receipt.
+        if line_sha is not None and digest(line) != line_sha:
+            continue
         row = json.loads(line, object_pairs_hook=unique_object)
         if row.get("event") != "run" or shlex.split(row.get("cmd", "")) != command:
             continue
         if pod_id is not None and row.get("pod_id") != pod_id:
-            continue
-        if line_sha is not None and digest(line) != line_sha:
             continue
         require(type(row.get("exit")) is int and row["exit"] == 0, "native run exit differs")
         require(type(row.get("command_s")) is int and row["command_s"] >= 0, "native command did not run")
@@ -654,6 +658,8 @@ function inspectSourceResolution(sources) {
  for (const source of sources) {
   for (let ancestor = path.dirname(source); ancestor !== '/'; ancestor = path.dirname(ancestor)) {
    if (fs.existsSync(ancestor + '/node_modules')) throw Error('source dependency shadow');
+   if (fs.existsSync(ancestor + '/package.json') || fs.existsSync(ancestor + '/tsconfig.json'))
+    throw Error('source configuration shadow');
   }
  }
 }

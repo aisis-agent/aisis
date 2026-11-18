@@ -98,6 +98,22 @@ Ambient ancestor module directories are rejected. Node's documented
 option prevents global module lookup. The deployed inspector rejects symlinked
 source/package ancestors and undeclared nested dependencies; the two recorded
 generated pnpm shims are recognized by their exact paths, bytes and hashes.
+The test runtime explicitly sets `NODE_ENV=production`, matching the observed
+serving child, and `TSX_DISABLE_CACHE=1`, the pinned tsx loader's documented
+in-memory-cache input. Together with `NODE_OPTIONS`, these exact values are
+recorded in the native result and checked by its consumer; the runner hash binds
+their implementation. The host environment cannot replace them.
+
+The serving pnpm bootstrap has a standard `NODE_PATH` fallback into its shared
+hoist. That is not exported or represented as absent. Preparation must resolve
+the seven declared dependency edges from their actual caller contexts with that
+serving environment and verify their inventoried target roots. The observed
+snapshot resolves all seven edges from42 literal caller/metadata contexts to
+those exact roots. Type-only edges use package metadata and esbuild's platform
+edge uses its actual binary path. The inspector still rejects package-local
+shadows and extra non-root source `package.json` or `tsconfig.json` files. This is
+evidence for the declared tested closure, not execution of every module in the
+production image or a claim that the image has no other packages.
 
 Every process must actually exit0 and print exactly one complete summary:
 469 of469 corpus cases and195 of195 dialog cases, in **each** mode. A partial total,

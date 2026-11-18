@@ -208,6 +208,9 @@ class RunnerEnvironmentTests(unittest.TestCase):
         for env in captured:
             self.assertNotIn("HA_TOKEN", env)
             self.assertNotIn("ASR_CORRECT", env)
+            self.assertEqual(env["NODE_ENV"], "production")
+            self.assertEqual(env["TSX_DISABLE_CACHE"], "1")
+            self.assertEqual(env["NODE_OPTIONS"], "--no-global-search-paths")
             self.assertEqual(env["AISIS_ADAPTER_MUSIC_URL"], "http://127.0.0.1:9/music/play")
             self.assertEqual(env["AISIS_ADAPTER_LAYA_URL"], "http://127.0.0.1:9/laya")
             self.assertEqual(env["AISIS_ADAPTER_ASR_URL"], "http://127.0.0.1:9/asr/correct")
@@ -293,6 +296,21 @@ class DependencyInspectionTests(unittest.TestCase):
         (source.parent / "node_modules").mkdir()
         self.assertNotEqual(self.inspect().returncode, 0)
 
+    def test_source_ancestor_cannot_change_module_or_typescript_configuration(self):
+        source = self.root / "source/code.js"
+        source.parent.mkdir()
+        source.write_bytes(b"unchanged")
+        source.chmod(0o644)
+        self.spec["entries"][str(source).lstrip("/")] = self.want
+        self.spec["sources"] = [str(source)]
+        self.assertEqual(self.inspect().returncode, 0)
+        for name in ("package.json", "tsconfig.json"):
+            with self.subTest(name=name):
+                config = source.parent / name
+                config.write_text("{}")
+                self.assertNotEqual(self.inspect().returncode, 0)
+                config.unlink()
+
 
 class DeploymentIntegrationTests(unittest.TestCase):
     def test_missing_evidence_aborts_before_creating_deployment_state(self):
@@ -331,6 +349,7 @@ class ResultIdentityTests(unittest.TestCase):
             "image_executed_remote": False, "manifest_sha256": "a" * 64,
             "bundle_sha256": "b" * 64, "runner_sha256": "c" * 64,
             "node_sha256": gate.NODE_SHA,
+            "test_runtime_inputs": gate.TEST_RUNTIME_INPUTS,
             "modes": [{"name": name, "grammar_hook": grammar,
                        "corpus": {"exit_code": 0, "passed": 469, "total": 469},
                        "dialogs": {"exit_code": 0, "passed": 195, "total": 195}}
@@ -338,7 +357,7 @@ class ResultIdentityTests(unittest.TestCase):
         }
         raw = ("AISIS_CORPUS_RESULT_V1=" + json.dumps(result) + "\n").encode()
         self.assertEqual(gate.native_result(raw, "a" * 64, "b" * 64, "c" * 64, "on")["modes"][1]["name"], "prod")
-        for field in ("manifest_sha256", "bundle_sha256", "runner_sha256", "node_sha256"):
+        for field in ("manifest_sha256", "bundle_sha256", "runner_sha256", "node_sha256", "test_runtime_inputs"):
             changed = {**result, field: "d" * 64}
             data = ("AISIS_CORPUS_RESULT_V1=" + json.dumps(changed) + "\n").encode()
             with self.subTest(field=field), self.assertRaises(ValueError):
