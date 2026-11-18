@@ -167,6 +167,12 @@ class RunnerEnvironmentTests(unittest.TestCase):
 
 
 class ContainerBoundaryTests(unittest.TestCase):
+    def test_existing_fillers_and_state_mounts_remain_compatible(self):
+        gate.verify_mounts([{"Destination": "/src/fillers"}, {"Destination": "/state"}])
+        for path in ("/", "/src", "/src/backend", "/src/fillers/other", "/node_modules", "/pnpm-workspace.yaml"):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "mount"):
+                gate.verify_mounts([{"Destination": path}])
+
     def test_source_parent_mount_including_root_is_rejected_before_exec(self):
         data = {"State": {"Running": True}, "Image": "candidate", "Mounts": [{"Destination": "/"}]}
         with patch.object(gate, "command_json", return_value=[data]), \

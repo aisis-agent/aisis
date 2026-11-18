@@ -593,17 +593,25 @@ async function sha(p){const h=crypto.createHash('sha256');for await(const b of f
 '''
 
 
+def verify_mounts(mounts):
+    protected = ("/src", "/node_modules", "/package.json", "/pnpm-lock.yaml", "/pnpm-workspace.yaml", "/tsconfig.json")
+    for mount in mounts:
+        target = mount["Destination"].rstrip("/") or "/"
+        # Every existing color mounts this reviewed non-source asset directory.
+        # It is absent from the fixed SOURCE_PATHS closure and private export.
+        if target == "/src/fillers":
+            continue
+        require(target != "/" and not any(p == target or p.startswith(target + "/") or target.startswith(p + "/")
+                        for p in protected), "source-altering container mount")
+
+
 def verify_container(manifest, name):
     match = re.fullmatch(r"aisis-quasar-(stage|prod)-(blue|green)", name)
     require(match is not None, "unexpected deployment container")
     data = command_json(["docker", "inspect", name])[0]
     require(data["State"]["Running"] is True, "candidate container is not running")
     verify_image(manifest, data["Image"])
-    protected = ("/src", "/node_modules", "/package.json", "/pnpm-lock.yaml", "/pnpm-workspace.yaml", "/tsconfig.json")
-    for mount in data.get("Mounts", []):
-        target = mount["Destination"].rstrip("/") or "/"
-        require(target != "/" and not any(p == target or p.startswith(target + "/") or target.startswith(p + "/")
-                        for p in protected), "source-altering container mount")
+    verify_mounts(data.get("Mounts", []))
     process = subprocess.run(["docker", "exec", "-i", name, "node", "-e", CONTAINER_CHECK],
                              input=canonical({"entries": inventory_entries(manifest, False),
                                               "packages": manifest["inventory"]["packages"]}),
