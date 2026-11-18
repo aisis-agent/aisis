@@ -1,4 +1,3 @@
-#!/usr/bin/env -S node --import tsx
 /**
  * Exercise the captured Quasar volume schema, converter and protobuf encoder.
  * The only substitutes are logging and unrelated alarm serialization at import.
