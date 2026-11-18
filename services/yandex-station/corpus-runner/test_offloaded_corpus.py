@@ -118,6 +118,21 @@ class ArchiveTests(unittest.TestCase):
 
 
 class NativeEvidenceTests(unittest.TestCase):
+    def test_only_the_selected_raw_ledger_line_is_parsed(self):
+        command = ["python3", "offloaded_corpus.py", "run"]
+        row = {"event": "run", "cmd": "python3 offloaded_corpus.py run",
+               "pod_id": "chosen", "exit": 0, "command_s": 12}
+        chosen = (json.dumps(row) + "\n").encode()
+        duplicate_keys = b'{"event":"other","event":"duplicate"}\n'
+        torn_tail = b'{"event":"run","cmd":'
+        found, line_sha = gate.matching_ledger(
+            duplicate_keys + chosen + torn_tail, command, "chosen", gate.digest(chosen))
+        self.assertEqual(found, row)
+        self.assertEqual(line_sha, gate.digest(chosen))
+        for invalid in (duplicate_keys, torn_tail):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                gate.matching_ledger(invalid, command, "chosen", gate.digest(invalid))
+
     def test_explicit_native_identity_selects_one_success_after_a_failed_attempt(self):
         command = ["python3", "offloaded_corpus.py", "run"]
         base = {"event": "run", "cmd": "python3 offloaded_corpus.py run", "command_s": 12}

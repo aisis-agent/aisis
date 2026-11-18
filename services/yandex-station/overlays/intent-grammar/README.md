@@ -49,6 +49,13 @@ request: {"text": string, "dialogActive": boolean, "shadow"?: true}
 
 ## Build, check, deploy
 
+Run the full checks in CI or RunPod. Prebuild the reviewed overlay as one
+immutable candidate, export its exact closure, execute the unchanged corpus and
+dialog suites through native RunPod, and collect the real evidence using the
+[corpus protocol](../../corpus-runner/README.md). Set `VERIFIED_IMAGE_ID` and
+`CORPUS_RECEIPT` from that execution; an older receipt cannot authorize a newly
+built image. Run the deployment command from the clean isolated release checkout.
+
 ```
 OVERLAY=$(mktemp -d)/overlay
 IMAGE=$(docker inspect --format '{{.Config.Image}}' aisis-quasar-prod-<active color>)
@@ -60,10 +67,12 @@ docker run --rm --network none --entrypoint /node_modules/.bin/tsx \
   -v "$OVERLAY/backend/ha-intents.ts:/src/backend/ha-intents.ts:ro" \
   -v "$OVERLAY/backend/asr-correct.ts:/src/backend/asr-correct.ts:ro" \
   -v "$OVERLAY/backend/grammar-hook.ts:/src/backend/grammar-hook.ts:ro" "$IMAGE" /src/backend/check_grammar_hook.mts   # ИТОГ 34/34
-../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar-$(date -u +%Y%m%dT%H%M%SZ)      # base = the active color's image; the tag is unique per run
+# Only after the prebuilt candidate and its offloaded evidence are verified:
+../../bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"
 ```
 
-Nothing here deploys or restarts anything (the quasar deploys belong to the deploy owner). `check_grammar_hook.mts` serves a stub adapter and a
+Overlay preparation and checks do not deploy or restart anything; the final
+deployment command belongs to the deploy owner. `check_grammar_hook.mts` serves a stub adapter and a
 stub Home Assistant on a loopback port inside the throwaway container (no network): reply, silent, dialog_end, volume
 (target, steps going up, deltaLevels with and without the speaker level), none, timeout (the old path still answers), HTTP 500,
 bad JSON, an unknown and a prototype route name, `GRAMMAR_HOOK=shadow` (not awaited, `shadow: true`, never acts) and every
@@ -108,7 +117,9 @@ python3 ../weather-via-cli/prepare_overlay.py --baseline "$BASE/backend/entity-i
 python3 prepare_overlay.py --ha-intents "$OVERLAY/backend/ha-intents.ts" --asr-correct "$BASE/backend/asr-correct.ts" --output-dir "$OVERLAY.intent"
 cp "$OVERLAY.weather/backend/entity-index.ts" "$OVERLAY.intent/backend/asr-correct.ts" "$OVERLAY.intent/backend/grammar-hook.ts" "$OVERLAY/backend/"
 cp "$OVERLAY.intent/backend/ha-intents.ts" "$OVERLAY/backend/ha-intents.ts"                      # speaker-room + grammar hook
-../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar-speaker-room-weather-$(date -u +%Y%m%dT%H%M%SZ)   # docker tags cannot contain "+"; unique per run: a failed deploy must never overwrite the tag of the running image
+# Prebuild this combined overlay, export it, run the native suites, and collect
+# its own receipt before invoking the deployment command:
+../../bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"
 ```
 
 The in-container check passes on the combined `ha-intents.ts` too (`ИТОГ 34/34`, with the speaker-room `speaker-room.ts`

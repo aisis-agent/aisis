@@ -76,7 +76,9 @@ one of the home's rooms keeps the old default (Гостиная). To move a spea
 device in HA (an area set only on the player entity is not read); the registry cache refreshes within a minute. The code is the `overlays/speaker-room` source overlay
 (the quasar layer lives in the image, not in this repository): `overlays/speaker-room/prepare_overlay.py --baseline DIR
 --output-dir NEW` patches the exact production sources (`docker cp aisis-quasar-prod-<active>:/src/. DIR`, hash-checked)
-and `bluegreen/deploy.sh deploy --overlay NEW` ships it; `overlays/speaker-room/run_tests.sh` runs `tests/*.mts` against
+then prebuild the immutable candidate and follow the [isolated corpus evidence protocol](corpus-runner/README.md).
+Deploy that tested image with `bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"`;
+`overlays/speaker-room/run_tests.sh` runs `tests/*.mts` against
 the overlay applied to the active image's sources, in scratch containers with no network.
 
 One-time setup on the host: `scripts/install-weather-cli.sh` (clones weather-cli to `~/xp/weather-cli`, links
@@ -103,8 +105,12 @@ query string, which `weather.get_forecasts?return_response` needs.
   fish.key, per-feature json), `~/.cache/aisis/` (quasar-server source, fillers),
   `~/.local/state/aisis/` (adapter/pm sqlite, quasar-prod container state).
   Secrets (fish.key, runtime.env, *.env with tokens, sqlite) are never committed.
-- **Blue/green deploys**: `bluegreen/deploy.sh deploy --overlay SRC_DIR …`;
-  the deploy never touches the active color until stage + idle-color checks pass.
+- **Blue/green deploys**: prebuild one immutable candidate, export its reviewed
+  source/dependency closure, execute the unchanged suites through native RunPod,
+  and collect the real receipt as described in [the corpus protocol](corpus-runner/README.md).
+  From its clean isolated release checkout, run
+  `bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"`.
+  The deploy never touches the active color until stage + idle-color checks pass.
   `deploy.sh rollback` flips back. `bgctl.py status` shows the current colors.
 - **Failover**: `aisis-failover.service` runs `bluegreen/failover.py --env prod`,
   probing adapter/stt/pm/ha-cli/kit/lan-proxy/embed units and the postgres,

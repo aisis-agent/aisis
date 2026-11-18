@@ -148,8 +148,14 @@ configured is declined. The measurement assumes the full production configuratio
 `intent_route.measured_router`); a deployment without `AISIS_TIMER_TTS_ENTITY` / `AISIS_TIMER_PLAYER` answers its timer phrases «не умею» instead.
 
 **The quasar corpus runner (`run_corpus.mts`, the `deploy.sh` pre-flip check) is versioned in `services/yandex-station/corpus-runner/`**;
-only the private data (`intents-ru.jsonl`) and the dialog runner stay in the private corpus dir. `deploy.sh` copies the runner and
-`expected_kind.mjs` into the container after the private dir (a failed copy fails the check), so the repository's copy wins. (The dashboard's own corpus run uses a separate corpus tree with its own runner and is not covered.) Its one exemption for `canned` rows: the quasar layer has no
+only the private data (`intents-ru.jsonl`) and the dialog runner stay in the private corpus dir.
+The [isolated corpus protocol](../../corpus-runner/README.md) hashes those fixtures
+together with the maintained runner and `expected_kind.mjs`, and runs the unchanged
+suites through native RunPod. `deploy.sh` verifies the real receipt and exact
+source/runtime/image bindings at each stage and idle-production gate; it neither
+copies fixtures into running service containers nor executes the full suites on
+the workstation. (The dashboard's own corpus run uses a separate corpus tree with
+its own runner and is not covered.) Its one exemption for `canned` rows: the quasar layer has no
 `canned` tier, the adapter's route answers emergency phrases («позвони в полицию», domain `EMERGENCY_REFUSAL`) as `refuse.emergency`, and the runner reaches
 no adapter (closed port), so exactly the `EMERGENCY_REFUSAL` rows are expected to come out as `llm` there. A `canned` row of any other domain is NOT
 exempt and fails the check. The run prints the rule (`правило: canned -> llm только для домена EMERGENCY_REFUSAL (N строк)`); the emergency answer itself is
@@ -158,8 +164,8 @@ pinned by `gate.safety` (26 phrases, one miss fails `backtest --gate` and the ni
 Per row the outcome is one of `correct`, `wrong`, `missed` (abstained on something an intent should answer), `overreach` (answered a
 brain-only class), `brain_ok`, `dropped` / `no_action` (unaddressed speech handled), `false_trigger` (unaddressed speech got an answer),
 `leak` (a hallucination fell through to the model). The report (`$AISIS_INTENT_REPORT_DIR`, default `~/.local/share/aisis/intent-reports/`:
-`backtest-<time>-<ns>-<pid>.json` and `latest.json`; kept out of the corpus directory because `deploy.sh` copies that directory into the quasar
-containers) holds, per `source/split`: rows, addressed, **coverage** (answered without a model / addressed), correct rate, **completed** rate
+`backtest-<time>-<ns>-<pid>.json` and `latest.json`; kept out of the corpus directory
+so only explicitly declared fixtures enter the offloaded bundle) holds, per `source/split`: rows, addressed, **coverage** (answered without a model / addressed), correct rate, **completed** rate
 (correct and not a clarification/reprompt), wrong actions (over every clause of a compound), false triggers, latency p50/p95/max in
 microseconds; plus per-truth and per-intent tables, dev misses, held-out misses (id and labels only), a row-id → outcome map, the split
 definition and the comparison with the previous report.

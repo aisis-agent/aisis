@@ -62,6 +62,16 @@ a fresh clone. The current complete tree and clean tracked/untracked working tre
 are checked independently, as are the actual current private fixture hashes.
 An updated source, dependency, runtime, fixture, mode or image requires new evidence.
 
+Run the deployment from a clean, isolated checkout of that complete reviewed
+tree. Keep its private inputs and receipts outside the checkout. The existing
+`deploy.sh unit` command defaults to the live `~/xp/aisis/services/yandex-station/code`
+directory; that mutable unit-install target must be separate from this release
+checkout. Concurrent edits, unit installs or unrelated untracked files in the
+release checkout intentionally stop the gate. Do not discard them or relax the
+check: use the preserved clean release checkout. The operator must not mark
+release paths `assume-unchanged` or `skip-worktree`; Git's index flags are within
+the stated same-user trust boundary.
+
 ## Execute once through the native wrapper
 
 Use the existing native admission/budget/credential guards, a900-second maximum,
@@ -118,6 +128,8 @@ The collector and consumer reopen the canonical account-home native ledger and
 run log, matching the actual command, successful exit, explicit pod and ledger-line
 identity, result marker and log hashes. The ledger line hash includes its original
 newline. A failed or separate earlier attempt cannot be selected accidentally.
+Only the row with that exact raw-line hash is parsed, so a concurrent incomplete
+append or an unrelated malformed row cannot invalidate the selected evidence.
 A copied success JSON or a standalone termination line is insufficient. Native
 evidence must remain private and owned by the current operator; the helper never
 changes native files or permissions. The receipt stays beside the original
