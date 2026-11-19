@@ -15,7 +15,15 @@ import claude_primary as c
 
 class HTTPTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        pattern = f'aisis-claude-*-p{os.getpid()}-*.log'
+        existing = set(Path('/tmp').glob(pattern))
+        def clean_owned_command_logs():
+            for path in set(Path('/tmp').glob(pattern)) - existing:
+                path.unlink()
+        self.addCleanup(clean_owned_command_logs)
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
+        usage_env=patch.dict(os.environ, {'AISIS_CLAUDE_USAGE_DB': str(self.root/'usage.sqlite3')})
+        usage_env.start();self.addCleanup(usage_env.stop)
         self.requests=[];self.mode='success';self.redirect_hits=0
         self.secrets=['sk-ant-api03-test-'+str(n)*30 for n in (1,2,3)]
         async def endpoint(request):
@@ -36,6 +44,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.server=TestServer(app);await self.server.start_server();self.addAsyncCleanup(self.server.close)
         self.url=str(self.server.make_url('/v1/messages'))
         self.state=c.State(self.root/'router.sqlite');self.addCleanup(self.state.close)
+        self.addAsyncCleanup(c.flush_usage)
     def creds(self):return [c.Credential(f'slot{i}',s) for i,s in enumerate(self.secrets,1)]
     async def test_real_http_order_auth_and_complete_response(self):
         self.mode='failover'
@@ -78,7 +87,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         out,err=await asyncio.wait_for(proc.communicate(json.dumps(payload).encode()),5)
         self.assertEqual(proc.returncode,0,err.decode())
         answer=json.loads(out);self.assertEqual(answer['provider'],'claude')
-        self.assertEqual(answer['text'],'Ответ из HTTP-стенда');self.assertEqual(err,b'')
+        self.assertEqual(answer['text'],'Ответ из HTTP-стенда');self.assertEqual([json.loads(line)['stage'] for line in err.splitlines()], ['start', 'finish'])
         for secret in self.secrets:self.assertNotIn(secret.encode(),out+err)
         self.assertEqual(len(self.requests),1)
     async def test_check_config_makes_no_http_calls(self):

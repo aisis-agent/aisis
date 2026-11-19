@@ -302,3 +302,30 @@ The actual-encoder/decoder regressions construct valid Ogg pages with CRC,
 exercise packet/page boundaries and signed gain, and run alongside native EOF
 regressions. See [Ogg framing](https://xiph.org/ogg/doc/framing.html) and
 [Ogg Opus RFC7845](https://www.rfc-editor.org/rfc/rfc7845).
+
+### Stable Claude prefixes and request usage
+
+The router accepts an optional `persona` string from the trusted local adapter. Its system instructions and the real persona form the stable system prefix, with one explicit five-minute cache boundary. Dialog history, retrieved memories, current time and the user's question remain after that boundary. The guarded web reserve still receives the persona within its existing input limits. The adapter can detect `SUPPORTS_CACHE_TELEMETRY` before using the new field, so the router can be installed first.
+
+Caching is subject to the provider's token minimum: currently 512 tokens for Sonnet 5.5 and 4,096 for Haiku 4.5. Short instructions, including some ASR catalogs or fact-extraction prompts, may remain ineligible. The implementation never pads prompts or changes models to qualify. Five minutes is the default; an hour would incur a higher cache-write price and should be chosen only after measured reuse supports it. See [Anthropic prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
+
+Every native HTTP attempt queues one row to `$AISIS_CLAUDE_STATE_DIR/usage.sqlite3`, or `AISIS_CLAUDE_USAGE_DB` when explicitly set. The `provider_requests` table records:
+
+- Attempt ID, UTC Unix start time, duration, purpose (`brain`, `asr`, `facts`, `probe`) and optional turn ID.
+- Credential slot and one-way credential fingerprint, requested/returned model, provider organization ID and request/response IDs when present.
+- HTTP status and a fixed outcome code, including failed, cancelled and timed-out attempts.
+- Separate raw input, output, cache-read, cache-write, five-minute write and one-hour write counters.
+
+Missing or malformed counters remain SQL `NULL`. A timeout can have unknown provider consumption; it is never reported as zero. Count non-null samples alongside each token sum when reporting coverage. The transport records once; the router and adapter do not add a second usage row for that response. The adapter may copy the safe counters into its turn trace for correlation.
+
+The ledger contains no prompts, answers, credentials or full headers. Its file is private (0600), WAL permits concurrent readers, and writes run off the request deadline with a one-second lock budget. This absorbs short competing writes without consuming the voice attempt deadline. Orderly shutdown drains pending writes; SIGTERM follows the cancellation path, while a crash or SIGKILL can leave incomplete coverage. Persistence failures only emit a fixed warning: they do not discard a successful voice answer. The CLI emits a private per-invocation `/tmp/aisis-claude-*.log` path on stderr while preserving the JSON-only stdout contract. The private log retains fixed error/warning codes and the actual exit status, including argparse and interrupts. Its parent PID identifies the caller; subprocess fixtures remove only logs from their own invocations. These small invocation logs follow the host’s existing temporary-file retention policy; the router does not remove another process’s logs.
+
+For installations using the current AISIS state layout, the immutable installer accepts an explicit root:
+
+```sh
+backend/yandex/install-claude-primary.sh claude-primary-<reviewed-sha> "$HOME/.local/share/aisis" /absolute/path/to/current/release/chatgpt_pm.py
+```
+
+An explicit install root requires the current fallback-client file for a byte-for-byte compatibility check. This stages the release only. After review and CI, compare the running adapter source and fallback-client hash, pin only the reviewed router path through the existing environment-file mechanism, and deploy the adapter/ASR integration from its own reviewed current-main change. Recheck concurrent release changes before activation. Keep the previous pin for rollback and verify the live ledger with ordinary voice traffic; configuration checks make no paid inference calls.
+
+The explicit key probe uses the same native system-block/cache-control shape as normal traffic. Its real short instructions may remain below the cache minimum: the probe checks request compatibility and never pads a prompt. The five-minute TTL is an explicit documented provider value. A reserve payload rejected before transport is recorded as failed, not uncertain, because no fallback request was sent.

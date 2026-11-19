@@ -2,6 +2,8 @@
 import asyncio
 import json
 import os
+import signal
+import sqlite3
 from pathlib import Path
 import sys
 import tempfile
@@ -21,6 +23,12 @@ HERE = Path(c.__file__).parent
 
 class AdapterIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        pattern = f'aisis-claude-*-p{os.getpid()}-*.log'
+        existing = set(Path('/tmp').glob(pattern))
+        def clean_owned_command_logs():
+            for path in set(Path('/tmp').glob(pattern)) - existing:
+                path.unlink()
+        self.addCleanup(clean_owned_command_logs)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -29,10 +37,13 @@ class AdapterIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.anthropic_hits = []
         self.pm_hits = []
         self.pm_status = 200
+        self.anthropic_delay = 0
 
         async def messages(request):
             await request.json()
             self.anthropic_hits.append(self.secrets.index(request.headers['x-api-key']) + 1)
+            if self.anthropic_delay:
+                await asyncio.sleep(self.anthropic_delay)
             if self.anthropic_status != 200:
                 return web.json_response({'error': {'type': 'api_error'}}, status=self.anthropic_status)
             return web.json_response({'content': [{'type': 'text', 'text': 'Ответ Claude'}],
@@ -133,13 +144,35 @@ class AdapterIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.anthropic_hits, [])
         self.assertEqual(self.pm_hits, [])
 
+    async def test_sigterm_records_cancelled_attempt_without_fallback(self):
+        self.anthropic_delay = .3
+        proc = await asyncio.create_subprocess_exec(*json.loads(self.env['AISIS_CHATGPT_COMMAND']),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        payload = {'station_id': 'a', 'turn_id': 'terminated', 'text': 'hi', 'conversation_id': None}
+        communicate = asyncio.create_task(proc.communicate(json.dumps(payload).encode()))
+        async with asyncio.timeout(3):
+            while not self.anthropic_hits:
+                await asyncio.sleep(.005)
+        proc.send_signal(signal.SIGTERM)
+        out, err = await communicate
+        self.assertEqual((proc.returncode, out), (143, b''))
+        with sqlite3.connect(self.root / 'claude' / 'usage.sqlite3') as db:
+            self.assertEqual(db.execute('SELECT outcome FROM provider_requests').fetchall(), [('cancelled',)])
+        self.assertEqual(self.pm_hits, [])
+        for secret in self.secrets:
+            self.assertNotIn(secret.encode(), err)
+
     async def test_child_failure_is_stderr_json_with_empty_stdout_and_no_secret(self):
         proc = await asyncio.create_subprocess_exec(*json.loads(self.env['AISIS_CHATGPT_COMMAND']),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         payload = {'station_id': 'evil', 'turn_id': 'x', 'text': 'hi', 'conversation_id': None}
         out, err = await proc.communicate(json.dumps(payload).encode())
         self.assertEqual((proc.returncode, out), (1, b''))
-        self.assertEqual(json.loads(err), {'error': 'station_not_allowed', 'automatic_replay': False})
+        events = [json.loads(line) for line in err.splitlines()]
+        self.assertIn({'error': 'station_not_allowed', 'automatic_replay': False}, events)
+        self.assertEqual([event['stage'] for event in events if 'stage' in event], ['start', 'finish'])
+        for secret in self.secrets:
+            self.assertNotIn(secret.encode(), err)
         self.assertFalse((self.root / 'claude' / 'router.sqlite3').exists())
 
 
