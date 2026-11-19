@@ -1,0 +1,2 @@
+# Exact installed Home Assistant release, verified official wheel.
+homeassistant @ https://files.pythonhosted.org/packages/6f/7d/9a18cb9fe6ea1fcc675ed9957d4a287a9ffbc28dca791804a4d296431f80/homeassistant-2026.9.3-py3-none-any.whl#sha256=2a7a0973115f995ea4ef997f2886ad397409e97cab4b4ddcafe07eeaa12f231e
