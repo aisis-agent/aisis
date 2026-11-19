@@ -13,7 +13,7 @@ from types import MappingProxyType
 from unittest.mock import AsyncMock, patch
 
 from homeassistant import const, loader
-from homeassistant.config_entries import ConfigEntries, ConfigEntry
+from homeassistant.config_entries import ConfigEntries, ConfigEntry, current_entry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import debounce
 from homeassistant.helpers import device_registry as dr
@@ -115,13 +115,19 @@ class RealHaCase(unittest.IsolatedAsyncioTestCase):
         ):
             await self.hass.config_entries.async_add(self.entry)
         self.client = QuasarBoundary()
-        with (
-            patch.object(integration, "QuasarClient", return_value=self.client),
-            patch.object(integration, "async_get_clientsession", return_value=None),
-            patch.object(self.hass.config_entries, "async_forward_entry_setups", AsyncMock()),
-        ):
-            self.assertTrue(await integration.async_setup_entry(self.hass, self.entry))
+        # ConfigEntry.async_setup supplies this same public context in production.
+        entry_context = current_entry.set(self.entry)
+        try:
+            with (
+                patch.object(integration, "QuasarClient", return_value=self.client),
+                patch.object(integration, "async_get_clientsession", return_value=None),
+                patch.object(self.hass.config_entries, "async_forward_entry_setups", AsyncMock()),
+            ):
+                self.assertTrue(await integration.async_setup_entry(self.hass, self.entry))
+        finally:
+            current_entry.reset(entry_context)
         self.coordinator = self.hass.data[DOMAIN][self.entry.entry_id]["coordinator"]
+        self.assertIs(self.coordinator.config_entry, self.entry)
         self.platform = EntityPlatform(
             hass=self.hass, logger=logging.getLogger(__name__),
             domain="media_player", platform_name=DOMAIN, platform=None,
