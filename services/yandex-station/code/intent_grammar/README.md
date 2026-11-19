@@ -150,8 +150,10 @@ configured is declined. The measurement assumes the full production configuratio
 **The quasar corpus runner (`run_corpus.mts`, the `deploy.sh` pre-flip check) is versioned in `services/yandex-station/corpus-runner/`**;
 only the private data (`intents-ru.jsonl`) and the dialog runner stay in the private corpus dir.
 The [isolated corpus protocol](../../corpus-runner/README.md) hashes those fixtures
-together with the maintained runner and `expected_kind.mjs`, and runs the unchanged
-suites through native RunPod. `deploy.sh` verifies the real receipt and exact
+together with the maintained runner, `expected_kind.mjs` and the isolated adapter
+checker. It runs all original cases through native RunPod, checking the three
+exact reminder execute contracts in the adapter before requiring their strict
+fast-layer fallback. `deploy.sh` verifies the real receipt and exact
 source/runtime/image bindings at each stage and idle-production gate; it neither
 copies fixtures into running service containers nor executes the full suites on
 the workstation. (The dashboard's own corpus run uses a separate corpus tree with

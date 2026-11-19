@@ -7,7 +7,9 @@ home-service container, and missing evidence has no local fallback.
 
 This v1 protocol is deliberately tied to the reviewed source-equivalent export:
 23 source/config files, 11 installed package trees and their 13 literal links,
-four unchanged fixture/runner files, and the hash-pinned Node25.9.0 runtime.
+the unchanged 469-row private corpus and dialog fixture, the maintained runners,
+and the hash-pinned Node 25.9.0 runtime. A separate eight-file maintained adapter
+grammar closure checks the three explicitly identified reminder contracts.
 The Docker image is **not executed remotely**. The proof covers these exact
 source/dependency bytes, then deployment independently verifies the immutable
 image, runtime, source closure and nonsecret mode flags in each running color.
@@ -17,15 +19,18 @@ The existing API, handshake, switch, reconnect and rollback checks remain in pla
 
 Use an owned input directory within an isolated Git worktree. It contains only
 `offloaded_corpus.py`, `manifest.json` and `payload.tar.gz`. Keep that directory
-0700 and the JSON/archive/logs0600. The helper must be copied from the reviewed
+0700 and the JSON/archive/logs 0600. The helper must be copied from the reviewed
 maintained revision, and its hash must match the manifest. Do not add the private
 bundle or fixtures to Git, public CI artifacts or a public container registry.
 
 The tar archive has no wrapper directory. Each declared inventory path has its
-leading slash removed. The four fixtures are under `src/backend/corpus/`.
+leading slash removed. The five fixture/runner files are under `src/backend/corpus/`:
+`intents-ru.jsonl`, `run_dialogs.mts`, `run_corpus.mts`, `expected_kind.mjs`, and
+`check_reminder_layers.py`. The separate adapter source files are under
+`verification/adapter/intent_grammar/`; they are not Quasar image members.
 Original file modes and literal dependency symlinks are retained; hard links,
 extra files, traversal, missing members and changed bytes are rejected. Privacy
-comes from the enclosing0700 directory, not from changing hash-relevant modes.
+comes from the enclosing 0700 directory, not from changing hash-relevant modes.
 
 `manifest.json` has this structure (identities must be actual, not placeholders):
 
@@ -44,14 +49,25 @@ comes from the enclosing0700 directory, not from changing hash-relevant modes.
   "prod_grammar_hook": "on",
   "default_flags": {"ASR_CORRECT": null, "SEMANTIC_INTENTS": null, "AISIS_FAST_EARCON": null},
   "inventory": {"schema": "aisis-candidate-source-metadata/v1", "...": "complete verified inventory"},
-  "fixtures": [{"name": "intents-ru.jsonl", "sha256": "<64 hex>", "bytes": 50661, "mode": 420}]
+  "fixtures": [{"name": "intents-ru.jsonl", "sha256": "<64 hex>", "bytes": 50661, "mode": 420}],
+  "adapter_layer": {
+    "schema": "aisis-adapter-layer-source/v1",
+    "source_repo": "https://github.com/alex-mextner/aisis",
+    "source_commit": "e859a37b495fca29321c089f79825051bd8bff57",
+    "source_tree": "2782f4d64d88255dd04cfced076e9b26fe2e7f07",
+    "files": [{"repo_path": "services/yandex-station/code/intent_grammar/__init__.py", "archive_path": "verification/adapter/intent_grammar/__init__.py", "sha256": "<64 hex>", "bytes": 322, "mode": 420, "git_blob": "<40 hex>"}]
+  }
 }
 ```
 
-Include all four fixture rows. The complete `inventory` is the original candidate
+Include all five fixture/runner rows and all eight adapter files. The complete `inventory` is the original candidate
 metadata object, including source files, package entries/tree hashes, literal
-links/edges and overlay provenance. Source modes are integers (for example420 is
-0644), not Git mode strings. Keep the collector's package-entry order: its tree
+links/edges and overlay provenance. Source modes are integers (for example 420 is
+0644), not Git mode strings. The adapter block contains only the six reviewed
+stdlib modules plus compiled `grammar/ru.json` and its `grammar/ru.yaml`
+provenance. Both file hashes and Git blob identities are checked; the compiled
+bundle's `source_sha256` must match that exact YAML file, which is not compiled or
+executed in this run. Keep the collector's package-entry order: its tree
 hash uses `JSON.stringify` rows ordered with `localeCompare(path, 'en')`.
 
 The maintained overlay commit and the Quasar source/image provenance are separate
@@ -74,7 +90,7 @@ the stated same-user trust boundary.
 
 ## Execute once through the native wrapper
 
-Use the existing native admission/budget/credential guards, a900-second maximum,
+Use the existing native admission/budget/credential guards, a 900-second maximum,
 the unprivileged execution user, no keep/TTL override, and normal termination.
 The sync directory must contain only the three prepared inputs. The command
 recorded by the native ledger must be exactly this argv (substitute actual hashes):
@@ -88,7 +104,7 @@ python3 offloaded_corpus.py run --manifest manifest.json --bundle payload.tar.gz
 The helper has an inactive default and refuses `run` without the native
 unprivileged RunPod context. It verifies the archive, source/dependency closure,
 fixture and runner hashes, downloads the fixed official Node archive and checks
-both archive and binary hashes. It runs the unchanged corpus and dialog programs
+both archive and binary hashes. It runs all original corpus and dialog cases
 in two clean environments: stage with `GRAMMAR_HOOK=off`, then the freshly observed
 prod mode. No host environment or token is inherited. All five adapter/settings
 endpoints are explicitly set to their audited paths on `http://127.0.0.1:9`.
@@ -99,7 +115,7 @@ option prevents global module lookup. The deployed inspector rejects symlinked
 source/package ancestors and undeclared nested dependencies; the two recorded
 generated pnpm shims are recognized by their exact paths, bytes and hashes.
 The test runtime explicitly sets `NODE_ENV=production`, matching the observed
-serving child, and `TSX_DISABLE_CACHE=1`, the pinned tsx loader's documented
+serving child, and `TSX_DISABLE_CACHE=1`, the pinned tsx loader's explicit
 in-memory-cache input. Together with `NODE_OPTIONS`, these exact values are
 recorded in the native result and checked by its consumer; the runner hash binds
 their implementation. The host environment cannot replace them.
@@ -108,15 +124,38 @@ The serving pnpm bootstrap has a standard `NODE_PATH` fallback into its shared
 hoist. That is not exported or represented as absent. Preparation must resolve
 the seven declared dependency edges from their actual caller contexts with that
 serving environment and verify their inventoried target roots. The observed
-snapshot resolves all seven edges from42 literal caller/metadata contexts to
+snapshot resolves all seven edges from 42 literal caller/metadata contexts to
 those exact roots. Type-only edges use package metadata and esbuild's platform
 edge uses its actual binary path. The inspector still rejects package-local
 shadows and extra non-root source `package.json` or `tsconfig.json` files. This is
 evidence for the declared tested closure, not execution of every module in the
 production image or a claim that the image has no other packages.
 
-Every process must actually exit0 and print exactly one complete summary:
-469 of469 corpus cases and195 of195 dialog cases, in **each** mode. A partial total,
+### Reminder layer contract
+
+The original corpus remains byte-identical at 469 rows, including the three
+reminder `cmd/execute` expectations. The previous direct fast-layer-only runner
+reported 466/469 because that layer deliberately returns `llm/llm` for reminders.
+The maintained runner now invokes its adjacent checker synchronously, with no
+shell, using the actual absolute `sys.executable` supplied as
+`AISIS_CORPUS_PYTHON` and the fixed `AISIS_CORPUS_ADAPTER_DIR` payload path.
+The isolated stdlib-only child loads the eight hash-bound maintained grammar
+files. It must actually prove `reminder.in`, the original 600/600/7200-second
+slots and note digests, and exactly the `timer.start` action for those three
+exact row hashes. It executes no action. Only after that real proof does the
+Node runner require strict `llm/llm` from the pure fast layer for each of them;
+the remaining 466 rows retain their original fast-layer checks. Missing, changed,
+duplicate or failed checker evidence cannot count as a passing corpus case.
+
+No precomputed pass sidecar is accepted. The native result records the actual
+CPython implementation, version, absolute executable and binary SHA256 used for
+the checker, and the executable is rehashed after the run. This identifies the
+real test interpreter; it does not claim that Python belongs to the Quasar image
+or that the live adapter process was executed. The current maintained adapter
+files and original private fixture hashes are also rechecked by deployment.
+
+Every process must actually exit 0 and print exactly one complete summary:
+469 of 469 corpus cases and 195 of 195 dialog cases, in **each** mode. A partial total,
 missing/duplicate summary, timeout or nonzero process exit fails. The true process
 exit is retained. A single `AISIS_CORPUS_RESULT_V1=` marker binds the successful
 results to manifest/archive/runner/Node hashes. The unchanged package/source bytes
@@ -128,7 +167,7 @@ Capture the native wrapper's original combined stdout/stderr in a private raw
 lifecycle log. After it exits, retain that actual transcript: the canonical run
 ledger records completion before cleanup and does not contain a termination row.
 Collection requires the ordered waiting-for-pod, exact runner command, complete
-canonical run output, exit0 naming its actual native log, and termination or
+canonical run output, exit 0 naming its actual native log, and termination or
 confirmed already-gone message. A termination failure rejects the receipt.
 
 ```sh

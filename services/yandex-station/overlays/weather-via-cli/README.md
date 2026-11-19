@@ -57,8 +57,9 @@ docker run --rm --entrypoint /node_modules/.bin/tsx \
 
 The same `docker run` without the entity-index mount shows the old behaviour (567/1372).
 Full checks run in CI or RunPod. Follow the [corpus protocol](../../corpus-runner/README.md):
-prebuild one immutable candidate, export its exact closure, execute the unchanged
-intent corpus and dialogs through native RunPod, and collect the real receipt.
+prebuild one immutable candidate, export its exact closure, execute all original
+intent corpus and dialog cases with the maintained layer checks through native RunPod,
+and collect the real receipt.
 Set `VERIFIED_IMAGE_ID` and `CORPUS_RECEIPT` from that execution. `deploy.sh`
 verifies the evidence and actual candidate on stage and the idle color before it
 flips, and retains rollback on a failed smoke test; it runs no local full suite.

@@ -50,8 +50,8 @@ request: {"text": string, "dialogActive": boolean, "shadow"?: true}
 ## Build, check, deploy
 
 Run the full checks in CI or RunPod. Prebuild the reviewed overlay as one
-immutable candidate, export its exact closure, execute the unchanged corpus and
-dialog suites through native RunPod, and collect the real evidence using the
+immutable candidate, export its exact closure, execute all original corpus and
+dialog cases with the maintained layer checks through native RunPod, and collect the real evidence using the
 [corpus protocol](../../corpus-runner/README.md). Set `VERIFIED_IMAGE_ID` and
 `CORPUS_RECEIPT` from that execution; an older receipt cannot authorize a newly
 built image. Run the deployment command from the clean isolated release checkout.

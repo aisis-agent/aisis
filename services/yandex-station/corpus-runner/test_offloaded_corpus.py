@@ -1,6 +1,7 @@
 """Inert contracts for the source-equivalent corpus evidence boundary."""
 
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -94,6 +95,7 @@ class ArchiveTests(unittest.TestCase):
     def test_private_parent_preserves_the_declared_original_file_mode(self):
         self.archive_file()
         gate.extract_payload(self.archive, self.destination, self.entries)
+
         self.assertEqual((self.destination / "src/example.ts").read_bytes(), b"one")
         self.assertEqual((self.destination / "src/example.ts").stat().st_mode & 0o777, 0o664)
 
@@ -116,6 +118,63 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mode"):
             gate.extract_payload(self.archive, self.destination, self.entries)
 
+
+class AdapterLayerTests(unittest.TestCase):
+    def setUp(self):
+        files = []
+        self.source = HERE.parent / "code"
+        for name in gate.ADAPTER_FILES:
+            data = (self.source / name).read_bytes()
+            git_object = b"blob " + str(len(data)).encode() + b"\0" + data
+            files.append({"repo_path": "services/yandex-station/code/" + name,
+                          "archive_path": "verification/adapter/" + name,
+                          "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data), "mode": 0o644,
+                          "git_blob": hashlib.sha1(git_object, usedforsecurity=False).hexdigest()})
+        self.manifest = {"adapter_layer": {"schema": "aisis-adapter-layer-source/v1",
+                         "source_repo": "https://github.com/alex-mextner/aisis",
+                         **gate.ADAPTER_REVISION, "files": files},
+                         "inventory": {"source_files": [], "packages": [], "links": []}, "fixtures": []}
+
+    def test_reviewed_adapter_files_are_not_claimed_as_quasar_image_files(self):
+        gate.validate_adapter_layer(self.manifest)
+        self.assertEqual(gate.inventory_entries(self.manifest, include_fixtures=False), {})
+        exported = gate.inventory_entries(self.manifest)
+        self.assertEqual(set(exported), {"verification/adapter/" + name for name in gate.ADAPTER_FILES})
+
+    def test_changed_adapter_authority_paths_or_bytes_are_rejected(self):
+        for change in ("revision", "path", "hash", "extra"):
+            manifest = json.loads(json.dumps(self.manifest))
+            adapter = manifest["adapter_layer"]
+            if change == "revision":
+                adapter["source_commit"] = "0" * 40
+            elif change == "path":
+                adapter["files"][0]["archive_path"] = "../outside.py"
+            elif change == "hash":
+                adapter["files"][0]["sha256"] = "0" * 64
+            else:
+                adapter["files"].append(dict(adapter["files"][0]))
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                gate.validate_adapter_layer(manifest)
+
+    def test_compiled_grammar_and_git_blob_provenance_are_both_checked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for item in self.manifest["adapter_layer"]["files"]:
+                path = root / item["archive_path"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                name = item["repo_path"].removeprefix("services/yandex-station/code/")
+                path.write_bytes((self.source / name).read_bytes())
+            gate.verify_adapter_bundle(root, self.manifest)
+            changed = json.loads(json.dumps(self.manifest))
+            changed["adapter_layer"]["files"][0]["git_blob"] = "0" * 40
+            with self.assertRaisesRegex(ValueError, "Git blob"):
+                gate.verify_adapter_bundle(root, changed)
+            bundle = root / "verification/adapter/intent_grammar/grammar/ru.json"
+            data = json.loads(bundle.read_text())
+            data["source_sha256"] = "0" * 64
+            bundle.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError, "grammar provenance"):
+                gate.verify_adapter_bundle(root, self.manifest)
 
 class NativeEvidenceTests(unittest.TestCase):
     def test_only_the_selected_raw_ledger_line_is_parsed(self):
@@ -211,6 +270,8 @@ class RunnerEnvironmentTests(unittest.TestCase):
             self.assertEqual(env["NODE_ENV"], "production")
             self.assertEqual(env["TSX_DISABLE_CACHE"], "1")
             self.assertEqual(env["NODE_OPTIONS"], "--no-global-search-paths")
+            self.assertEqual(env["AISIS_CORPUS_PYTHON"], str(Path(sys.executable).resolve()))
+            self.assertEqual(env["AISIS_CORPUS_ADAPTER_DIR"], "/payload/verification/adapter")
             self.assertEqual(env["AISIS_ADAPTER_MUSIC_URL"], "http://127.0.0.1:9/music/play")
             self.assertEqual(env["AISIS_ADAPTER_LAYA_URL"], "http://127.0.0.1:9/laya")
             self.assertEqual(env["AISIS_ADAPTER_ASR_URL"], "http://127.0.0.1:9/asr/correct")
@@ -350,6 +411,8 @@ class ResultIdentityTests(unittest.TestCase):
             "bundle_sha256": "b" * 64, "runner_sha256": "c" * 64,
             "node_sha256": gate.NODE_SHA,
             "test_runtime_inputs": gate.TEST_RUNTIME_INPUTS,
+            "python_runtime": {"implementation": "CPython", "version": "3.12.0",
+                               "executable": "/usr/bin/python3.12", "binary_sha256": "e" * 64},
             "modes": [{"name": name, "grammar_hook": grammar,
                        "corpus": {"exit_code": 0, "passed": 469, "total": 469},
                        "dialogs": {"exit_code": 0, "passed": 195, "total": 195}}
@@ -362,6 +425,16 @@ class ResultIdentityTests(unittest.TestCase):
             data = ("AISIS_CORPUS_RESULT_V1=" + json.dumps(changed) + "\n").encode()
             with self.subTest(field=field), self.assertRaises(ValueError):
                 gate.native_result(data, "a" * 64, "b" * 64, "c" * 64, "on")
+
+    def test_actual_python_identity_is_required_in_native_evidence(self):
+        valid = {"implementation": "CPython", "version": "3.12.0",
+                 "executable": "/usr/bin/python3.12", "binary_sha256": "e" * 64}
+        gate.validate_python_runtime(valid)
+        invalid = [None, {}, {**valid, "version": "3.10.0"},
+                   {**valid, "executable": "python3"}, {**valid, "binary_sha256": None}]
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                gate.validate_python_runtime(value)
 
 
 if __name__ == "__main__":

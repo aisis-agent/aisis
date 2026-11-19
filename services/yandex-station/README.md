@@ -106,7 +106,7 @@ query string, which `weather.get_forecasts?return_response` needs.
   `~/.local/state/aisis/` (adapter/pm sqlite, quasar-prod container state).
   Secrets (fish.key, runtime.env, *.env with tokens, sqlite) are never committed.
 - **Blue/green deploys**: prebuild one immutable candidate, export its reviewed
-  source/dependency closure, execute the unchanged suites through native RunPod,
+  source/dependency closure, execute all original cases with the maintained layer checks through native RunPod,
   and collect the real receipt as described in [the corpus protocol](corpus-runner/README.md).
   From its clean isolated release checkout, run
   `bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"`.

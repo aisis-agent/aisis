@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Bind unchanged, isolated corpus suites to native evidence and a candidate image."""
+"""Bind isolated corpus and layer contracts to native evidence and an image."""
 
 import argparse
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
 import posixpath
 import pwd
 import re
@@ -42,8 +43,22 @@ NODE_SHA = "7fd113446e9171a28885227b3c275ff965b2fd1f45ccf1fb3a1c20308f34e627"
 FIXTURES = {
     "intents-ru.jsonl": "249a0fd34e3e4c5d697bd1e34465d62cf356de5e513ba8e13b8f5d6b506c2280",
     "run_dialogs.mts": "5f02421d3f21d18a3158535aab03c404fd2ebc80e85b34d5ce403b89f7e66a1e",
-    "run_corpus.mts": "8f0279bf9adf1e31d9f2a80561be6f3e4c7be35415a388abca27664ebfbf153b",
+    "run_corpus.mts": "0be3f4c146eef11839fae25e85d328cd1d04842d8dd4e85d4b242dd701078830",
     "expected_kind.mjs": "e7da6f96298f1158a9535595be3905be15db7efa5416d4e677987a0702ad62ec",
+    "check_reminder_layers.py": "21685d556d5a71676a17fc78829f38c5c9c0c042691a2fe51d2fbde3f1596d0d",
+}
+MAINTAINED_RUNNERS = {"run_corpus.mts", "expected_kind.mjs", "check_reminder_layers.py"}
+ADAPTER_REVISION = {"source_commit": "e859a37b495fca29321c089f79825051bd8bff57",
+                    "source_tree": "2782f4d64d88255dd04cfced076e9b26fe2e7f07"}
+ADAPTER_FILES = {
+    "intent_grammar/__init__.py": "514aa739e2cdacc10f684a2c9669a453988322cab8f46a4ecfa0b1120bf110cb",
+    "intent_grammar/grammar.py": "d1ad216b7760f54d6717e208321d50ec072c7e2f63f011f248963b56a02113ba",
+    "intent_grammar/normalize.py": "fa6a18abc69edee2b5cc611c0b1fd98b093713c1db0c4a647f29bcbcc6d10483",
+    "intent_grammar/pattern.py": "6cb6f4644590a9cfe8e4dabeba8756fca5a95981e965130371e44dcacf9dea81",
+    "intent_grammar/numerals.py": "c1f292178318a2ee8e3d0fbb454c89d8280f43929c52fc0d98017442f87e1e9c",
+    "intent_grammar/timewords.py": "008f82b0cd9641a6be127e8aa4d457775cfa6080a29b4657d6f92e90fa5e1d7b",
+    "intent_grammar/grammar/ru.json": "775c2b9f2f531ab841649dffd9b8db0443814d2fdc6410311ed38cf5d4941615",
+    "intent_grammar/grammar/ru.yaml": "e1bf866ab1d1165bb076501f21cb3b56bdabdb2c98f38dc78425a0e13ea12b35",
 }
 SOURCE_PATHS = {
     "/src/backend/ha-intents.ts", "/src/backend/turn-memory.ts",
@@ -175,7 +190,39 @@ def inventory_entries(manifest, include_fixtures=True):
     if include_fixtures:
         for item in manifest["fixtures"]:
             add("/src/backend/corpus/" + item["name"], {**item, "type": "file"})
+        for item in manifest["adapter_layer"]["files"]:
+            add("/" + item["archive_path"], {**item, "type": "file"})
     return entries
+
+
+def validate_adapter_layer(manifest):
+    adapter = manifest["adapter_layer"]
+    require(adapter.get("schema") == "aisis-adapter-layer-source/v1"
+            and adapter.get("source_repo") == "https://github.com/alex-mextner/aisis",
+            "adapter source authority differs")
+    require(all(adapter.get(key) == value for key, value in ADAPTER_REVISION.items()),
+            "adapter source revision differs")
+    files = adapter["files"]
+    expected = {"verification/adapter/" + name: checksum for name, checksum in ADAPTER_FILES.items()}
+    require(len(files) == len(expected)
+            and {item["archive_path"]: item["sha256"] for item in files} == expected,
+            "adapter source closure differs")
+    for item in files:
+        name = item["archive_path"].removeprefix("verification/adapter/")
+        require(item["repo_path"] == "services/yandex-station/code/" + name
+                and item["mode"] == 0o644 and valid_hash(item["git_blob"], 40),
+                "adapter source path or metadata differs")
+
+
+def verify_adapter_bundle(root, manifest):
+    grammar = Path(root) / "verification/adapter/intent_grammar/grammar"
+    require(load_json(grammar / "ru.json").get("source_sha256") == file_digest(grammar / "ru.yaml"),
+            "compiled adapter grammar provenance differs")
+    for item in manifest["adapter_layer"]["files"]:
+        data = (Path(root) / item["archive_path"]).read_bytes()
+        git_object = b"blob " + str(len(data)).encode() + b"\0" + data
+        require(hashlib.sha1(git_object, usedforsecurity=False).hexdigest() == item["git_blob"],
+                "adapter Git blob identity differs")
 
 
 def validate_images(manifest):
@@ -260,7 +307,7 @@ def validate_inventory(manifest):
                 and item["bytes"] > 0 for item in excluded), "excluded shim identity missing")
     require(len(manifest["fixtures"]) == len(FIXTURES)
             and {x["name"]: x["sha256"] for x in manifest["fixtures"]} == FIXTURES,
-            "unchanged fixture and runner identities required")
+            "exact original fixture and maintained runner identities required")
 
 
 def validate_entry_identities(entries):
@@ -287,6 +334,7 @@ def validate_manifest(manifest):
     validate_images(manifest)
     validate_revisions(manifest)
     validate_inventory(manifest)
+    validate_adapter_layer(manifest)
     entries = inventory_entries(manifest)
     validate_entry_identities(entries)
     return entries
@@ -386,13 +434,33 @@ def install_node(directory):
     return node
 
 
+def python_runtime():
+    executable = Path(sys.executable).resolve()
+    result = {"implementation": platform.python_implementation(), "version": platform.python_version(),
+              "executable": str(executable), "binary_sha256": file_digest(executable)}
+    validate_python_runtime(result)
+    return result
+
+
+def validate_python_runtime(value):
+    require(isinstance(value, dict) and value.get("implementation") == "CPython",
+            "actual CPython runtime identity required")
+    version = re.fullmatch(r"3[.](\d+)[.](\d+)", str(value.get("version")))
+    require(version is not None and int(version[1]) >= 11, "unsupported test Python runtime")
+    require(valid_hash(value.get("binary_sha256"))
+            and isinstance(value.get("executable"), str) and value["executable"].startswith("/"),
+            "test Python executable identity missing")
+
+
 def run_modes(root, node, prod_mode, log):
     results = []
     cwd = root / "src/backend/corpus"
     for name, grammar in (("stage", "off"), ("prod", prod_mode)):
         mode = {"name": name, "grammar_hook": grammar}
         env = {"PATH": str(node.parent) + ":/usr/bin:/bin", "HOME": str(root.parent),
-               "GRAMMAR_HOOK": grammar, **TEST_RUNTIME_INPUTS, **CLOSED_ENDPOINTS}
+               "GRAMMAR_HOOK": grammar, **TEST_RUNTIME_INPUTS, **CLOSED_ENDPOINTS,
+               "AISIS_CORPUS_PYTHON": str(Path(sys.executable).resolve()),
+               "AISIS_CORPUS_ADAPTER_DIR": str(root / "verification/adapter")}
         for suite in TOTALS:
             command = [str(node), str(root / "node_modules/tsx/dist/cli.mjs"), "run_" + suite + ".mts"]
             log("suite_start", mode=name, suite=suite)
@@ -426,13 +494,18 @@ def run_remote(args, log):
         root.mkdir(mode=0o700)
         extract_payload(args.bundle, root, entries)
         verify_resolution_environment(root)
+        verify_adapter_bundle(root, manifest)
+        actual_python = python_runtime()
         node = install_node(work)
         result = {"schema": RESULT_SCHEMA, "execution_kind": "runpod-source",
                   "image_executed_remote": False, "manifest_sha256": args.manifest_sha256,
                   "bundle_sha256": args.bundle_sha256, "runner_sha256": args.runner_sha256,
                   "node_sha256": file_digest(node), "test_runtime_inputs": TEST_RUNTIME_INPUTS,
+                  "python_runtime": actual_python,
                   "modes": run_modes(root, node, manifest["prod_grammar_hook"], log)}
         verify_files(root, entries)
+        verify_adapter_bundle(root, manifest)
+        require(python_runtime() == actual_python, "test Python runtime changed")
     print(MARKER + canonical(result), flush=True)
 
 
@@ -460,6 +533,7 @@ def native_result(log_data, manifest_sha, bundle_sha, runner_sha, prod_mode):
                 "test_runtime_inputs": TEST_RUNTIME_INPUTS}
     require(all(result.get(k) == v and type(result.get(k)) is type(v) for k, v in required.items()),
             "native result identity differs")
+    validate_python_runtime(result.get("python_runtime"))
     validate_results(result.get("modes"), prod_mode)
     return result
 
@@ -590,9 +664,12 @@ def verify_host_inputs(manifest, corpus_dir):
     runner_dir = Path(__file__).resolve().parent
     for fixture in manifest["fixtures"]:
         name = fixture["name"]
-        directory = runner_dir if name in ("run_corpus.mts", "expected_kind.mjs") else Path(corpus_dir)
+        directory = runner_dir if name in MAINTAINED_RUNNERS else Path(corpus_dir)
         require(file_digest(directory / name) == fixture["sha256"], "current fixture or runner differs")
     repo = runner_dir.parents[2]
+    for item in manifest["adapter_layer"]["files"]:
+        require(file_digest(repo / item["repo_path"]) == item["sha256"],
+                "current maintained adapter source differs")
     current = subprocess.check_output(
         ["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"], text=True, timeout=10).strip()
     require(current == manifest["runner_revision"]["tree"], "current maintained source tree differs")
