@@ -1,0 +1,32 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "AISIS Speaker (локальный quasar-server)",
+        "description": "Адрес нашего quasar-server, к которому подключена колонка. Облако Яндекса не используется.",
+        "data": {
+          "host": "Хост (например 192.168.0.56)",
+          "port": "Порт (31116)",
+          "duid": "DUID колонки (пусто = первая подключённая)",
+          "api_token": "Токен API (необязательно)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не удалось подключиться к quasar-server",
+      "duid_not_found": "Устройство с таким DUID не найдено"
+    },
+    "abort": {
+      "already_configured": "Этот quasar-server уже настроен"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connected": { "name": "Подключение" },
+      "sound_level": { "name": "Громкость" }
+    },
+    "notify": {
+      "notify": { "name": "Озвучить" }
+    }
+  }
+}

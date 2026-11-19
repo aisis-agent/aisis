@@ -49,6 +49,13 @@ request: {"text": string, "dialogActive": boolean, "shadow"?: true}
 
 ## Build, check, deploy
 
+Run the full checks in CI or RunPod. Prebuild the reviewed overlay as one
+immutable candidate, export its exact closure, execute all original corpus and
+dialog cases with the maintained layer checks through native RunPod, and collect the real evidence using the
+[corpus protocol](../../corpus-runner/README.md). Set `VERIFIED_IMAGE_ID` and
+`CORPUS_RECEIPT` from that execution; an older receipt cannot authorize a newly
+built image. Run the deployment command from the clean isolated release checkout.
+
 ```
 OVERLAY=$(mktemp -d)/overlay
 IMAGE=$(docker inspect --format '{{.Config.Image}}' aisis-quasar-prod-<active color>)
@@ -60,10 +67,12 @@ docker run --rm --network none --entrypoint /node_modules/.bin/tsx \
   -v "$OVERLAY/backend/ha-intents.ts:/src/backend/ha-intents.ts:ro" \
   -v "$OVERLAY/backend/asr-correct.ts:/src/backend/asr-correct.ts:ro" \
   -v "$OVERLAY/backend/grammar-hook.ts:/src/backend/grammar-hook.ts:ro" "$IMAGE" /src/backend/check_grammar_hook.mts   # ИТОГ 34/34
-../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar-$(date -u +%Y%m%dT%H%M%SZ)      # base = the active color's image; the tag is unique per run
+# Only after the prebuilt candidate and its offloaded evidence are verified:
+../../bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"
 ```
 
-Nothing here deploys or restarts anything (the quasar deploys belong to the deploy owner). `check_grammar_hook.mts` serves a stub adapter and a
+Overlay preparation and checks do not deploy or restart anything; the final
+deployment command belongs to the deploy owner. `check_grammar_hook.mts` serves a stub adapter and a
 stub Home Assistant on a loopback port inside the throwaway container (no network): reply, silent, dialog_end, volume
 (target, steps going up, deltaLevels with and without the speaker level), none, timeout (the old path still answers), HTTP 500,
 bad JSON, an unknown and a prototype route name, `GRAMMAR_HOOK=shadow` (not awaited, `shadow: true`, never acts) and every
@@ -79,12 +88,19 @@ once at creation) and switch to `on` with a second recreate of the active color.
 
 `compose.bluegreen.yaml` passes `GRAMMAR_HOOK` to the prod colors (`${GRAMMAR_HOOK-on}` from `runtime.env`: only an UNSET variable means `on`, an empty
 `GRAMMAR_HOOK=` is `off`) and sets `off` for stage: `/intent/decide` executes timers on the adapter it reaches, and stage containers share the host
-network with the real adapter, so a stage grammar call could cancel real timers. The intent corpus and dialog runs (`deploy.sh` pre-flip checks on stage
-and on the idle prod color, and the dashboard's corpus run) run in the container's own hook mode (stage: `off`, so the hook is not exercised there; the
-idle prod color: whatever `runtime.env` sets) and always get `AISIS_ADAPTER_INTENT_URL` pointing at a closed port, so in no mode can a check reach the real
-adapter, and the expectations pinned to the old tiers hold. Nothing in deploy or stage checks the hook against a real `/intent/decide`: the hook's code
-is checked by `check_grammar_hook.mts` against a stub; the real endpoint is the live smoke of the adapter. A container reads its environment once:
-changing `GRAMMAR_HOOK` means recreating the active color (a deploy with the new value in `runtime.env`).
+network with the real adapter, so a stage grammar call could cancel real timers.
+The deployment corpus and dialog cases execute only through native RunPod: stage mode is `off`,
+and production mode is the freshly recorded `runtime.env` value. The closed adapter endpoints
+prevent calls to the real adapter. The [corpus protocol](../../corpus-runner/README.md) checks the
+three reminder contracts against the isolated maintained grammar before their strict fast-layer
+fallback; all original cases are retained. At stage and idle-production gates, `deploy.sh` verifies
+the actual native receipt and the running image's source, dependencies, runtime and mode; it does
+not execute those suites in service containers. The dashboard's separate corpus workflow retains
+its own runner and container-mode behavior and is not covered by this deployment receipt.
+Nothing in these deployment checks calls a real `/intent/decide`: the hook's code is checked by
+`check_grammar_hook.mts` against a stub; the real endpoint is the live smoke of the adapter.
+A container reads its environment once: changing `GRAMMAR_HOOK` means recreating the active color
+(a deploy with the new value in `runtime.env`).
 
 The adapter side of a clarification question («поставь таймер» → «На сколько поставить таймер?», `listen: true`): the adapter remembers the
 question for a short time and joins the next phrase to it («на пять минут» → «поставь таймер на пять минут»), so the
@@ -108,7 +124,9 @@ python3 ../weather-via-cli/prepare_overlay.py --baseline "$BASE/backend/entity-i
 python3 prepare_overlay.py --ha-intents "$OVERLAY/backend/ha-intents.ts" --asr-correct "$BASE/backend/asr-correct.ts" --output-dir "$OVERLAY.intent"
 cp "$OVERLAY.weather/backend/entity-index.ts" "$OVERLAY.intent/backend/asr-correct.ts" "$OVERLAY.intent/backend/grammar-hook.ts" "$OVERLAY/backend/"
 cp "$OVERLAY.intent/backend/ha-intents.ts" "$OVERLAY/backend/ha-intents.ts"                      # speaker-room + grammar hook
-../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag intent-grammar-speaker-room-weather-$(date -u +%Y%m%dT%H%M%SZ)   # docker tags cannot contain "+"; unique per run: a failed deploy must never overwrite the tag of the running image
+# Prebuild this combined overlay, export it, run the native suites, and collect
+# its own receipt before invoking the deployment command:
+../../bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"
 ```
 
 The in-container check passes on the combined `ha-intents.ts` too (`ИТОГ 34/34`, with the speaker-room `speaker-room.ts`

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Blue/green deploy for the voice stack. See README.md.
 #
-#   deploy.sh deploy [--overlay SRC_DIR [--base IMAGE] | --context DIR] [--tag TAG] [--no-speaker-wait]
+#   deploy.sh deploy --image sha256:ID --corpus-receipt FILE [--no-speaker-wait]
+#   deploy.sh deploy [--overlay SRC_DIR [--base IMAGE] | --context DIR] --corpus-receipt FILE [--tag TAG]
 #   deploy.sh rollback
 #   deploy.sh stage-up [IMAGE]      rebuild the stage stack (private DB copy) on IMAGE
-#   deploy.sh stage-check           corpus + API + uniproxy handshake on both stage colors and the stage switch
+#   deploy.sh stage-check           verified corpus evidence + API + handshake on each stage color and the switch
 #   deploy.sh stage-down
 #   deploy.sh adopt [CONTAINER]     one-time move of the running single quasar container into blue/green
 #   deploy.sh unit NAME [FILE]      checked restart (with rollback) of adapter|stt|ha-cli|pm
@@ -19,6 +20,7 @@ state_dir=${AISIS_BG_STATE:-$HOME/.local/share/aisis/bluegreen-state}
 app_dir=${AISIS_CODE_DIR:-$HOME/xp/aisis/services/yandex-station/code}
 corpus_dir=${AISIS_CORPUS_DIR:-$HOME/.local/share/aisis/corpus}
 runner_dir=$here/../corpus-runner   # the versioned corpus runner; the private corpus_dir only holds the data and dialog runner
+corpus_receipt=${AISIS_CORPUS_RECEIPT:-}
 postgres_container=${AISIS_POSTGRES_CONTAINER:-aisis-yandex-postgres-1}
 speaker_wait=${AISIS_SPEAKER_WAIT_S:-90}
 
@@ -92,31 +94,19 @@ ensure_state() {
   bg init "$img"
 }
 
-# corpus_check CONTAINER: the intent corpus must pass 100% and cover every corpus line.
+# Corpus execution is isolated in native RunPod. Deployment consumes the actual
+# native record and checks the current immutable image/source/mode at each color.
+# No missing-evidence or service-failure path falls back to workstation tests.
+corpus_preflight() {
+  [[ -n $corpus_receipt ]] || die "give --corpus-receipt FILE or AISIS_CORPUS_RECEIPT"
+  python3 "$runner_dir/offloaded_corpus.py" verify --receipt "$corpus_receipt" \
+    --corpus-dir "$corpus_dir" --image "$1"
+}
+
 corpus_check() {
-  local c=$1 out line pass total expected
-  expected=$(wc -l <"$corpus_dir/intents-ru.jsonl")
-  docker exec "$c" mkdir -p /src/backend/corpus
-  # The checks run in whatever GRAMMAR_HOOK mode the container has (stage: off; the idle prod color: what runtime.env sets), but the
-  # adapter URL points at a closed port, so in any mode a check can never reach the real adapter, where /intent/decide would
-  # execute timers (with the hook on it fails open). The hook against an adapter is not checked here: see check_grammar_hook.mts.
-  local CHECK_ADAPTER_INTENT_URL=http://127.0.0.1:9/intent/decide
-  docker cp "$corpus_dir/." "$c:/src/backend/corpus/"
-  # The runner (and its canned->llm rule, emergency domain only) comes from this repository, over any copy in the private dir.
-  docker cp "$runner_dir/run_corpus.mts" "$c:/src/backend/corpus/run_corpus.mts" || { log "corpus on $c: the versioned runner could not be copied"; return 1; }
-  docker cp "$runner_dir/expected_kind.mjs" "$c:/src/backend/corpus/expected_kind.mjs" || { log "corpus on $c: the versioned rule could not be copied"; return 1; }
-  out=$(docker exec -e AISIS_ADAPTER_INTENT_URL="$CHECK_ADAPTER_INTENT_URL" -w /src/backend/corpus "$c" /node_modules/.bin/tsx run_corpus.mts 2>&1) || true
-  line=$(grep -a 'ИТОГ' <<<"$out" || true)
-  [[ $line =~ ([0-9]+)/([0-9]+) ]] || { log "corpus on $c: no result line"; return 1; }
-  pass=${BASH_REMATCH[1]} total=${BASH_REMATCH[2]}
-  log "corpus on $c: $pass/$total (expected $expected)"
-  [[ $pass == "$total" && $total == "$expected" ]] || return 1
-  # Multi-turn dialogs against a mocked HA: confirmations, slot fill, earcon, volume directive.
-  out=$(docker exec -e AISIS_ADAPTER_INTENT_URL="$CHECK_ADAPTER_INTENT_URL" -w /src/backend/corpus "$c" /node_modules/.bin/tsx run_dialogs.mts 2>&1) || true
-  line=$(grep -a 'ДИАЛОГИ' <<<"$out" || true)
-  [[ $line =~ ([0-9]+)/([0-9]+) ]] || { log "dialogs on $c: no result line"; return 1; }
-  log "dialogs on $c: ${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-  [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]]
+  [[ -n $corpus_receipt ]] || { log "corpus evidence missing; no local fallback"; return 1; }
+  python3 "$runner_dir/offloaded_corpus.py" verify --receipt "$corpus_receipt" \
+    --corpus-dir "$corpus_dir" --container "$1"
 }
 
 build_image() {
@@ -182,7 +172,7 @@ prune_old_images() {
 }
 
 cmd_deploy() {
-  local mode=context src="" base="" tag img active idle idle_up before
+  local mode=context src="" base="" tag img="" active idle idle_up before
   tag=$(date +%Y%m%d-%H%M%S)
   local wait_speaker=1
   while (($#)); do
@@ -190,20 +180,35 @@ cmd_deploy() {
       --overlay) mode=overlay; src=$2; shift 2 ;;
       --context) mode=context; src=$2; shift 2 ;;
       --base) base=$2; shift 2 ;;
+      --image) img=$2; shift 2 ;;
+      --corpus-receipt) corpus_receipt=$2; shift 2 ;;
       --tag) tag=$2; shift 2 ;;
       --no-speaker-wait) wait_speaker=0; shift ;;
       *) die "unknown option $1" ;;
     esac
   done
-  [[ -n $src ]] || die "give --overlay SRC_DIR or --context DIR"
+  [[ -n $corpus_receipt ]] || die "give --corpus-receipt FILE or AISIS_CORPUS_RECEIPT"
+  if [[ -n $img ]]; then
+    [[ -z $src && -z $base ]] || die "--image cannot be combined with build inputs"
+    [[ $img =~ ^sha256:[0-9a-f]{64}$ ]] || die "--image requires the tested immutable image ID"
+    corpus_preflight "$img" || die "candidate corpus evidence is invalid; no containers changed"
+  else
+    [[ -n $src ]] || die "give --image ID, --overlay SRC_DIR or --context DIR"
+  fi
   maintenance_on
   ensure_state
   active=$(bg get prod active)
   idle=$([[ $active == blue ]] && echo green || echo blue)
   [[ -n $base ]] || base=$(bg get prod "IMG_$(upper "$active")")
 
-  log "[1/6] build ($mode, base $base)"
-  img=$(build_image "$mode" "$src" "$base" "$tag")
+  if [[ -z $img ]]; then
+    log "[1/6] build ($mode, base $base)"
+    img=$(build_image "$mode" "$src" "$base" "$tag")
+    img=$(docker image inspect --format '{{.Id}}' "$img")
+    corpus_preflight "$img" || die "built image differs from tested candidate; no containers changed"
+  else
+    log "[1/6] use the tested immutable candidate"
+  fi
   log "image: $img"
 
   log "[2/6] stage: new image, private DB copy, no speaker, HA dry-run"
@@ -261,8 +266,9 @@ cmd_rollback() {
 # between stopping the legacy container and the switch binding the canonical ports.
 cmd_adopt() {
   local legacy=${1:-aisis-yandex-quasar-1} img before
+  img=$(docker inspect -f '{{.Image}}' "$legacy") || die "legacy container $legacy not found"
+  corpus_preflight "$img" || die "adoption corpus evidence is invalid; no containers changed"
   maintenance_on
-  img=$(docker inspect -f '{{.Config.Image}}' "$legacy") || die "legacy container $legacy not found"
   bg init "$img" --force
   bg render prod
   log "starting blue and green on $img next to the legacy container"

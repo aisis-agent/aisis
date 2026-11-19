@@ -1,0 +1,13 @@
+{
+  "name": "aisis-volume-zero-regression",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsx check_volume_zero.mts",
+    "check:baseline": "tsx check_volume_zero.mts --baseline-only"
+  },
+  "devDependencies": {
+    "tsx": "4.21.0",
+    "zod": "4.4.3"
+  }
+}

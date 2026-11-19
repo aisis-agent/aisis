@@ -50,11 +50,19 @@ docker run --rm --entrypoint /node_modules/.bin/tsx \
   -v "$PWD/check_weather_routing.mts:/src/backend/check_weather_routing.mts:ro" \
   -v "$PWD/diverted_phrases.json:/src/backend/diverted_phrases.json:ro" \
   -v "$OVERLAY/backend/entity-index.ts:/src/backend/entity-index.ts:ro" <active image> /src/backend/check_weather_routing.mts   # ИТОГ 1372/1372
-../../bluegreen/deploy.sh deploy --overlay "$OVERLAY" --tag weather-via-cli      # base = the active color's image
+# After prebuilding the immutable overlay image and collecting its own native
+# offloaded corpus evidence, from the clean isolated release checkout:
+../../bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"
 ```
 
-The same `docker run` without the entity-index mount shows the old behaviour (567/1372). `deploy.sh` runs the intent corpus
-and dialogs on stage and on the idle color before it flips, and rolls back on a failed smoke test.
+The same `docker run` without the entity-index mount shows the old behaviour (567/1372).
+Full checks run in CI or RunPod. Follow the [corpus protocol](../../corpus-runner/README.md):
+prebuild one immutable candidate, export its exact closure, execute all original
+intent corpus and dialog cases with the maintained layer checks through native RunPod,
+and collect the real receipt.
+Set `VERIFIED_IMAGE_ID` and `CORPUS_RECEIPT` from that execution. `deploy.sh`
+verifies the evidence and actual candidate on stage and the idle color before it
+flips, and retains rollback on a failed smoke test; it runs no local full suite.
 
 ## Provenance
 

@@ -1,0 +1,32 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "AISIS Speaker (local quasar-server)",
+        "description": "Address of our quasar-server the speaker is connected to. No Yandex cloud is used.",
+        "data": {
+          "host": "Host (e.g. 192.168.0.56)",
+          "port": "Port (31116)",
+          "duid": "Speaker DUID (empty = first connected)",
+          "api_token": "API token (optional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to quasar-server",
+      "duid_not_found": "Device with this DUID not found"
+    },
+    "abort": {
+      "already_configured": "This quasar-server is already configured"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "connected": { "name": "Connection" },
+      "sound_level": { "name": "Volume" }
+    },
+    "notify": {
+      "notify": { "name": "Speak" }
+    }
+  }
+}

@@ -8,7 +8,9 @@ archived and posted to the clip feed (`routers/uniproxy/spotter-clips.ts` -> gat
 
     docker cp aisis-quasar-prod-<active colour>:/src/. BASELINE_DIR      # the active image's sources
     prepare_overlay.py --baseline BASELINE_DIR --output-dir OVERLAY_DIR
-    services/yandex-station/bluegreen/deploy.sh deploy --overlay OVERLAY_DIR
+    # Prebuild one immutable image from OVERLAY_DIR, then follow corpus-runner/README.md
+    # for native RunPod execution and collection of its exact source-bound receipt.
+    services/yandex-station/bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"
 
 The baseline is the active image `aisis-quasar:bg-tv-fireplace-contract-20261113` (image id sha256:025022a86...). A baseline that
 differs by one byte is refused: the patches were reviewed against exactly these files, so a different image needs them rebased.

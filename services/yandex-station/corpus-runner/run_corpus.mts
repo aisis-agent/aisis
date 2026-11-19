@@ -1,13 +1,70 @@
-// Corpus runner: pure-text routing tests against decideFastIntent() — no HA calls, no device actions.
-// Runs INSIDE a quasar container next to /src/backend/ha-intents.ts (bluegreen/deploy.sh does it). The data (intents-ru.jsonl) is
-// private; this runner and expected_kind.mjs are versioned here and copied over the private dir's copies:
-//   docker cp corpus/. CONTAINER:/src/backend/corpus/ && docker cp corpus-runner/run_corpus.mts corpus-runner/expected_kind.mjs CONTAINER:/src/backend/corpus/
-//   docker exec -w /src/backend/corpus CONTAINER /node_modules/.bin/tsx run_corpus.mts
-import { readFileSync } from 'node:fs'
+// Pure fast-layer corpus and three exact adapter reminder contracts; no HA calls or device actions.
+// The maintained offloaded_corpus.py entrypoint runs this source-equivalent suite in an admitted RunPod job,
+// with the bound Node/tsx runtime and unchanged private data beside the exported ha-intents.ts.
+// It supplies absolute AISIS_CORPUS_PYTHON and AISIS_CORPUS_ADAPTER_DIR paths. The adjacent
+// check_reminder_layers.py loads the bound, stdlib-only adapter grammar; missing inputs fail closed.
+import { appendFileSync, chmodSync, mkdtempSync, readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { isAbsolute, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import ha from '../ha-intents.ts'
 import { cannedRuleLine, expectedKind } from './expected_kind.mjs'
 
 const corpusPath = process.argv[2] ?? new URL('./intents-ru.jsonl', import.meta.url).pathname
+const logDirectory = mkdtempSync('/tmp/aisis-corpus-layers-')
+chmodSync(logDirectory, 0o700)
+const logPath = join(logDirectory, 'execution.log')
+appendFileSync(logPath, `${new Date().toISOString()} start\n`, { mode: 0o600 })
+console.error(`private_log=${logPath}`)
+process.once('exit', (code) => {
+  appendFileSync(logPath, `${new Date().toISOString()} exit=${code}\n`)
+  console.error(`private_log=${logPath}`)
+})
+
+function report (line) {
+  console.log(line)
+  appendFileSync(logPath, `${new Date().toISOString()} ${line}\n`)
+}
+
+function sha256 (data) { return createHash('sha256').update(data).digest('hex') }
+
+function validCaseIdentity (proof, index, lines) {
+  const row = index + 467
+  return proof.row === row && proof.row_sha256 === sha256(lines[row - 1]) &&
+    proof.text_sha256 === sha256(JSON.parse(lines[row - 1]).text) &&
+    proof.original_expectation?.kind === 'cmd' && proof.original_expectation?.domain === 'timer' &&
+    proof.original_expectation?.tier === 'execute'
+}
+
+function validAdapterOutcome (proof) {
+  return proof.adapter_intent === 'reminder.in' && proof.adapter_tier === 'execute' &&
+    proof.action_executor === 'timer.start' && JSON.stringify(proof.action_keys) === '["note","seconds"]' &&
+    proof.fuzzy === false && proof.parts === 0 && proof.no_immediate_device_action === true &&
+    proof.fast_expectation?.kind === 'llm' && proof.fast_expectation?.tier === 'llm'
+}
+
+function adapterLayers (raw, lines) {
+  const python = process.env.AISIS_CORPUS_PYTHON
+  const adapter = process.env.AISIS_CORPUS_ADAPTER_DIR
+  if (!python || !adapter || !isAbsolute(python) || !isAbsolute(adapter)) {
+    throw new Error('Explicit isolated Python and maintained adapter paths are required')
+  }
+  const checker = fileURLToPath(new URL('./check_reminder_layers.py', import.meta.url))
+  const run = spawnSync(python, ['-I', '-S', '-B', checker, '--corpus', corpusPath, '--adapter-dir', adapter], {
+    encoding: 'utf8', timeout: 10000, maxBuffer: 65536
+  })
+  if (run.stderr) process.stderr.write(run.stderr)
+  if (run.error || run.status !== 0) throw new Error('Actual adapter-layer checker failed')
+  const proof = JSON.parse(run.stdout)
+  if (proof.schema !== 'aisis-reminder-layer-contract/v1' || proof.corpus_sha256 !== sha256(raw) ||
+      proof.original_rows !== 469 || proof.adapter_passed !== 3 || !Array.isArray(proof.cases) ||
+      proof.cases.length !== 3 || !proof.cases.every((p, i) => validCaseIdentity(p, i, lines) && validAdapterOutcome(p))) {
+    throw new Error('Adapter-layer result does not cover the original three cases')
+  }
+  report(`adapter-layer: 3/3 original reminder execute assertions passed; ${JSON.stringify(proof)}`)
+  return new Map(proof.cases.map((p) => [p.row, p.fast_expectation]))
+}
 
 // ── Fixture registry (mirrors /src/backend/ha-intents.ts HaRegistry) ──
 const areaBy = [
@@ -61,19 +118,24 @@ function route (text) {
   return { action: summarize(d.resolved), kind: KIND_BY_TIER[d.tier], question: d.question, tier: d.tier }
 }
 
-const rows = readFileSync(corpusPath, 'utf8').trim().split('\n').map(JSON.parse)
+const raw = readFileSync(corpusPath)
+const lines = raw.toString('utf8').trim().split('\n')
+const layers = adapterLayers(raw, lines) // A real child checks positive adapter assertions before any fallback is accepted.
+const rows = lines.map(JSON.parse)
 const byCat = new Map() // domain -> {pass, fail, fails: []}
 const tierCount = new Map()
 let pass = 0
-for (const row of rows) {
+let fastReminderPass = 0
+for (const [index, row] of rows.entries()) {
   const got = route(row.text)
   tierCount.set(got.tier, (tierCount.get(got.tier) ?? 0) + 1)
   const problems = []
-  // The only exemption: emergency `canned` rows are answered by the adapter's grammar (pinned by its gate.safety), so this
-  // layer must hand them on (llm). See expected_kind.mjs.
-  const wantKind = expectedKind(row.expect)
+  // The three reminder expectations were just proved by the real adapter checker; this layer must hand those rows on.
+  // The existing emergency canned rule remains unchanged in expected_kind.mjs and pinned by gate.safety.
+  const want = layers.get(index + 1) ?? row.expect
+  const wantKind = expectedKind(want)
   if (got.kind !== wantKind) problems.push(`${got.kind} (ожидалось ${wantKind})`)
-  if (row.expect.tier !== undefined && got.tier !== row.expect.tier) problems.push(`tier ${got.tier} (ожидалось ${row.expect.tier})`)
+  if (want.tier !== undefined && got.tier !== want.tier) problems.push(`tier ${got.tier} (ожидалось ${want.tier})`)
   if (row.expect.action !== undefined && got.action !== row.expect.action) problems.push(`action ${got.action} (ожидалось ${row.expect.action})`)
   if (row.expect.question !== undefined && got.question !== row.expect.question) problems.push(`вопрос «${got.question}» (ожидалось «${row.expect.question}»)`)
   // Invariant for every row: a question never enumerates more than three options, and an
@@ -82,19 +144,22 @@ for (const row of rows) {
   if (options.length > 3) problems.push(`перечисляет ${options.length} вариантов: «${got.question}»`)
   if (got.tier === 'reprompt' && got.question !== undefined) problems.push('reprompt не должен задавать вопрос')
   const ok = problems.length === 0
+  if (ok && layers.has(index + 1)) fastReminderPass++
   const cat = byCat.get(row.expect.domain) ?? { pass: 0, fail: 0, fails: [] }
-  if (ok) { cat.pass++; pass++ } else { cat.fail++; cat.fails.push(`${row.text} → ${problems.join('; ')}`) }
+  if (ok) { cat.pass++; pass++ } else { cat.fail++; cat.fails.push(`row ${index + 1} [${sha256(lines[index])}] → ${problems.join('; ')}`) }
   byCat.set(row.expect.domain, cat)
 }
 
 const pad = (s, n) => String(s).padEnd(n)
-console.log(`\nИТОГ: ${pass}/${rows.length} (${(100 * pass / rows.length).toFixed(1)}%)\n`)
-console.log(`${cannedRuleLine(rows)}\n`)
-console.log(`tiers: ${[...tierCount].map(([t, n]) => `${t}=${n}`).join(' ')}\n`)
-console.log(`${pad('domain', 16)}${pad('pass', 6)}${pad('fail', 6)}rate`)
+report(`\nИТОГ: ${pass}/${rows.length} (${(100 * pass / rows.length).toFixed(1)}%)\n`)
+report(`${cannedRuleLine(rows)}\n`)
+report(`reminder fast-layer fallback: ${fastReminderPass}/3; original adapter expectations remain cmd/execute\n`)
+report(`tiers: ${[...tierCount].map(([t, n]) => `${t}=${n}`).join(' ')}\n`)
+report(`${pad('domain', 16)}${pad('pass', 6)}${pad('fail', 6)}rate`)
 for (const [domain, c] of [...byCat].sort((a, b) => b[1].fail - a[1].fail)) {
   const total = c.pass + c.fail
-  console.log(`${pad(domain, 16)}${pad(c.pass, 6)}${pad(c.fail, 6)}${(100 * c.pass / total).toFixed(0)}%`)
-  for (const f of c.fails.slice(0, 12)) console.log(`    ✗ ${f}`)
-  if (c.fails.length > 12) console.log(`    … ещё ${c.fails.length - 12}`)
+  report(`${pad(domain, 16)}${pad(c.pass, 6)}${pad(c.fail, 6)}${(100 * c.pass / total).toFixed(0)}%`)
+  for (const f of c.fails.slice(0, 12)) report(`    ✗ ${f}`)
+  if (c.fails.length > 12) report(`    … ещё ${c.fails.length - 12}`)
 }
+if (pass !== rows.length) process.exitCode = 1
