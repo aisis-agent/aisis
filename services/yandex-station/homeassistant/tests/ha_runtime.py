@@ -19,7 +19,6 @@ from homeassistant.helpers import debounce
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import frame, restore_state, update_coordinator
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import EntityPlatform
 
 from custom_components import aisis_speaker as integration
@@ -118,6 +117,7 @@ class RealHaCase(unittest.IsolatedAsyncioTestCase):
         self.client = QuasarBoundary()
         with (
             patch.object(integration, "QuasarClient", return_value=self.client),
+            patch.object(integration, "async_get_clientsession", return_value=None),
             patch.object(self.hass.config_entries, "async_forward_entry_setups", AsyncMock()),
         ):
             self.assertTrue(await integration.async_setup_entry(self.hass, self.entry))
@@ -147,5 +147,4 @@ class RealHaCase(unittest.IsolatedAsyncioTestCase):
         await self.coordinator.async_shutdown()
         await self.platform.async_reset()
         await self.hass.async_block_till_done()
-        await async_get_clientsession(self.hass).close()
         self.tmp.cleanup()
