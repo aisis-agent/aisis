@@ -13,7 +13,9 @@ from types import MappingProxyType
 from unittest.mock import AsyncMock, patch
 
 from homeassistant import const, loader
-from homeassistant.config_entries import ConfigEntries, ConfigEntry, current_entry
+from homeassistant.config_entries import (
+    ConfigEntries, ConfigEntry, ConfigEntryState, current_entry,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import debounce
 from homeassistant.helpers import device_registry as dr
@@ -116,6 +118,7 @@ class RealHaCase(unittest.IsolatedAsyncioTestCase):
             await self.hass.config_entries.async_add(self.entry)
         self.client = QuasarBoundary()
         # ConfigEntry.async_setup supplies this same public context in production.
+        self.entry._async_set_state(self.hass, ConfigEntryState.SETUP_IN_PROGRESS, None)
         entry_context = current_entry.set(self.entry)
         try:
             with (
@@ -126,6 +129,7 @@ class RealHaCase(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await integration.async_setup_entry(self.hass, self.entry))
         finally:
             current_entry.reset(entry_context)
+        self.entry._async_set_state(self.hass, ConfigEntryState.LOADED, None)
         self.coordinator = self.hass.data[DOMAIN][self.entry.entry_id]["coordinator"]
         self.assertIs(self.coordinator.config_entry, self.entry)
         self.platform = EntityPlatform(
