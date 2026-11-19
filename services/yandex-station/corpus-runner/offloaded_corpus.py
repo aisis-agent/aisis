@@ -45,7 +45,7 @@ FIXTURES = {
     "run_dialogs.mts": "5f02421d3f21d18a3158535aab03c404fd2ebc80e85b34d5ce403b89f7e66a1e",
     "run_corpus.mts": "0be3f4c146eef11839fae25e85d328cd1d04842d8dd4e85d4b242dd701078830",
     "expected_kind.mjs": "e7da6f96298f1158a9535595be3905be15db7efa5416d4e677987a0702ad62ec",
-    "check_reminder_layers.py": "21685d556d5a71676a17fc78829f38c5c9c0c042691a2fe51d2fbde3f1596d0d",
+    "check_reminder_layers.py": "7a3e1a4ad8721ae5a76d799d6cb168786924bfb5de033dbeaf9ddadcfc2d597a",
 }
 MAINTAINED_RUNNERS = {"run_corpus.mts", "expected_kind.mjs", "check_reminder_layers.py"}
 ADAPTER_REVISION = {"source_commit": "e859a37b495fca29321c089f79825051bd8bff57",
