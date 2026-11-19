@@ -68,6 +68,8 @@ jobs:
         run: python3 -m unittest discover -s services/yandex-station/bluegreen -p "test_*.py"
       - name: quasar corpus runner rule tests (canned -> llm only for the emergency domain)
         run: node --test services/yandex-station/corpus-runner/*.test.mjs
+      - name: isolated corpus evidence contracts (synthetic inputs only)
+        run: python3 -m unittest discover -s services/yandex-station/corpus-runner -p "test_*.py"
   quasar-volume-zero:
     runs-on: ubuntu-latest
     timeout-minutes: 5

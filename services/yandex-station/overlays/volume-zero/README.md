@@ -74,12 +74,15 @@ or an approved isolated test executor.
 
 ## Deployment order
 
-The generated directory matches the existing blue/green `deploy.sh --overlay`
-layout, so an image built from the active baseline preserves other overlays.
-The current deploy script also runs full corpus/dialog suites in its target
-containers. Those heavy tests require the established isolated CI/RunPod path
-under the owner's test policy before deployment; this change does not add a
-skip flag or weaken health, switch, reconnect or rollback gates.
+The generated directory matches the existing blue/green overlay layout, so
+prebuilding an immutable image from the active baseline preserves other overlays.
+Follow the [corpus protocol](../../corpus-runner/README.md) to export its exact
+source and dependencies, run all original corpus and dialog cases through native
+RunPod, and collect the genuine execution receipt. Deploy that same immutable
+image with `deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"`
+from the clean release checkout. Stage and idle-production gates verify the receipt
+and actual image; no full suite executes in the target service containers. Health,
+switch, reconnect and rollback gates remain required, with no skip or local fallback.
 
 Install and verify the Quasar change before relaxing the matching HA guard.
 Acceptance must observe actual native level-zero state after the command and
