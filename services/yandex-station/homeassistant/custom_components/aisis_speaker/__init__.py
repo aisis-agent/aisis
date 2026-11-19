@@ -179,11 +179,21 @@ class AisisSpeakerEntity(CoordinatorEntity[DataUpdateCoordinator]):
             "model": info.get("model") or "Yandex Station",
         }
 
-    async def _push(self, name: str, arguments: dict[str, Any] | None = None) -> None:
+    async def _push(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        immediate_refresh: bool = False,
+    ) -> None:
         try:
             await self._client.push(
                 self._duid, [{"name": name, "arguments": arguments or {}}]
             )
         except QuasarApiError as err:
             raise HomeAssistantError(str(err)) from err
-        await self.coordinator.async_request_refresh()
+        if immediate_refresh:
+            # Read the device now; the public method retains HA's refresh lock.
+            await self.coordinator.async_refresh()
+        else:
+            await self.coordinator.async_request_refresh()

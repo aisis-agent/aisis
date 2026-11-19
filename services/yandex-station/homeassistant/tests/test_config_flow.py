@@ -34,7 +34,7 @@ class ConfigFlowAdoptionTests(RealHaCase):
                 self.assertEqual(result["type"], "create_entry")
                 self.assertEqual(
                     result["data"],
-                    {"host": "fixture", "port": 9, "duid": expected, "token": ""},
+                    {"host": "fixture", "port": 9, "duid": expected, "api_token": ""},
                 )
 
     async def test_missing_device_is_reported_without_entry(self):

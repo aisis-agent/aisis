@@ -140,7 +140,9 @@ class AisisMediaPlayerEntity(AisisSpeakerEntity, MediaPlayerEntity):
     async def async_set_volume_level(self, volume: float) -> None:
         max_level = sound_max_level(self.quasar_state) or 10
         await self._push(
-            DIRECTIVE_VOLUME, {"volume": ha_volume_to_quasar(volume, max_level)}
+            DIRECTIVE_VOLUME,
+            {"volume": ha_volume_to_quasar(volume, max_level)},
+            immediate_refresh=True,
         )
 
     async def async_volume_up(self) -> None:

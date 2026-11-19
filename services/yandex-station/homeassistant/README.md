@@ -18,14 +18,23 @@ owner, the complete maintained Git history contained neither integration path,
 and HACS reported no managed AISIS integration. The manifest now points to this
 maintained source and the owner's issue tracker.
 
-## Regression checkpoint
+## Observed volume after a command
 
-The volume runtime in the initial test-first commit deliberately retains the
-installed behavior: every directive requests a debounced coordinator refresh.
-The imported setup flow's nested branches are flattened solely to meet the
-existing complexity gate; its selection/error behavior has focused CI coverage. The real
-Home Assistant regression must expose stale state when volume zero is followed
-immediately by restoration. That negative checkpoint is not deployment-ready.
+Absolute volume commands now await the coordinator's public immediate refresh.
+That method serializes real device reads with HA's existing refresh lock. Other
+commands retain their debounced refresh and the 30-second polling interval.
+A failed or stale read cannot become an optimistic requested volume, and a
+different level observed after a human action is published as observed.
+
+The installed behavior was reproduced in genuine CI before this change:
+[baseline run 44439689803](https://github.com/alex-mextner/aisis/actions/runs/44439689803)
+left HA at zero after the native boundary had restored four. The unchanged
+volume regression also exposed the cooldown and concurrent-read cases. Separate
+config-flow expectations were corrected to the existing `api_token` key.
+
+The imported setup flow's nested branches were flattened only to meet the
+existing protected complexity limit; focused CI cases preserve its explicit,
+connected, fallback, empty-device and error behavior.
 
 The tests use Home Assistant 2026.9.3 on Python 3.14.6, including the deployed
 coordinator/debouncer bytes, actual entity platform, state machine and listeners.

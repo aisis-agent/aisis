@@ -84,6 +84,11 @@
     "exit_code": 0,
     "receipt_sha256": "0c74166a2fb4d84fd387e0a7dfb027ff5f142a72240ba59017d797d01f7a824c"
   },
-  "runtime_delta": "Test-first volume checkpoint: installed volume/coordinator behavior unchanged. Manifest ownership/version metadata updated; config_flow.async_step_user branches flattened to satisfy unchanged protected complexity limit (27 to at most 15), with selection/error behavior covered in real HA CI.",
+  "runtime_delta": {
+    "__init__.py": "Keyword-only immediate_refresh defaults false; true uses public coordinator.async_refresh, preserving actual readback and its lock.",
+    "media_player.py": "Only absolute async_set_volume_level opts into immediate refresh.",
+    "config_flow.py": "Equivalent early-return branches meet the unchanged cognitive-complexity gate; no selection or error contract change.",
+    "manifest.json": "Owned maintenance URLs/codeowner and version 1.0.1."
+  },
   "issue": "https://github.com/alex-mextner/aisis/issues/174"
 }
