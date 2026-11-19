@@ -329,3 +329,15 @@ production route against the gate (held-out ratchet, emergency safety set, 90 % 
 (`review`, PR with `Refs #107`, `gh ship <PR> --task '#107'`); with a red gate it runs `review brainstorm` and lands nothing; a blocked gate is never bypassed. Hatch requests are put in front of the owner in the
 morning through the harness. `python3 -m intent_grammar nightly run --dry-run` changes nothing outside the day's private working directory. Jev labelling is **opt-in** (`AISIS_NIGHTLY_ARGS=--jev` and `VERCEL_JEV_KEY`
 in `~/.config/aisis/intent-nightly.env`): it sends private utterances to Vercel, so the unit does not enable it. Details: `code/intent_grammar/README.md`, «Nightly loop».
+
+### Claude cache and usage integration
+
+The current adapter checks that its configured command runs `claude_primary.py` and feature-detects `SUPPORTS_CACHE_TELEMETRY` in that pinned immutable router. A co-located browser client keeps its existing text-only payload. With that release installed, the actual owner persona is sent separately on every turn, before dynamic dialog and memory context. Older router releases keep the existing periodic text-injection contract during rollout.
+
+ASR retains its keep-alive session, model, timeout budget, credential order and cooldown behavior, while delegating each native attempt to the router's shared usage recorder. Fact extraction uses the same transport with purpose `facts`. Each purpose has a stable five-minute cache boundary containing only its real instructions; no padding is added to meet token minimums. Haiku 4.5 needs at least 4,096 prefix tokens, so a short ASR catalog can remain uncached.
+
+Safe request IDs and nullable usage counters are copied into brain traces for correlation; the authoritative per-attempt ledger is the router's `usage.sqlite3`. Do not add trace totals to ledger totals, since they refer to the same response. Missing counters are unknown rather than zero.
+
+Deploy the separately reviewed immutable router first, then update its configured command path and this adapter/ASR change through the existing deployment mechanism. Recheck the running files and any parallel Home Assistant releases before activation; the adapter source and its pinned router can have different release histories.
+
+The paired router protocol (issue #173) owns the persona field, folds it into bounded text for the guarded web reserve, and flattens Anthropic’s nested cache-creation counters into cache_creation_5m_input_tokens and cache_creation_1h_input_tokens. This adapter consumes that allowlisted metadata; it does not duplicate the router implementation. ASR passes its exact attempt deadline so a budget expiry is recorded as a timeout rather than caller cancellation.

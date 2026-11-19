@@ -22,6 +22,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,6 +37,7 @@ DEFAULTS: dict[str, Any] = {"enabled": True, "confirm_threshold": 0.6, "act_thre
 INTENTS = {"M": "music", "T": "timer", "H": "home", "F": "fact", "S": "followup", "U": "unclear"}
 MAX_TEXT_CHARS = 160
 MAX_RECENT = 4
+_REQUEST_DEADLINE = ContextVar("aisis_asr_request_deadline", default=None)
 
 SYSTEM = """Ты — слой исправления распознавания речи умной колонки в квартире. Распознаватель (Whisper) выдал текст; верни, какую команду или вопрос хозяин вероятнее всего произнёс.
 
@@ -224,6 +226,11 @@ def make_post(session: Any, claude_primary: Any) -> Callable[..., Any]:
     import aiohttp
 
     async def post(credential: Any, body: dict, timeout: float) -> str:
+        if getattr(claude_primary, "SUPPORTS_CACHE_TELEMETRY", False) is True:
+            return await claude_primary.anthropic_send(
+                credential, body, timeout, session=session, purpose="asr", propagate_timeout=True,
+                deadline=_REQUEST_DEADLINE.get())
+        # Old immutable releases retain their existing transport until the new router is pinned.
         headers = {"x-api-key": credential.secret, "anthropic-version": "2023-06-01", "content-type": "application/json"}
         try:
             async with session.post(claude_primary.API_URL, headers=headers, json=body, allow_redirects=False,
@@ -267,13 +274,19 @@ class Corrector:
         """(model reply, status). Never raises: any failure is a status and the caller keeps the raw text."""
         deadline = self._now() + budget
         body = {"model": settings["model"], "max_tokens": 48, "temperature": 0,
-                "system": system, "messages": [{"role": "user", "content": message}]}
+                "system": [{"type": "text", "text": system,
+                            "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
+                "messages": [{"role": "user", "content": message}]}
         for credential in self._keys():
             remaining = deadline - self._now()
             if remaining < 0.15:
                 return "", "timeout"
             try:
-                reply = await asyncio.wait_for(self._post(credential, body, remaining), remaining)
+                token = _REQUEST_DEADLINE.set(asyncio.get_running_loop().time() + remaining)
+                try:
+                    reply = await asyncio.wait_for(self._post(credential, body, remaining), remaining)
+                finally:
+                    _REQUEST_DEADLINE.reset(token)
                 return reply, "ok"
             except asyncio.TimeoutError:
                 return "", "timeout"

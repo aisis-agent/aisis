@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import re
 from pathlib import Path
 import signal
 import sqlite3
@@ -289,8 +290,8 @@ class Adapter:
                 pass
             await asyncio.sleep(25)
 
-    async def close(self, _app):
-        await self.flush_traces()   # the last turn's record is written before the process goes
+    async def _close_background(self):
+        """Stop the background tasks before closing their shared resources."""
         if self.jev_task is not None:
             self.jev_task.cancel()
             await asyncio.gather(self.jev_task, *self.jev_pending, return_exceptions=True)
@@ -305,6 +306,10 @@ class Adapter:
         if self.remember_task and not self.remember_task.done():
             self.remember_task.cancel()
             await asyncio.gather(self.remember_task, return_exceptions=True)
+
+    async def close(self, _app):
+        await self.flush_traces()   # the last turn's record is written before the process goes
+        await self._close_background()
         if self.timers is not None:
             await self.timers.close()
         if self.hacli_session is not None:
@@ -315,6 +320,9 @@ class Adapter:
             await self.corrector_http.close()
         if self.memory is not None:
             self.memory.close()
+        flush_usage = getattr(self._claude_module(), "flush_usage", None)
+        if callable(flush_usage):
+            await flush_usage()
         self.store.db.close()
 
     def authorize(self, request):
@@ -339,41 +347,53 @@ class Adapter:
                     "threshold": self.jev_settings.threshold, "refuse": self.jev_settings.refuse,
                     "reprompt": self.jev_settings.reprompt, "stats": dict(self.jev.stats) if self.jev else {}}})
 
+    async def _turn_payload(self, station: str, text: str, turn: str):
+        """Build one request while keeping stable persona apart from changing context."""
+        # The native router receives the real stable persona on every request, before
+        # changing dialog/memory context. Older command backends keep their existing
+        # periodic text injection until the reviewed router release is pinned.
+        block = self._persona_block()
+        digest = hashlib.sha256(block.encode()).hexdigest()[:16]
+        native = (len(self.command) > 1 and Path(self.command[1]).name == "claude_primary.py"
+                  and getattr(self._claude_module(), "SUPPORTS_CACHE_TELEMETRY", False) is True
+                  and len(block) <= 16000)
+        inject = bool(block) and (native or self.store.persona_due(
+            station, self.persona_idle, self.persona_turns, digest))
+        with utterance_trace.stage("context"):   # memory retrieval and the recent-dialogs blocks
+            memories = await self.memory.retrieve(station, text) if self.memory is not None else []
+            # Dialog context (tg#28364): last dialogs of this station, plus matching old ones when the
+            # question asks for history. claude_primary stores this whole outgoing text in its
+            # per-station history, so both blocks are clipped to a few hundred characters each.
+            dialog_blocks = await self._dialog_blocks(station, text)
+        prefix = ("[Системная установка: " + block + "]\n" if inject and not native else "") + dialog_blocks \
+            + (self.memory.format_block(memories) if memories else "")
+        outgoing = prefix + "Пользователь: " + text if prefix else text
+        if len(outgoing) > 16000:
+            outgoing, inject, memories = text, bool(block) and native, []
+        payload = {"station_id": station, "text": outgoing,
+                   "conversation_id": self.store.conversation(station), "turn_id": turn}
+        if native and block:
+            payload["persona"] = block
+        return payload, inject, native, digest, len(memories)
+
     async def turn(self, station: str, text: str):
         if not self.command:
             raise TurnError("chatgpt_not_configured")
         async with self.locks[station]:
             turn = self.store.begin(station)
-            # Persona (base text + owner's tone and global prompt, read fresh from the
-            # dashboard-edited file) rides in the turn text on session start, on refresh
-            # and whenever the assembled text changed; later turns rely on the brain's
-            # per-station dialog history for context.
-            block = self._persona_block()
-            digest = hashlib.sha256(block.encode()).hexdigest()[:16]
-            inject = bool(block) and self.store.persona_due(station, self.persona_idle, self.persona_turns, digest)
-            with utterance_trace.stage("context"):   # memory retrieval and the recent-dialogs blocks
-                memories = await self.memory.retrieve(station, text) if self.memory is not None else []
-                # Dialog context (tg#28364): last dialogs of this station, plus matching old ones when the
-                # question asks for history. claude_primary stores this whole outgoing text in its
-                # per-station history, so both blocks are clipped to a few hundred characters each.
-                dialog_blocks = await self._dialog_blocks(station, text)
-            prefix = ("[Системная установка: " + block + "]\n" if inject else "") + dialog_blocks \
-                + (self.memory.format_block(memories) if memories else "")
-            outgoing = prefix + "Пользователь: " + text if prefix else text
-            if len(outgoing) > 16000:
-                outgoing, inject, memories = text, False, []
+            payload, inject, native, digest, memory_count = await self._turn_payload(station, text, turn)
             try:
                 with utterance_trace.stage("brain"):
-                    result = await run_command(self.command, {"station_id": station, "text": outgoing,
-                        "conversation_id": self.store.conversation(station), "turn_id": turn},
+                    result = await run_command(self.command, payload,
                         self.chatgpt_timeout if self.chatgpt_timeout is not None else
                         float(self.env.get("AISIS_CHATGPT_TIMEOUT", "250")))
                 try:   # diagnostics never cost the answer (the router's metadata is whatever it printed)
-                    utterance_trace.note(brain=self._brain_trace(result, inject, len(memories), len(outgoing)))
+                    utterance_trace.note(brain=self._brain_trace(
+                        result, inject, memory_count, len(payload["text"]) + len(payload.get("persona", ""))))
                 except Exception as exc:
                     utterance_trace.error("brain metadata unreadable: " + type(exc).__name__)
                 self.store.finish(turn, "complete", station, result.get("conversation_id"))
-                if inject:
+                if inject and not native:
                     self.store.persona_sent(station, digest)
                 reply = reply_guard.tidy(result["text"].strip())
                 if self.memory is not None:
@@ -388,14 +408,28 @@ class Adapter:
                 self.store.finish(turn, "failed", station)
                 raise
 
+    @staticmethod
+    def _usage_trace(raw: Any) -> dict | None:
+        if not isinstance(raw, dict):
+            return None
+        fields = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+                  "cache_creation_5m_input_tokens", "cache_creation_1h_input_tokens")
+        return {name: value if type(value := raw.get(name)) is int and value >= 0 else None
+                for name in fields}
+
     def _brain_trace(self, result: dict, persona: bool, memories: int, prompt_chars: int) -> dict:
         """Which brain answered and what rode in the prompt: provider/credential slot/model from the router's own answer, the attempts
         (a failed key and the fallback show here), persona and memory blocks. Never the text or a credential."""
         attempts = [{"slot": a.get("slot"), "result": str(a.get("result"))[:40], "s": a.get("seconds")}
                     for a in (result.get("attempts") if isinstance(result.get("attempts"), list) else []) if isinstance(a, dict)][:4]
+        usage = self._usage_trace(result.get("usage"))
+        request_id = result.get("request_id")
+        if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", request_id):
+            request_id = None
         return {k: v for k, v in {"provider": result.get("provider"), "slot": result.get("credential_slot"),
                                   "model": result.get("model") or self.env.get("AISIS_CLAUDE_MODEL"), "attempts": attempts or None,
-                                  "persona": persona or None, "memories": memories or None, "prompt_chars": prompt_chars}.items()
+                                  "persona": persona or None, "memories": memories or None, "prompt_chars": prompt_chars,
+                                  "usage": usage, "request_id": request_id}.items()
                 if v is not None}
 
     def _recent_sync(self, station: str, text: str) -> tuple[dict, str]:
@@ -510,11 +544,16 @@ class Adapter:
         sources = Path(os.environ.get("AISIS_CLAUDE_KEY_SOURCES",
             str(Path.home()/".config/aisis/claude-sources.json")))
         credentials = claude_primary.load_credentials(sources)
+        native = getattr(claude_primary, "SUPPORTS_CACHE_TELEMETRY", False) is True
+        content = "Владелец: " + prompt + "\nАссистент: " + reply
         body = {"model": settings.model, "max_tokens": 512, "messages": [{"role": "user",
-            "content": EXTRACT_PROMPT + "\nВладелец: " + prompt + "\nАссистент: " + reply}]}
+            "content": content if native else EXTRACT_PROMPT + "\n" + content}]}
+        if native:
+            body["system"] = claude_primary.stable_system(EXTRACT_PROMPT)
         for credential in credentials:
             try:
-                raw = await claude_primary.anthropic_send(credential, body, 20.0)
+                raw = await claude_primary.anthropic_send(credential, body, 20.0,
+                    **({"purpose": "facts"} if native else {}))
             except Exception:
                 continue
             facts = parse_facts(raw)
