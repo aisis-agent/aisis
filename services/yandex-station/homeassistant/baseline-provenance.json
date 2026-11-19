@@ -1,0 +1,94 @@
+{
+  "schema": "aisis-ha-installed-source/v1",
+  "adopted_at": "2026-11-19",
+  "installed_version": "1.0.0",
+  "installed_home_assistant": "2026.9.3",
+  "installed_python": "3.14.6",
+  "baseline_inventory_sha256": "890ff457cb65113b068c8bdfd8a4f959d4527d85ebfb094e0ca60ad74d8c2c86",
+  "files": [
+    {
+      "path": "__init__.py",
+      "sha256": "34d0912afd733d3483831f74c56cc4737dae03b4944c2c5ecec6d5ae51b8cfcb",
+      "bytes": 6397,
+      "mode": "0o664"
+    },
+    {
+      "path": "api.py",
+      "sha256": "b828364cee91034046406d7791903fc586353cc6d5430d52f921a7a6cbc79b79",
+      "bytes": 3418,
+      "mode": "0o664"
+    },
+    {
+      "path": "config_flow.py",
+      "sha256": "6953ddbfb62d2bb851f39d477800094d74c125cca03ff330351256b6639cbc40",
+      "bytes": 2988,
+      "mode": "0o664"
+    },
+    {
+      "path": "const.py",
+      "sha256": "5609fa522b4da79183586471c2b6690f5ef71c0741a518d8755ebfdf9ca5538c",
+      "bytes": 772,
+      "mode": "0o664"
+    },
+    {
+      "path": "manifest.json",
+      "sha256": "2a09969ddb99c47fb501904fd2ad521fe1d6b63a9bb31e618ee8664cc4b149fe",
+      "bytes": 368,
+      "mode": "0o664"
+    },
+    {
+      "path": "mapping.py",
+      "sha256": "271b44038098eadc3cb4fecd886633a638ca094f0d51dd36ff21941c1437b64b",
+      "bytes": 3479,
+      "mode": "0o664"
+    },
+    {
+      "path": "media_player.py",
+      "sha256": "6b3007a83d15c20a472a84ecd221f79481e9c0d161b8df150fa1532300238c56",
+      "bytes": 5381,
+      "mode": "0o664"
+    },
+    {
+      "path": "notify.py",
+      "sha256": "07f9195a58521d59073b4ba87a19f661e67765ce9df82949534dd34496d1e80c",
+      "bytes": 1196,
+      "mode": "0o664"
+    },
+    {
+      "path": "sensor.py",
+      "sha256": "3388272c6b5e70812bfbec772f96e9802d000251574036d80d226e0ef2402b67",
+      "bytes": 2575,
+      "mode": "0o664"
+    },
+    {
+      "path": "translations/en.json",
+      "sha256": "5f3566d014898720dcf79e9b03ec47035b77dff0349e6cb677d74c22cbfa16d4",
+      "bytes": 867,
+      "mode": "0o664"
+    },
+    {
+      "path": "translations/ru.json",
+      "sha256": "4c8671bf16e88a0d6c3133987688ff3071b8f72aae5a175a5b3fdaeeae735c50",
+      "bytes": 1125,
+      "mode": "0o664"
+    }
+  ],
+  "license_inventory": {
+    "component_license_files": [],
+    "original_author_or_license_not_inferred": true
+  },
+  "full_source_inspected": true,
+  "full_secret_scan": {
+    "engine": "gitleaks 8.30.1",
+    "findings": 0,
+    "exit_code": 0,
+    "receipt_sha256": "0c74166a2fb4d84fd387e0a7dfb027ff5f142a72240ba59017d797d01f7a824c"
+  },
+  "runtime_delta": {
+    "__init__.py": "Keyword-only immediate_refresh defaults false; true uses public coordinator.async_refresh, preserving actual readback and its lock.",
+    "media_player.py": "Only absolute async_set_volume_level opts into immediate refresh.",
+    "config_flow.py": "Equivalent early-return branches meet the unchanged cognitive-complexity gate; no selection or error contract change.",
+    "manifest.json": "Owned maintenance URLs/codeowner and version 1.0.1."
+  },
+  "issue": "https://github.com/alex-mextner/aisis/issues/174"
+}
