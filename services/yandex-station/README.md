@@ -148,6 +148,14 @@ query string, which `weather.get_forecasts?return_response` needs.
   and the request came in a second session). The device's own spotter spans never reach the gateway (the quasar overlay
   does not forward them), which is why the cut reads the stream instead of a span. An activation nobody followed ends the
   turn silently (the empty final carries `rejected: wake_word`). Python-only: restart `aisis-station-stt`.
+- **Whisper VRAM offload** (`code/wyoming_whisper_offload.py`, spec in snap-orca `docs/superpowers/specs/2026-11-18-vram-offload-design.md`):
+  `wyoming-whisper.service` runs this wrapper around upstream `wyoming_faster_whisper`. It unloads the model after `WHISPER_IDLE_UNLOAD_S`
+  (default 900, `0` = off) without a real request, reloads on the next one, and serves a control socket
+  `$XDG_RUNTIME_DIR/vram-offload/wyoming-whisper.sock` (`status` / `offload` / `restore` leases; `python wyoming_whisper_offload.py ctl status`).
+  While a lease is held a request gets a Wyoming `Error` `gpu-lent`. `/healthz/asr` answers 202 for `unloaded`, `pinned` and `gpu-lent`
+  (and the probe's `context.aisis_probe` is not activity, and a probe never reloads the model), so aisis-failover never restarts a whisper that was unloaded on purpose.
+  The gateway reads the socket only when `AISIS_WHISPER_CTL_SOCKET` is set (the `aisis-station-stt.service` unit sets it for the local whisper).
+  `status` reports `last_offload_s`, `last_restore_s`, `last_first_answer_s`.
 - **Whisper prompt**: `aisis-whisper-prompt.timer` regenerates the recognizer's
   initial prompt every 6 h (code/refresh-whisper-prompt.sh -> `voice_vocab.py prompt`).
   It is home vocabulary only (fixed example commands, HA room and device names, library
