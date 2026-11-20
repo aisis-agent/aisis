@@ -70,6 +70,12 @@ jobs:
         run: python3 -m unittest test_weather_skills
       - name: cached remote announcement tests
         run: python3 -m unittest discover -s services/yandex-station/code -p "test_*announcement*.py"
+      - name: stt-cli core from its hash pin (it must install and import, and the gateway glue must pass against the real core)
+        working-directory: services/yandex-station/code
+        run: |
+          python3 -m pip install --require-hashes --no-deps -r requirements-stt-lib.txt
+          python3 -c "import importlib.metadata as m, stt_cli.hypotheses.confusables; print('hyper-stt', m.version('hyper-stt'))"
+          python3 -m unittest test_hypotheses_core_contract test_hypothesis_store test_second_opinion test_clip_hypotheses test_stt_hypotheses test_adapter_hypotheses
       - name: intent grammar, adapter route, timers, Home Assistant executors, Jev, nightly loop, utterance traces, session pages, clip feed, committed JSON bundle
         working-directory: services/yandex-station/code
         run: |

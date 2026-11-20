@@ -1,0 +1,7 @@
+# Pin of the stt-cli core `stt_cli.hypotheses` (recognition alternatives: NBest, CTC scoring, confusable sets, the GigaAM worker client)
+# for the service venv (~/.local/share/aisis/venv, Python 3.12). One hash-pinned release wheel, nothing else (the core has no dependencies).
+# Install (the --require-hashes check is the point: a tag can move, a hash cannot):
+#   uv pip install --python ~/.local/share/aisis/venv/bin/python --require-hashes --no-deps -r requirements-stt-lib.txt
+# The recognizer itself runs in the stt-cli onnx-asr ENGINE environment, not here: see "Recognition alternatives" in ../README.md.
+# Release v0.5.0 of stt-cli (tag on the merge commit of its pull request 156); the hash is the SHA-256 of the attached wheel.
+hyper-stt @ https://git.hyperide.ai/ultrabricks/stt-cli/releases/download/v0.5.0/hyper_stt-0.5.0-py3-none-any.whl --hash=sha256:e0114179b29dee102ca6f7952e6cf92cadd93a18222019e446e375f6da3a8819
