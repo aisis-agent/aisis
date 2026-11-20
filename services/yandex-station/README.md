@@ -144,6 +144,24 @@ the ones at `aisis-pre-weather-20261117`.
   `flock -w 120 "${AISIS_BG_STATE:-$HOME/.local/share/aisis/bluegreen-state}/maintenance.lock" git -C ~/xp/aisis/.worktrees/deploy-main merge --ff-only origin/main`
   (the lock `deploy.sh` holds while it backs up and installs, so an update never lands in the middle of one), then
   restart the unit you want to move, one at a time, and check its health.
+- **ASR benchmark**: `bin/install-asr-bench.sh [--enable]` builds `~/.local/share/aisis/asr-bench-venv` (exact pins in
+  `code/requirements-asr-bench.txt`); `--enable` installs the units through `scripts/install-systemd-units.sh --no-start` and
+  starts only `aisis-station-asr-bench.timer` (03:40, `Nice=19`, idle I/O, 200 % CPU quota, 6 GB cap, temp files in
+  `~/.cache/aisis-asr-bench-tmp`). `code/bench_asr_archive.py` re-transcribes the archived clips with each candidate
+  (CPU, `onnx-asr`, plus the incumbent `whisper-turbo`), stores one row per clip and engine in `asr_bench` of the dialogs
+  DB and serves the table at the dashboard's `GET /api/asr/bench`. It exits at once when the machine is loaded, so a
+  busy night costs nothing. `bench_asr_archive.py reference CLIP_ID "text"` records a human reference.
+- **Recogniser acceptance harness** (`code/asr_eval/`, ticket #59): points isolated Wyoming recognisers (own loopback ports, temp audio on
+  disk) at three tiers and never replays audio through the live gateway or the live Wyoming port. `tier_a` (synthetic silence, noise,
+  hum, music, the station's 313 Hz activation chime, speech followed by silence, plus the gated archive clips as a separate review table),
+  `tier_b` (`intents-ru.jsonl` synthesised with Piper, clean and at 5 dB SNR, routed like production and judged by the grammar
+  back-test) and `tier_c` (the voice archive, aggregate numbers only) each have `build`, `run --engine NAME --uri tcp://127.0.0.1:PORT` and
+  `score`; `latency.py serve|measure` plays clips in real time into an isolated gateway instance (the end of speech is found through the
+  gateway's own quiet-frame VAD boost; a clip with no speech has no latency). Every command writes owner-only files. Tests:
+  `python3 -m unittest asr_eval.test_asr_eval_tier_a asr_eval.test_asr_eval_tier_b asr_eval.test_asr_eval_tier_c asr_eval.test_asr_eval_batch asr_eval.test_asr_eval_latency` in `code/`.
+  Tier B's acceptance bar is relative (owner decision, ticket #59): over the clips production routes well from the exact text, a candidate
+  must not be worse than the current recogniser and must be measurably better (more clips only it gets right, two-sided exact sign test
+  p < 0.05, per condition: `relative_bar` in `summary.json`); the absolute 95 % / 85 % rates stay in the table as reported metrics.
 - **State lives in**: `~/.local/share/aisis/` (venvs `venv/`, `embed-venv/`,
   `dsp-bench-venv/`, `bluegreen-state/`, `corpus/`, `models/`, `prompts/`,
   `releases/`, `voice-archive/`, `dashboard-ui/`, `pm-deps/`, `dialogs.sqlite3`,

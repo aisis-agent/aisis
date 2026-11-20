@@ -64,6 +64,7 @@ jobs:
           python3 -m unittest test_intent_grammar test_intent_route test_timers test_ha_actions test_jev test_adapter_jev test_intent_nightly
           python3 -m unittest test_utterance_trace test_adapter_trace test_session_pages test_clipfeed_diag test_clipfeed_tg test_wake_word test_stt_wake test_stt_asr_health test_wyoming_whisper_offload test_wake_window test_stt_wake_window test_bench_wake_window
           python3 -m unittest test_tone_guard
+          python3 -m unittest test_bench_asr_archive asr_eval.test_asr_eval_tier_a asr_eval.test_asr_eval_tier_b asr_eval.test_asr_eval_tier_c asr_eval.test_asr_eval_batch asr_eval.test_asr_eval_latency
           python3 -m intent_grammar compile --check
       - name: Claude cache and shared transport integration
         working-directory: services/yandex-station/code

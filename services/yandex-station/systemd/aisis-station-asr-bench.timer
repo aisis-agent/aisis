@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly ASR candidate benchmark over the voice archive at 03:40
+
+[Timer]
+OnCalendar=*-*-* 03:40:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

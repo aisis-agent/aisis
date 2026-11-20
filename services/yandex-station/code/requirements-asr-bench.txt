@@ -1,0 +1,10 @@
+# Isolated venv of the nightly ASR archive benchmark (bin/install-asr-bench.sh -> ~/.local/share/aisis/asr-bench-venv).
+# Never installed into the service venvs. Exact pins: the benchmark compares engines, so a silent runtime upgrade would
+# change the numbers; bump them on purpose and re-run.
+-r requirements.txt
+onnx-asr[cpu,hub]==0.11.0
+onnxruntime==1.32.0
+numpy==2.5.5
+# Engine "whisper-turbo" (the incumbent, CPU int8): faster-whisper 1.2.1 calls av.open(metadata_errors=...), removed in av 19.
+faster-whisper==1.2.1
+av==17.0.1

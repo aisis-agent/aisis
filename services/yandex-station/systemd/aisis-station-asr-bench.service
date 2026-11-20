@@ -1,0 +1,22 @@
+[Unit]
+Description=AISIS nightly ASR candidate benchmark over the voice archive (CPU, low priority)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/xp/aisis/services/yandex-station/code
+EnvironmentFile=-%h/.config/aisis/runtime.env
+Environment=AISIS_ASR_BENCH_THREADS=2
+# Candidates the gateway could switch to, plus the incumbent (whisper-turbo, CPU int8) measured under the same conditions.
+Environment=AISIS_ASR_BENCH_ENGINES=giga-v3-ctc,giga-v3-rnnt,tone,parakeet-v3,whisper-turbo
+# Model downloads and the recogniser's temp audio stay on the real disk, never on the quota-limited /tmp tmpfs (see wyoming-whisper.service.d/20-disk-tmpdir.conf).
+CacheDirectory=aisis-asr-bench-tmp
+CacheDirectoryMode=0700
+Environment=TMPDIR=%C/aisis-asr-bench-tmp
+ExecStart=%h/.local/share/aisis/asr-bench-venv/bin/python %h/xp/aisis/services/yandex-station/code/bench_asr_archive.py run
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+CPUQuota=200%
+MemoryMax=6G
+TimeoutStartSec=3600
+UMask=0077
