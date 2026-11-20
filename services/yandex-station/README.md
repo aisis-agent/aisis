@@ -494,8 +494,9 @@ never read aloud.
 | `AISIS_ADAPTER_TOKEN` | unset | Bearer token of the adapter (same as the adapter's own). |
 
 The core is installed into the service venv from a hash-pinned release wheel of stt-cli (it has no dependencies of its own). The pin file
-`code/requirements-stt-lib.txt` is added with the stt-cli release whose wheel hash it carries; **until it exists, leave
-`AISIS_HYP_ENABLED` unset** (the gateway then runs as before). Then:
+`code/requirements-stt-lib.txt` names release v0.5.0 of stt-cli (its tag sits on the merge commit of stt-cli pull request 156) and the
+SHA-256 of the attached wheel: a tag can move, a hash cannot. Install it before turning `AISIS_HYP_ENABLED` on (the gateway runs as before
+while that switch is unset):
 
 ```bash
 uv pip install --python ~/.local/share/aisis/venv/bin/python --require-hashes --no-deps -r code/requirements-stt-lib.txt
