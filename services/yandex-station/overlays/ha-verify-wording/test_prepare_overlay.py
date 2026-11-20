@@ -8,6 +8,7 @@ import prepare_overlay as overlay
 
 BASELINE = "\n".join(before for before, _, _ in overlay.HA_INTENTS_PATCHES)
 BASELINE_DIR = os.environ.get("AISIS_QUASAR_BASELINE_DIR")
+HACLI_PY = os.environ.get("HACLI_PY")
 
 
 class ApplyPatchesTests(unittest.TestCase):
@@ -30,6 +31,15 @@ class ApplyPatchesTests(unittest.TestCase):
     def test_an_already_patched_file_is_refused(self):
         with self.assertRaises(overlay.OverlayError):
             overlay.apply_patches(overlay.apply_patches(BASELINE, overlay.HA_INTENTS_PATCHES), overlay.HA_INTENTS_PATCHES)
+
+    def test_the_fallback_read_back_after_a_command_reports_a_timeout_as_unknown_outcome(self):
+        patched = overlay.apply_patches(BASELINE, overlay.HA_INTENTS_PATCHES)
+        self.assertIn("readBackAfterCommand(() => verifyExecution(config, device))", patched)
+        self.assertNotIn("|| await verifyExecution(", patched)
+        # a body read cut off by the timeout rejects with AbortError: the same unknown outcome
+        self.assertIn("if (isTimeoutOrBodyAbort(error)) throw new HaCommandError('read-back", patched)
+        self.assertIn("error.name === 'AbortError'", patched)
+        self.assertEqual(patched.count("HA_NOT_ANSWERED)"), 2)  # the service call and the read-back after it
 
 
 class PrepareTests(unittest.TestCase):
@@ -90,12 +100,37 @@ class AcceptedInputsTests(unittest.TestCase):
             with self.assertRaises(overlay.OverlayError):  # an input that is none of the accepted ones
                 overlay.patch_file(source, overlay.HA_INTENTS_PATCHES, accepted, check_hashes=True)
 
-    def test_pinned_hashes_are_complete(self):
+    def test_pinned_hashes_are_well_formed_and_distinct(self):
         self.assertEqual(len(set(overlay.HA_INTENTS_PATCHED_SHA256.values())), len(overlay.HA_INTENTS_PATCHED_SHA256))
         self.assertFalse(set(overlay.HA_INTENTS_PATCHED_SHA256.values()) & set(overlay.HA_INTENTS_PATCHED_SHA256))
         for before, after in overlay.HA_INTENTS_PATCHED_SHA256.items():
             self.assertRegex(before, r"^[0-9a-f]{64}$")
             self.assertRegex(after, r"^[0-9a-f]{64}$")
+
+
+@unittest.skipUnless(HACLI_PY, "HACLI_PY (ha-cli hacli.py of ticket #190) not set")
+class HaCliContractTests(unittest.TestCase):
+    """The header names and values the AFTER blocks match must be the ones ha-cli really sends."""
+
+    def setUp(self):
+        self.hacli = Path(HACLI_PY)
+        self.text = self.hacli.read_text(encoding="utf-8")
+        self.siblings = "\n".join(path.read_text(encoding="utf-8") for path in self.hacli.parent.glob("*.py"))
+        self.patched = overlay.apply_patches(BASELINE, overlay.HA_INTENTS_PATCHES)
+
+    def test_header_names_are_sent_by_ha_cli_and_read_by_the_overlay(self):
+        for header in ("X-Aisis-Verify", "X-Aisis-Verify-Reason", "X-Aisis-Down"):
+            self.assertIn(f"'{header}'", self.text)
+            self.assertIn(f"'{header.lower()}'", self.patched)
+
+    def test_matched_values_are_ha_cli_values(self):
+        for value in ("failed", "unknown", "ok"):
+            self.assertIn(f"'result': '{value}'", self.text)
+            self.assertIn(f"'{value}'", self.patched)
+        self.assertIn("'starting'", self.text)  # X-Aisis-Down: starting
+        self.assertIn("down === 'starting'", self.patched)
+        self.assertRegex(self.siblings, r"""['"]device_unavailable['"]""")  # X-Aisis-Verify-Reason, from the verifier
+        self.assertIn("reason === 'device_unavailable'", self.patched)
 
 
 @unittest.skipUnless(BASELINE_DIR, "AISIS_QUASAR_BASELINE_DIR (ha-intents.ts from the active image) not set")
@@ -107,6 +142,7 @@ class CapturedBaselineTests(unittest.TestCase):
             patched = (target / "ha-intents.ts").read_text(encoding="utf-8")
             self.assertNotIn("перезагруж", patched)
             self.assertNotIn("secondsWord", patched)
+            self.assertNotIn("HaRestartingError", patched)
             self.assertEqual(patched.count("haRecoveryText("), 1)
             self.assertEqual(overlay.sha256((target / "ha-intents.ts").read_bytes()),
                              overlay.HA_INTENTS_PATCHED_SHA256[overlay.sha256(source.read_bytes())])

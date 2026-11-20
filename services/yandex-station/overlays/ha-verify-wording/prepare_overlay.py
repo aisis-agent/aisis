@@ -8,8 +8,9 @@ from it (both are accepted; each has its own pinned result):
     prepare_overlay.py --ha-intents ha-intents.ts --output-dir NEW_DIRECTORY
 
 Each patch is an exact single-block replacement (no fuzz), the input SHA-256 must be a known one and the result must have the
-pinned SHA-256. The output directory is a deploy.sh `--overlay SRC_DIR` (it maps to /src): `NEW_DIRECTORY/backend/ha-intents.ts`.
-Nothing is deployed or restarted here.
+pinned SHA-256. The output is `NEW_DIRECTORY/backend/ha-intents.ts`; it is a deploy.sh `--overlay SRC_DIR` (maps to /src) only when
+the image already has the grammar-hook.ts the input imports: with the correction-hook input (`7a70be74…`) that overlay's patched
+`backend/grammar-hook.ts` MUST be copied next to it (README.md). Nothing is deployed or restarted here.
 """
 from __future__ import annotations
 
@@ -22,8 +23,8 @@ from pathlib import Path
 # (aisis-quasar:volume-zero-e859a37b: speaker-room, weather-via-cli, intent-grammar applied) and the same file after the
 # correction-hook overlay (its blocks do not overlap these).
 HA_INTENTS_PATCHED_SHA256 = {
-    "f4ab25c368fc5d6a39d280dcfa298eb3a11e261261fc9dae3dd7d82f36a494c3": "c246f55c30d6f33615b9fd8570f29d23136d65182790ec63c9544ed691d63c23",
-    "7a70be745f4f766e322377d17fa9f20707730d3e3285a5018b5a90abfbb9bc9c": "290506059b1a8639ed85903b23eead89b5580ba9c0487131f1a3469fe310ce7e",
+    "f4ab25c368fc5d6a39d280dcfa298eb3a11e261261fc9dae3dd7d82f36a494c3": "e1abf5e53eeab464892646705e28ecbbd0b83305d1c6b1c78a62b288b7a40f46",
+    "7a70be745f4f766e322377d17fa9f20707730d3e3285a5018b5a90abfbb9bc9c": "8065b4b5bf2990d6dbf3cd52e456eacaefe3cad823820ceb69c751109238d9e2",
 }
 
 RESTART_BEFORE = """\
@@ -55,17 +56,17 @@ export function haRecoveryText (etaSeconds: number | undefined): string {
 
 RESTART_AFTER = """\
 // Thrown when ha-cli OBSERVED Home Assistant gone (HTTP 202) and queued the call. `down` is the evidence ha-cli saw
-// (X-Aisis-Down: refused|reset|dns|unreachable|starting), undefined when an older ha-cli queued the call on a timeout.
-// etaSeconds (X-Aisis-Eta) is only logged: whether Home Assistant is "restarting" is not something anyone observed.
-class HaRestartingError extends Error {
+// (X-Aisis-Down: refused|reset|dns|unreachable|starting|http_502|http_503|http_504), undefined when an older ha-cli queued the
+// call on a timeout. etaSeconds (X-Aisis-Eta) is only logged: whether Home Assistant is "restarting" is not something anyone observed.
+class HaQueuedError extends Error {
   constructor (message: string, readonly etaSeconds: number | undefined, readonly down: string | undefined) {
     super(message)
   }
 }
 
-function restartingError (response: Response): HaRestartingError {
+function restartingError (response: Response): HaQueuedError {
   const eta = Number(response.headers.get('x-aisis-eta'))
-  return new HaRestartingError('ha-cli queued the call', Number.isFinite(eta) && eta > 0 ? eta : undefined,
+  return new HaQueuedError('ha-cli queued the call', Number.isFinite(eta) && eta > 0 ? eta : undefined,
     response.headers.get('x-aisis-down') ?? undefined)
 }
 
@@ -83,6 +84,45 @@ class HaCommandError extends Error {
   }
 }
 
+// Nothing was observed of a command that was sent but not answered in time (or whose read-back timed out).
+const HA_NOT_ANSWERED = 'Home Assistant не ответил вовремя, результат команды не проверен.'
+
+function isTimeout (error: unknown): boolean {
+  return error instanceof Error && error.name === 'TimeoutError'
+}
+
+// A body read cut off by the fetch timeout rejects with AbortError, not TimeoutError; only used where no one else aborts.
+function isTimeoutOrBodyAbort (error: unknown): boolean {
+  return isTimeout(error) || (error instanceof Error && error.name === 'AbortError')
+}
+
+// A service call that did not get an answer in time (haFetch gives up): nothing was observed. Only the call itself is judged so:
+// a read that timed out before any command was sent keeps the generic failure text.
+async function haServiceFetch (config: { token: string, url: string }, path: string, body: unknown): Promise<Response> {
+  try {
+    return await haFetch(config, path, body)
+  } catch (error) {
+    if (isTimeout(error)) throw new HaCommandError(`HA ${path} timed out`, HA_NOT_ANSWERED)
+    throw error
+  }
+}
+
+// The layer's own read-back AFTER a command was sent and ha-cli did not confirm it (an older ha-cli, no X-Aisis-Verify: ok): a
+// read that times out here leaves the command's outcome unknown, so it is not the generic failure of a read before any command.
+async function readBackAfterCommand (readBack: () => Promise<boolean>): Promise<boolean> {
+  try {
+    return await readBack()
+  } catch (error) {
+    if (isTimeoutOrBodyAbort(error)) throw new HaCommandError('read-back after the command timed out', HA_NOT_ANSWERED)
+    throw error
+  }
+}
+
+// ha-cli read the device back after this call and it was in the state the call leads to (X-Aisis-Verify: ok).
+function confirmedByHaCli (response: Response): boolean {
+  return response.headers.get('x-aisis-verify') === 'ok'
+}
+
 function haFailure (response: Response, what: string): Error {
   const verify = response.headers.get('x-aisis-verify')
   const reason = response.headers.get('x-aisis-verify-reason')
@@ -98,49 +138,128 @@ function haFailure (response: Response, what: string): Error {
 }
 """
 
+CALL_SERVICE_SIGNATURE_BEFORE = """\
+  turnOn: boolean): Promise<void> {
+  const domain = entityId.split('.')[0]
+"""
+
+CALL_SERVICE_SIGNATURE_AFTER = """\
+  turnOn: boolean): Promise<boolean> {
+  const domain = entityId.split('.')[0]
+"""
+
 CALL_SERVICE_BEFORE = """\
+  const response = await haFetch(config, path, body)
+  if (response.status === 202) {
+    // Accepted into the ha-cli delayed queue: HA is restarting.
+    throw restartingError(response)
+  }
   if (!response.ok) {
     throw new Error(`HA ${path} ${entityId} -> ${response.status}`)
   }
 """
 
 CALL_SERVICE_AFTER = """\
+  const response = await haServiceFetch(config, path, body)
+  if (response.status === 202) throw restartingError(response)
   if (!response.ok) throw haFailure(response, `HA ${path} ${entityId}`)
+  return confirmedByHaCli(response)
 """
 
 WHOLE_DOMAIN_BEFORE = """\
+  wholeDomain: 'light', turnOn: boolean): Promise<void> {
+  // Domain-wide HA calls require entity_id "all".
+  const response = await haFetch(config,
+    `/api/services/${wholeDomain}/${turnOn ? 'turn_on' : 'turn_off'}`, { entity_id: 'all' })
+  if (response.status === 202) throw restartingError(response)
   if (!response.ok) {
     throw new Error(`HA ${wholeDomain}/${turnOn ? 'turn_on' : 'turn_off'} -> ${response.status}`)
   }
 """
 
 WHOLE_DOMAIN_AFTER = """\
+  wholeDomain: 'light', turnOn: boolean): Promise<boolean> {
+  // Domain-wide HA calls require entity_id "all".
+  const response = await haServiceFetch(config,
+    `/api/services/${wholeDomain}/${turnOn ? 'turn_on' : 'turn_off'}`, { entity_id: 'all' })
+  if (response.status === 202) throw restartingError(response)
   if (!response.ok) throw haFailure(response, `HA ${wholeDomain}/${turnOn ? 'turn_on' : 'turn_off'}`)
+  return confirmedByHaCli(response)
 """
 
 SET_SERVICE_BEFORE = """\
+device: DeviceIntent): Promise<void> {
+  const domain = entityId.split('.')[0]
+  let path = '/api/services/light/turn_on'
+"""
+
+SET_SERVICE_AFTER = """\
+device: DeviceIntent): Promise<boolean> {
+  const domain = entityId.split('.')[0]
+  let path = '/api/services/light/turn_on'
+"""
+
+SET_SERVICE_CALL_BEFORE = """\
+  const response = await haFetch(config, path, body)
   if (response.status === 202) throw restartingError(response)
   if (!response.ok) throw new Error(`HA ${path} ${entityId} -> ${response.status}`)
 """
 
-SET_SERVICE_AFTER = """\
+SET_SERVICE_CALL_AFTER = """\
+  const response = await haServiceFetch(config, path, body)
   if (response.status === 202) throw restartingError(response)
   if (!response.ok) throw haFailure(response, `HA ${path} ${entityId}`)
+  return confirmedByHaCli(response)
+"""
+
+EXECUTE_BEFORE = """\
+  if (device.kind === 'set') {
+    await Promise.all(device.targets.map(entityId => callSetService(config, entityId, device)))
+  } else if (device.wholeDomain) {
+    await callWholeDomain(config, device.wholeDomain, turnOn)
+  } else {
+    await Promise.all(device.targets.map(entityId => callService(config, entityId, turnOn)))
+  }
+
+  if (await verifyExecution(config, device)) {
+"""
+
+EXECUTE_AFTER = """\
+  let confirmed: boolean[]
+  if (device.kind === 'set') {
+    confirmed = await Promise.all(device.targets.map(entityId => callSetService(config, entityId, device)))
+  } else if (device.wholeDomain) {
+    confirmed = [await callWholeDomain(config, device.wholeDomain, turnOn)]
+  } else {
+    confirmed = await Promise.all(device.targets.map(entityId => callService(config, entityId, turnOn)))
+  }
+
+  // ha-cli already read every device back (X-Aisis-Verify: ok on each call): a second look from here would only add the stale
+  // cached reads of a Home Assistant that went away in between, and report a failure nobody observed.
+  if (confirmed.every(Boolean) || await readBackAfterCommand(() => verifyExecution(config, device))) {
 """
 
 TV_SCRIPT_BEFORE = """\
+          const response = await haFetch(config, '/api/services/script/turn_on', { entity_id: entityId })
+          if (response.status === 202) throw restartingError(response)
           if (!response.ok) throw new Error('TV application launch was not accepted')
 """
 
 TV_SCRIPT_AFTER = """\
+          const response = await haServiceFetch(config, '/api/services/script/turn_on', { entity_id: entityId })
+          if (response.status === 202) throw restartingError(response)
           if (!response.ok) throw haFailure(response, 'TV application launch')
 """
 
 FIREPLACE_SCRIPT_BEFORE = """\
+          const response = await haFetch(config, '/api/services/script/turn_on', { entity_id: entityId })
+          if (response.status === 202) throw restartingError(response)
           if (!response.ok) throw new Error('Projector fireplace launch was not accepted')
 """
 
 FIREPLACE_SCRIPT_AFTER = """\
+          const response = await haServiceFetch(config, '/api/services/script/turn_on', { entity_id: entityId })
+          if (response.status === 202) throw restartingError(response)
           if (!response.ok) throw haFailure(response, 'Projector fireplace launch')
 """
 
@@ -153,23 +272,22 @@ CATCH_BEFORE = """\
 """
 
 CATCH_AFTER = """\
-    if (error instanceof HaRestartingError) {
+    if (error instanceof HaQueuedError) {
       logger.warn(`Fast intent '${s}' queued: Home Assistant unavailable (${error.down ?? 'no evidence'}, eta ${error.etaSeconds ?? '?'}s)`)
       return { kind: 'reply', quasarDirectives: [], text: haRecoveryText(error.down) }
     }
     logger.error(`Fast intent '${s}' failed:`, error)
     if (error instanceof HaCommandError) return { kind: 'reply', quasarDirectives: [], text: error.say }
-    // haFetch gave up (AbortSignal.timeout): nothing was observed, so no failure is claimed.
-    if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-      return { kind: 'reply', quasarDirectives: [], text: 'Home Assistant не ответил вовремя, результат команды не проверен.' }
-    }
 """
 
 HA_INTENTS_PATCHES = (
     (RESTART_BEFORE, RESTART_AFTER, "the HaRestartingError block"),
-    (CALL_SERVICE_BEFORE, CALL_SERVICE_AFTER, "the callService failure"),
-    (WHOLE_DOMAIN_BEFORE, WHOLE_DOMAIN_AFTER, "the callWholeDomain failure"),
-    (SET_SERVICE_BEFORE, SET_SERVICE_AFTER, "the callSetService failure"),
+    (CALL_SERVICE_SIGNATURE_BEFORE, CALL_SERVICE_SIGNATURE_AFTER, "the callService signature"),
+    (CALL_SERVICE_BEFORE, CALL_SERVICE_AFTER, "the callService request and failure"),
+    (WHOLE_DOMAIN_BEFORE, WHOLE_DOMAIN_AFTER, "the callWholeDomain request and failure"),
+    (SET_SERVICE_BEFORE, SET_SERVICE_AFTER, "the callSetService signature"),
+    (SET_SERVICE_CALL_BEFORE, SET_SERVICE_CALL_AFTER, "the callSetService request and failure"),
+    (EXECUTE_BEFORE, EXECUTE_AFTER, "the calls and the read-back of executeDeviceIntent"),
     (TV_SCRIPT_BEFORE, TV_SCRIPT_AFTER, "the TV application script failure"),
     (FIREPLACE_SCRIPT_BEFORE, FIREPLACE_SCRIPT_AFTER, "the fireplace script failure"),
     (CATCH_BEFORE, CATCH_AFTER, "the final catch of matchFastIntent"),
