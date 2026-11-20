@@ -103,7 +103,8 @@ query string, which `weather.get_forecasts?return_response` needs.
   `deploy-worktree.conf` drop-ins in `systemd/<unit>.service.d/`; the shared
   primary checkout is not their code path. Create it once with
   `git worktree add .worktrees/deploy-main -b deploy-main origin/main`, update it with
-  `git -C ~/xp/aisis/.worktrees/deploy-main merge --ff-only origin/main`, then
+  `flock -w 120 "${AISIS_BG_STATE:-$HOME/.local/share/aisis/bluegreen-state}/maintenance.lock" git -C ~/xp/aisis/.worktrees/deploy-main merge --ff-only origin/main`
+  (the lock `deploy.sh` holds while it backs up and installs, so an update never lands in the middle of one), then
   restart the unit you want to move, one at a time, and check its health.
 - **State lives in**: `~/.local/share/aisis/` (venvs `venv/`, `embed-venv/`,
   `dsp-bench-venv/`, `bluegreen-state/`, `corpus/`, `models/`, `prompts/`,
