@@ -154,7 +154,7 @@ exec {lock_fd}>"$state_dir/maintenance.lock"
 flock -w "${AISIS_LOCK_WAIT:-120}" "$lock_fd" \
   || { echo "needs manual: a deployment holds $state_dir/maintenance.lock; rerun when it finishes" >&2; exit 10; }
 
-# The deploy-worktree.conf drop-ins run adapter, clipfeed and dashboard from this worktree: it must be a complete worktree
+# The deploy-worktree.conf drop-ins run adapter, clipfeed, dashboard and stt from this worktree: it must be a complete worktree
 # of the ~/xp/aisis repository before any drop-in is installed, so a unit never starts with a missing entry point.
 # Anything else stops the run (exit 10) before a unit or drop-in file changes.
 if [ "${#deploy_entries[@]}" -gt 0 ]; then
