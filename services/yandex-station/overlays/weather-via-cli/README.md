@@ -68,8 +68,8 @@ flips, and retains rollback on a failed smoke test; it runs no local full suite.
 
 The baseline is `/src/backend/entity-index.ts` of the active image (`aisis-quasar:bg-tv-fireplace-contract-20261113`),
 SHA-256 `73474b5c8e60daa38f62f700cdbe787cd1badb77690b3733a7c93315ba41235f`; the patched file is
-`c24efb900b0c9ad4ad74aaf30723add07c55cd639799882e2430117f96308d10` (it includes the embedded table). The quasar overlay source is not versioned in this
-repository (it lives in the images), so the patch is applied to the captured file instead of copying 880 lines here.
+`c24efb900b0c9ad4ad74aaf30723add07c55cd639799882e2430117f96308d10` (it includes the embedded table). The quasar source is versioned in
+[aisis-quasar](https://github.com/alex-mextner/aisis-quasar): the baseline file is byte-identical to the tree at tag `aisis-pre-weather-20261117`, the patched file to the one at `aisis-bg-weather-via-cli-20261117`; this patch is folded into that tag, so it applies only to the older baseline.
 After a later deploy rebuilt `entity-index.ts` the baseline hash changes and `prepare_overlay.py` refuses until the patch
 is rebased: it must never be applied blind.
 

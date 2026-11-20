@@ -23,6 +23,20 @@ The authoritative product definition is [docs/specs/000-master-spec.md](docs/spe
 - `docs/architecture/voice-stack-layers.md` — the live Yandex Station voice stack: layers, who answers a phrase, and which parts are own, forked or off the shelf.
 - `docs/research/` — verified platform constraints and existing-system notes.
 
+## Public repositories
+
+Everything AISIS forks or patches is published under `alex-mextner/aisis-*`, with the upstream history, license and attribution kept.
+
+| Repository | What | Upstream and license | Build |
+|---|---|---|---|
+| [aisis-quasar](https://github.com/alex-mextner/aisis-quasar) | the quasar-server (Yandex.Station backend emulator) with the AISIS patch series; one tag per deployed image | [v3rt3p/quasar-server](https://github.com/v3rt3p/quasar-server) `fefcd58`, GPL-3.0 | pinned in `services/yandex-station/quasar-source.lock`, `scripts/prepare-quasar-source.sh`, checked by `scripts/verify_quasar_image.py` |
+| [aisis-station-kit](https://github.com/alex-mextner/aisis-station-kit) | patch on eQuasar (`aisis-station-kit.service`) and the script that applies it | [krevetkqqq/lite-kit](https://github.com/krevetkqqq/lite-kit) `8a82ff3`, MIT | `apply.sh DEST` in that repository |
+| [weather-cli](https://github.com/alex-mextner/weather-cli) | the weather answers of the speaker | own | `scripts/install-weather-cli.sh` |
+
+Other parts are used as published (config only): `wyoming-faster-whisper`, the TLS proxy `v3rt3p/https-proxy`, the streaming recognizer `v3rt3p/quasistreaming-gigam`. The full provenance table (own, upstream + config, forked, vendored) is part of the voice stack document of ticket #185.
+
+To contribute: change the quasar layer in a pull request against `aisis-quasar` (its CI runs the offline intent corpus), everything else against this repository; a quasar change reaches production only through a new tag, `quasar-source.lock` and the corpus-receipt deploy protocol described in [services/yandex-station/README.md](services/yandex-station/README.md#quasar-source).
+
 ## Design principles
 
 1. Fast deterministic paths before LLM calls.
