@@ -4,7 +4,9 @@ The script runs against a throwaway HOME and a stand-in `systemctl` that keeps i
 every call, writes the .wants links `enable` would write, and fails `start` for the units named in $FAIL_START.
 Nothing touches the real systemd or the real ~/.config.
 """
+import fcntl
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -52,11 +54,34 @@ class InstallerTest(unittest.TestCase):
         stub.chmod(0o755)
         self.bin_dir = bin_dir
         self.dest = self.home / ".config" / "systemd" / "user"
+        self.bg_state = self.root / "bg-state"
+        self.make_repo()
 
-    def run_script(self, *args, fail_start="", skip_start=""):
-        env = {**os.environ, "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config"),
+    def make_repo(self):
+        """A scratch git repo with a copy of the installer, the real unit files and the deploy entry points, plus
+        ~/xp/aisis as a linked worktree of it: the installer needs the deployment worktree, so it must find a repo."""
+        self.repo = self.root / "repo"
+        (self.repo / "scripts").mkdir(parents=True)
+        (self.repo / "scripts" / SCRIPT.name).write_bytes(SCRIPT.read_bytes())
+        for src in UNITS.parent.parent.glob("*/systemd"):
+            shutil.copytree(src, self.repo / "services" / src.parent.name / "systemd")
+        code = self.repo / "services" / "yandex-station" / "code"
+        code.mkdir(parents=True, exist_ok=True)
+        for name in ("adapter.py", "clipfeed.py", "dashboard.py"):
+            (code / name).write_text("# entry\n")
+        for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "init"],
+                     ["update-ref", "refs/remotes/origin/main", "HEAD"]):
+            self.git(*args)
+        self.primary = self.home / "xp" / "aisis"
+        self.primary.parent.mkdir(parents=True)
+        self.git("worktree", "add", "-q", "-b", "primary", str(self.primary))
+        self.deploy_tree = self.primary / ".worktrees" / "deploy-main"
+
+    def run_script(self, *args, fail_start="", skip_start="", lock_wait="120"):
+        env = {**os.environ, "HOME": str(self.home), "XDG_CONFIG_HOME": str(self.home / ".config"), "AISIS_LOCK_WAIT": lock_wait,
+               "AISIS_BG_STATE": str(self.bg_state),
                "PATH": f"{self.bin_dir}:{os.environ['PATH']}", "FAKE_STATE": str(self.state), "FAIL_START": fail_start, "SKIP_START": skip_start}
-        return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env)
+        return subprocess.run(["bash", str(self.repo / "scripts" / SCRIPT.name), *args], capture_output=True, text=True, env=env)
 
     def calls(self):
         path = self.state / "calls"
@@ -216,6 +241,117 @@ class InstallerTest(unittest.TestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 10)
         self.assertIn("needs manual", result.stderr)
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(cwd or self.repo), *args],
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    def test_deploy_worktree_is_created_when_home_checkout_is_a_linked_worktree_of_the_repo(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("created:", result.stdout)
+        self.assertTrue((self.deploy_tree / "scripts" / SCRIPT.name).is_file())
+
+    def test_missing_deploy_worktree_for_an_unrelated_home_stops_before_any_unit_changes(self):
+        shutil.rmtree(self.primary)
+        self.git("worktree", "prune")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 10)
+        self.assertIn("needs manual", result.stderr)
+        self.assertFalse(self.dest.exists())
+
+    def test_separate_clone_with_a_foreign_home_checkout_installs_nothing(self):
+        shutil.rmtree(self.primary)
+        subprocess.run(["git", "init", "-q", str(self.primary)], check=True, capture_output=True)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 10)
+        self.assertFalse(self.dest.exists())
+        self.assertFalse(self.deploy_tree.exists())
+
+    def test_existing_empty_deploy_directory_is_refused_before_installing_dropins(self):
+        self.deploy_tree.mkdir(parents=True)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 10)
+        self.assertIn("unusable", result.stderr)
+        self.assertFalse(self.dest.exists())
+
+    def test_deploy_worktree_missing_an_entry_point_is_refused(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        (self.deploy_tree / "services/yandex-station/code/dashboard.py").unlink()
+        shutil.rmtree(self.dest)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 10)
+        self.assertIn("missing services/yandex-station/code/dashboard.py", result.stderr)
+        self.assertFalse(self.dest.exists())
+
+    def test_repository_of_another_project_at_the_deploy_path_is_refused(self):
+        self.deploy_tree.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(self.deploy_tree)], check=True, capture_output=True)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 10)
+        self.assertFalse(self.dest.exists())
+
+    def test_existing_deploy_branch_ahead_of_origin_is_reused_not_reset(self):
+        self.git("branch", "deploy-main")
+        hotfix = self.root / "hotfix"
+        self.git("worktree", "add", "-q", str(hotfix), "deploy-main")
+        (hotfix / "hotfix.txt").write_text("fix\n")
+        self.git("add", "-A", cwd=hotfix)
+        self.git("commit", "-q", "-m", "hotfix", cwd=hotfix)
+        self.git("worktree", "remove", "--force", str(hotfix))
+        ahead = self.git("rev-parse", "deploy-main")
+        self.assertNotEqual(ahead, self.git("rev-parse", "origin/main"))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", "deploy-main"), ahead)
+        self.assertTrue((self.deploy_tree / "hotfix.txt").is_file())
+
+    def test_second_install_keeps_a_valid_existing_deploy_worktree(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        again = self.run_script()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertNotIn("created:", again.stdout)
+
+    def test_retained_deploy_branch_missing_an_entry_point_is_refused_after_creation(self):
+        self.git("branch", "deploy-main")
+        old = self.root / "old"
+        self.git("worktree", "add", "-q", str(old), "deploy-main")
+        self.git("rm", "-q", "services/yandex-station/code/clipfeed.py", cwd=old)
+        self.git("commit", "-q", "-m", "drop clipfeed", cwd=old)
+        self.git("worktree", "remove", "--force", str(old))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 10)
+        self.assertIn("missing services/yandex-station/code/clipfeed.py", result.stderr)
+        self.assertFalse(self.dest.exists())
+
+    def test_install_does_not_proceed_while_a_deployment_holds_the_lock(self):
+        state = self.bg_state
+        state.mkdir(parents=True)
+        with (state / "maintenance.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = self.run_script(lock_wait="1")
+        self.assertEqual(result.returncode, 10)
+        self.assertIn("holds", result.stderr)
+        self.assertFalse(self.dest.exists())
+        self.assertFalse(self.deploy_tree.exists())   # the lock is taken before the worktree is created
+        self.assertEqual(self.run_script().returncode, 0)   # released: the install goes through
+
+    def test_check_and_plan_report_a_missing_deploy_worktree_without_creating_it(self):
+        for flag in ("--check", "--plan"):
+            result = self.run_script(flag)
+            self.assertIn(f"missing: {self.deploy_tree}", result.stdout, flag)
+            self.assertFalse(self.deploy_tree.exists(), flag)
+
+    def test_check_reports_a_deleted_entry_point_while_its_unit_is_still_running(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(self.run_script("--check").returncode, 0)
+        (self.deploy_tree / "services/yandex-station/code/dashboard.py").unlink()
+        self.assertTrue((self.state / "active-aisis-dashboard.service").exists())
+        for flag in ("--check", "--plan"):
+            result = self.run_script(flag)
+            self.assertIn("unusable:", result.stdout, flag)
+            self.assertIn("missing services/yandex-station/code/dashboard.py", result.stdout, flag)
+        self.assertEqual(self.run_script("--check").returncode, 3)
 
 
 if __name__ == "__main__":

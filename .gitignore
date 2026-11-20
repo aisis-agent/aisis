@@ -1,3 +1,5 @@
 # Local credential files: keys live in the OS keychain or in an uncommitted .env, never in git.
 .env
 .env.*
+# Deployment worktrees (install-systemd-units.sh creates .worktrees/deploy-main inside the primary checkout).
+.worktrees/

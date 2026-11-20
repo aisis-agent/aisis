@@ -258,5 +258,85 @@ if sys.argv[-1].endswith('/announcement_cache.py'):
                 self.assertFalse((self.folder / "state/maintenance").exists())
 
 
+class UnitInstallTargetTests(unittest.TestCase):
+    """With AISIS_CODE_DIR unset, the adapter is installed where its loaded unit's effective ExecStart runs it."""
+    def setUp(self):
+        AdapterDeploymentTests.setUp(self)   # reuse the stub curl/sleep fixture
+        home = self.folder / "home dir"
+        self.primary = home / "xp/aisis/services/yandex-station/code"
+        self.deploy_main = home / "xp/aisis/.worktrees/deploy-main/services/yandex-station/code"
+        for folder in (self.primary, self.deploy_main):
+            folder.mkdir(parents=True)
+            for name in ("adapter.py", "stt_wyoming.py", "hacli.py"):
+                (folder / name).write_text(self.old)
+        (self.bin / "systemctl").write_text(
+            '#!/bin/sh\nif [ "$2" = show ]; then\n'
+            '  if [ -n "$TEST_SHOW_TRACE" ]; then if [ -e "$AISIS_BG_STATE/maintenance" ]; then echo locked; else echo unlocked; fi >>"$TEST_SHOW_TRACE"; fi\n'
+            '  echo "$TEST_EXEC_START"\nfi\nexit 0\n')
+        self.env.pop("AISIS_CODE_DIR")
+        self.env["HOME"] = str(home)
+
+    def exec_start(self, folder):
+        python = self.folder / "home dir/.local/share/aisis/venv/bin/python"
+        self.env["TEST_EXEC_START"] = (f"{{ path={python} ; argv[]={python} {folder}/adapter.py ; "
+                                       "ignore_errors=no ; start_time=[n/a] ; status=0/0 }")
+
+    def install(self, unit, name):
+        (self.source / name).write_text("VERSION = 'new'\n")
+        return subprocess.run(["bash", str(DEPLOY), "unit", unit, str(self.source / name)],
+            env=self.env, capture_output=True, text=True, timeout=10)
+
+    def test_adapter_installs_into_the_worktree_its_unit_runs_from(self):
+        self.exec_start(self.deploy_main)
+        result = self.install("adapter", "adapter.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.deploy_main / "adapter.py").read_text(), "VERSION = 'new'\n")
+        self.assertEqual((self.primary / "adapter.py").read_text(), self.old)
+
+    def test_existing_deploy_worktree_does_not_attract_an_adapter_whose_unit_runs_the_primary_checkout(self):
+        self.exec_start(self.primary)
+        result = self.install("adapter", "adapter.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.primary / "adapter.py").read_text(), "VERSION = 'new'\n")
+        self.assertEqual((self.deploy_main / "adapter.py").read_text(), self.old)
+
+    def test_target_is_resolved_only_while_the_maintenance_lock_is_held(self):
+        self.exec_start(self.deploy_main)
+        self.env["TEST_SHOW_TRACE"] = str(self.folder / "show-trace")
+        result = self.install("adapter", "adapter.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.folder / "show-trace").read_text().split(), ["locked"])
+
+    def test_target_directory_containing_spaces_is_not_truncated(self):
+        self.assertIn(" ", str(self.deploy_main))
+        self.exec_start(self.deploy_main)
+        result = self.install("adapter", "adapter.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.deploy_main / "adapter.py").read_text(), "VERSION = 'new'\n")
+
+    def test_adapter_without_a_readable_exec_start_is_refused_untouched(self):
+        self.env["TEST_EXEC_START"] = ""
+        result = self.install("adapter", "adapter.py")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("effective ExecStart", result.stderr)
+        for folder in (self.primary, self.deploy_main):
+            self.assertEqual((folder / "adapter.py").read_text(), self.old)
+
+    def test_adapter_whose_unit_target_lacks_the_installed_file_is_refused(self):
+        self.exec_start(self.folder / "elsewhere")
+        result = self.install("adapter", "adapter.py")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("installed file missing", result.stderr)
+        for folder in (self.primary, self.deploy_main):
+            self.assertEqual((folder / "adapter.py").read_text(), self.old)
+
+    def test_stt_and_ha_cli_install_into_primary_checkout(self):
+        for unit, name in (("stt", "stt_wyoming.py"), ("ha-cli", "hacli.py")):
+            result = self.install(unit, name)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((self.primary / name).read_text(), "VERSION = 'new'\n", unit)
+            self.assertEqual((self.deploy_main / name).read_text(), self.old, unit)
+
+
 if __name__ == "__main__":
     unittest.main()

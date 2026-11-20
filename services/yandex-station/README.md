@@ -136,6 +136,14 @@ the ones at `aisis-pre-weather-20261117`.
   it never restarts a running unit (it names the ones to restart). `--check` exits 3
   on drift, `--plan` only prints it. A fresh machine gets it from the `aisis`
   module of the `.files` profile (clones this repository, runs the installer).
+- **Deployment worktree**: adapter, clip feed and dashboard run their code from
+  `~/xp/aisis/.worktrees/deploy-main` (branch `deploy-main`), selected by the
+  `deploy-worktree.conf` drop-ins in `systemd/<unit>.service.d/`; the shared
+  primary checkout is not their code path. Create it once with
+  `git worktree add .worktrees/deploy-main -b deploy-main origin/main`, update it with
+  `flock -w 120 "${AISIS_BG_STATE:-$HOME/.local/share/aisis/bluegreen-state}/maintenance.lock" git -C ~/xp/aisis/.worktrees/deploy-main merge --ff-only origin/main`
+  (the lock `deploy.sh` holds while it backs up and installs, so an update never lands in the middle of one), then
+  restart the unit you want to move, one at a time, and check its health.
 - **State lives in**: `~/.local/share/aisis/` (venvs `venv/`, `embed-venv/`,
   `dsp-bench-venv/`, `bluegreen-state/`, `corpus/`, `models/`, `prompts/`,
   `releases/`, `voice-archive/`, `dashboard-ui/`, `pm-deps/`, `dialogs.sqlite3`,

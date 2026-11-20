@@ -89,6 +89,25 @@ unit_inactive() {
   [ "$(systemctl --user is-active "$1" 2>/dev/null || true)" != active ]
 }
 
+# The deploy-worktree.conf drop-ins execute entry points from this worktree.
+deploy_tree=$HOME/xp/aisis/.worktrees/deploy-main
+deploy_entries=()   # relative to the worktree
+for pair in "${files[@]}"; do
+  case "${pair#*|}" in */deploy-worktree.conf) ;; *) continue ;; esac
+  while IFS= read -r rel; do deploy_entries+=("$rel"); done < <(grep -o 'deploy-main/[^ ]*\.py' "${pair%%|*}/${pair#*|}" | sed 's|^deploy-main/||' | sort -u)
+done
+git_common() { git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true; }
+home_common=$(git_common "$HOME/xp/aisis")
+# Why $deploy_tree cannot serve the units (empty when it can): a worktree root of the ~/xp/aisis repository, on its own
+# branch, holding every entry point.
+deploy_problem() {
+  local rel
+  [ "$(git -C "$deploy_tree" rev-parse --show-toplevel 2>/dev/null || true)" = "$(readlink -f "$deploy_tree")" ] || { echo "not a worktree root"; return; }
+  [ "$(git_common "$deploy_tree")" = "$home_common" ] || { echo "a worktree of another repository"; return; }
+  [ "$(git -C "$deploy_tree" symbolic-ref --short -q HEAD || true)" = deploy-main ] || { echo "not on branch deploy-main"; return; }
+  for rel in "${deploy_entries[@]}"; do [ -f "$deploy_tree/$rel" ] || { echo "missing $rel"; return; }; done
+}
+
 drift=()
 for pair in "${files[@]}"; do
   rel=${pair#*|}; state=$(file_state "${pair%%|*}/$rel" "$dest/$rel")
@@ -99,6 +118,13 @@ for unit in "${units[@]}"; do
   unit_enabled "$unit" "$(src_of "$unit")" || drift+=("not enabled: $unit")
   if unit_inactive "$unit"; then drift+=("not active: $unit"); fi
 done
+# Read-only: an existing worktree is judged by the same rules as at install time; a missing one is drift (install creates it).
+if [ "${#deploy_entries[@]}" -gt 0 ]; then
+  if [ -z "$home_common" ]; then drift+=("deploy worktree: $HOME/xp/aisis is not a git checkout")
+  elif [ ! -e "$deploy_tree" ]; then drift+=("missing: $deploy_tree")
+  elif [ -n "$(deploy_problem)" ]; then drift+=("unusable: $deploy_tree ($(deploy_problem))")
+  fi
+fi
 
 if [ "$mode" != install ]; then
   if [ "${#drift[@]}" -eq 0 ]; then
@@ -117,6 +143,42 @@ fi
 if ! systemctl --user show-environment >/dev/null 2>&1; then
   echo "needs manual: no user systemd session reachable (run from a login session with systemd --user, or enable linger)" >&2
   exit 10
+fi
+
+# Same lock deploy.sh holds while it resolves a unit's install target, installs and restarts: a drop-in must not appear
+# (nor be loaded), and the worktree must not be inspected half-replaced, in the middle of a deployment. Taken before the
+# worktree is created or validated; the installer waits for a running deployment instead of racing it.
+state_dir=${AISIS_BG_STATE:-$HOME/.local/share/aisis/bluegreen-state}
+mkdir -p "$state_dir"
+exec {lock_fd}>"$state_dir/maintenance.lock"
+flock -w "${AISIS_LOCK_WAIT:-120}" "$lock_fd" \
+  || { echo "needs manual: a deployment holds $state_dir/maintenance.lock; rerun when it finishes" >&2; exit 10; }
+
+# The deploy-worktree.conf drop-ins run adapter, clipfeed and dashboard from this worktree: it must be a complete worktree
+# of the ~/xp/aisis repository before any drop-in is installed, so a unit never starts with a missing entry point.
+# Anything else stops the run (exit 10) before a unit or drop-in file changes.
+if [ "${#deploy_entries[@]}" -gt 0 ]; then
+  if [ -z "$home_common" ]; then
+    echo "needs manual: $HOME/xp/aisis is not a git checkout, so $deploy_tree cannot exist or be created (clone the repository there, then rerun)" >&2
+    exit 10
+  fi
+  if [ ! -e "$deploy_tree" ]; then
+    # An existing deploy-main branch is reused as it is (it may hold commits origin/main lacks); only a missing one is created.
+    if git -C "$HOME/xp/aisis" show-ref --verify --quiet refs/heads/deploy-main; then
+      add_args=("$deploy_tree" deploy-main)
+    else
+      add_args=(-b deploy-main "$deploy_tree" origin/main)
+    fi
+    git -C "$HOME/xp/aisis" worktree add "${add_args[@]}" >/dev/null 2>&1 \
+      || { echo "needs manual: could not create $deploy_tree (git -C $HOME/xp/aisis worktree add ${add_args[*]})" >&2; exit 10; }
+    echo "created: $deploy_tree"
+  fi
+  # Checked for a fresh worktree too: a retained branch may predate an entry point.
+  bad=$(deploy_problem)
+  if [ -n "$bad" ]; then
+    echo "needs manual: $deploy_tree is unusable ($bad); fix or remove it (git -C $HOME/xp/aisis worktree remove --force $deploy_tree), then rerun" >&2
+    exit 10
+  fi
 fi
 
 # A drop-in directory that is a link into a checkout (possibly a dead one) is removed before anything is written, so
@@ -151,6 +213,7 @@ for pair in "${files[@]}"; do
 done
 # Every run reloads: a reload that failed on an earlier run left matching files behind and must still be retried.
 systemctl --user daemon-reload
+flock -u "$lock_fd"
 
 # Enable everything first, so a unit that fails to start below still comes back at the next login.
 for unit in "${units[@]}"; do
