@@ -61,6 +61,22 @@ EXTRACT_PROMPT = ('Из диалога голосового ассистента
     'ответь {"facts":[]}.')
 
 
+def laya_sockets(env, base=None):
+    """The Laya classify-server sockets to try, in order: `LAYA_SOCKET` alone, else every `laya-<version>.sock` of the task-cli state
+    directory, newest version first.
+
+    The version is part of the file name and every task-cli upgrade renames the socket, so a fixed name goes stale (the hard-coded
+    laya-0.23.1.sock made every semantic-shadow call answer 503 for weeks). A closed listener leaves its socket file behind, so the
+    caller connects down the list until one answers. `.sock.lock` and `.log` files are not sockets.
+    """
+    if env.get("LAYA_SOCKET"):
+        return [Path(env["LAYA_SOCKET"])]
+    if base is None:
+        base = Path(env.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "task-cli" / "classify"
+    socks = [p for p in base.glob("laya-*.sock") if p.is_socket()]
+    return sorted(socks, key=lambda p: [int(x) for x in re.findall(r"\d+", p.stem)], reverse=True)
+
+
 class TurnError(Exception):
     pass
 
@@ -939,11 +955,15 @@ class Adapter:
         message = body.get("message")
         if not isinstance(message, str) or not message.strip() or len(message) > 2000:
             raise web.HTTPBadRequest(text="invalid laya message")
-        sock_path = Path(self.env.get("LAYA_SOCKET",
-            os.path.expanduser("~/.local/state/task-cli/classify/laya-0.23.1.sock")))
-        if not sock_path.exists():
+        reader = writer = None
+        for sock_path in laya_sockets(self.env):
+            try:
+                reader, writer = await asyncio.open_unix_connection(str(sock_path))
+                break
+            except OSError:
+                continue  # an abandoned socket file of a newer version must not mask a live older server
+        if writer is None:
             raise web.HTTPServiceUnavailable(text="laya socket unavailable")
-        reader, writer = await asyncio.open_unix_connection(str(sock_path))
         try:
             req = json.dumps({"op": "predict", "message": message,
                 "questions": body.get("questions", {})}, ensure_ascii=False)
