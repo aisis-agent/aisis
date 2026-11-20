@@ -75,9 +75,8 @@ def state_text(state: dict | None) -> str:
     return value + (" " + " ".join(extra) if extra else "")
 
 
-def targets(body: Any) -> tuple[tuple[str, ...], str | None] | None:
-    """(explicit entity ids, whole domain or None) a service call body addresses; None when it addresses anything else
-    (areas, devices, labels, nothing) or too many entities to poll."""
+def _listed(body: Any) -> list[str] | None:
+    """The entity ids a service call body lists; None when it addresses anything else (areas, devices, labels, nothing)."""
     if not isinstance(body, dict):
         return None
     if any(body.get(key) for key in ("area_id", "device_id", "floor_id", "label_id")):
@@ -87,11 +86,34 @@ def targets(body: Any) -> tuple[tuple[str, ...], str | None] | None:
         raw = [part.strip() for part in raw.split(",")]
     if not isinstance(raw, list) or not raw or not all(isinstance(item, str) and item for item in raw):
         return None
+    return raw
+
+
+def entity_ids(body: Any) -> tuple[str, ...] | None:
+    """Every explicit entity id a call body addresses, however many; None for `all`, areas, devices or anything unparsable."""
+    raw = _listed(body)
+    if raw is None or "all" in raw or any("." not in item for item in raw):
+        return None
+    return tuple(dict.fromkeys(raw))
+
+
+def targets(body: Any) -> tuple[tuple[str, ...], str | None] | None:
+    """(explicit entity ids, whole domain or None) a service call body addresses; None when it addresses anything else
+    (areas, devices, labels, nothing) or too many entities to poll."""
+    raw = _listed(body)
     if raw == ["all"]:
         return (), "all"
-    if "all" in raw or len(raw) > MAX_ENTITIES or any("." not in item for item in raw):
-        return None
-    return tuple(dict.fromkeys(raw)), None
+    ids = entity_ids(body)
+    return (ids, None) if ids is not None and len(ids) <= MAX_ENTITIES else None
+
+
+class Unchecked(str):
+    """What a rule returns when the state cannot say whether this part of the request happened (not a mismatch, not a confirmation).
+    The value is the attribute name, or the comma-joined names when several rules of one request could not be checked."""
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(self.split(","))
 
 
 Rule = Callable[[dict], "str | None"]   # a state -> None when it is the expected one, else what it is instead
@@ -110,17 +132,43 @@ def _attr_close(name: str, wanted: float, tolerance: float, scale: float = 1.0) 
     return rule
 
 
+def _light_attr_close(name: str, wanted: float, tolerance: float, scale: float = 1.0) -> Rule:
+    """`_attr_close` for a light attribute the lamp may be unable to report: a lamp that cannot dim (on/off only) or whose colour
+    is not a temperature (hs/rgb/xy only: Home Assistant turns the kelvin it was sent into a colour) leaves it out of the state,
+    and a lamp whose range is narrower than the request reports the end of its range."""
+    def rule(state: dict) -> str | None:
+        attrs = _attrs(state)
+        modes = attrs.get("supported_color_modes")
+        if isinstance(modes, list):
+            if name == "brightness" and set(modes) <= {"onoff"}:
+                return Unchecked(name)      # an on/off lamp cannot show a brightness: on is confirmed, the level is not
+            if name == "color_temp_kelvin" and "color_temp" not in modes:
+                return Unchecked(name)      # Home Assistant turned the kelvin into a colour of an hs/rgb/xy lamp: no attribute holds it
+        target = wanted
+        if name == "color_temp_kelvin":
+            low, high = _num(attrs.get("min_color_temp_kelvin")), _num(attrs.get("max_color_temp_kelvin"))
+            if low is not None:
+                target = max(target, low)
+            if high is not None:
+                target = min(target, high)
+        return _attr_close(name, target, tolerance, scale)(state)
+    return rule
+
+
 def _attr_equals(name: str, wanted: Any) -> Rule:
     return lambda state: None if _attrs(state).get(name) == wanted else state_text(state)
 
 
 def _all_of(*rules: Rule) -> Rule:
     def rule(state: dict) -> str | None:
+        unchecked: list[str] = []
         for item in rules:
             miss = item(state)
-            if miss is not None:
+            if isinstance(miss, Unchecked):
+                unchecked.extend(miss.names)
+            elif miss is not None:
                 return miss
-        return None
+        return Unchecked(",".join(dict.fromkeys(unchecked))) if unchecked else None
     return rule
 
 
@@ -132,12 +180,12 @@ def _light_on(body: dict) -> Rule | None:
     transitioning = (_num(body.get("transition")) or 0) > 0
     if not transitioning:
         if pct is not None:
-            rules.append(_attr_close("brightness", pct * 255 / 100, BRIGHTNESS_TOLERANCE))
+            rules.append(_light_attr_close("brightness", pct * 255 / 100, BRIGHTNESS_TOLERANCE))
         elif raw is not None:
-            rules.append(_attr_close("brightness", raw, BRIGHTNESS_TOLERANCE))
+            rules.append(_light_attr_close("brightness", raw, BRIGHTNESS_TOLERANCE))
         kelvin = _num(body.get("color_temp_kelvin")) or _num(body.get("kelvin"))
         if kelvin is not None:
-            rules.append(_attr_close("color_temp_kelvin", kelvin, KELVIN_TOLERANCE))
+            rules.append(_light_attr_close("color_temp_kelvin", kelvin, KELVIN_TOLERANCE))
     return _all_of(*rules)
 
 
@@ -236,6 +284,7 @@ class Verdict:
     reason: str                     # state_matched | state_mismatch | device_unavailable | state_unreadable
     after: dict[str, str] = field(default_factory=dict)    # entity id -> state_text
     wrong: dict[str, str] = field(default_factory=dict)    # the entities that are not as expected -> what they are instead
+    unchecked: tuple[str, ...] = ()                        # parts of the request the state cannot confirm (an ok verdict with these is partial)
 
 
 @dataclass(frozen=True)
@@ -252,6 +301,7 @@ class Expectation:
         after: dict[str, str] = {}
         wrong: dict[str, str] = {}
         unreadable = False
+        unchecked: list[str] = []
         unavailable: list[str] = []
         for entity_id in self.entities:
             state = states.get(entity_id)
@@ -264,14 +314,16 @@ class Expectation:
                 wrong[entity_id] = str(state.get("state"))
                 continue
             miss = self.rules[entity_id](state)
-            if miss is not None:
+            if isinstance(miss, Unchecked):
+                unchecked.extend(miss.names)
+            elif miss is not None:
                 wrong[entity_id] = miss
         if wrong:
             reason = "device_unavailable" if set(wrong) == set(unavailable) else "state_mismatch"
             return Verdict("failed", reason, after, wrong)
         if unreadable:
             return Verdict("pending", "state_unreadable", after)
-        return Verdict("ok", "state_matched", after)
+        return Verdict("ok", "state_matched", after, unchecked=tuple(dict.fromkeys(unchecked)))
 
 
 def whole_domain_template(domain: str, wanted: str) -> str:

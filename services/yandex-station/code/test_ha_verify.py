@@ -69,6 +69,24 @@ class OnOff(unittest.TestCase):
         result = verdict("light", "turn_off", {"entity_id": ["light.a", "light.b"]}, {"light.a": state("light.a", "off"), "light.b": None})
         self.assertEqual((result.result, result.reason), ("pending", "state_unreadable"))
 
+    def test_a_lamp_that_cannot_report_the_attribute_is_not_held_to_it(self):
+        kelvin = {"entity_id": "light.rgb", "color_temp_kelvin": 2700}
+        colour_only = state("light.rgb", "on", supported_color_modes=["rgb"], color_mode="rgb")
+        result = verdict("light", "turn_on", kelvin, {"light.rgb": colour_only})
+        self.assertEqual((result.result, result.unchecked), ("ok", ("color_temp_kelvin",)))   # on is confirmed, the colour is reported as not checkable
+        dim = {"entity_id": "light.plug", "brightness_pct": 50}
+        on_off = verdict("light", "turn_on", dim, {"light.plug": state("light.plug", "on", supported_color_modes=["onoff"])})
+        self.assertEqual((on_off.result, on_off.unchecked), ("ok", ("brightness",)))      # on is confirmed, the level never can be
+        both = verdict("light", "turn_on", {**dim, "color_temp_kelvin": 2700},
+                       {"light.plug": state("light.plug", "on", supported_color_modes=["onoff"])})
+        self.assertEqual((both.result, both.unchecked), ("ok", ("brightness", "color_temp_kelvin")))
+
+    def test_the_wanted_temperature_is_the_end_of_the_range_of_the_lamp(self):
+        cold = {"entity_id": "light.lamp", "color_temp_kelvin": 6500}
+        lamp = {"supported_color_modes": ["color_temp"], "min_color_temp_kelvin": 2200, "max_color_temp_kelvin": 4000}
+        self.assertEqual(verdict("light", "turn_on", cold, {"light.lamp": state("light.lamp", "on", color_temp_kelvin=4000, **lamp)}).result, "ok")
+        self.assertEqual(verdict("light", "turn_on", cold, {"light.lamp": state("light.lamp", "on", color_temp_kelvin=2700, **lamp)}).result, "failed")
+
 
 class OtherDomains(unittest.TestCase):
     def test_climate_mode_and_setpoint(self):
@@ -152,6 +170,15 @@ class StateText(unittest.TestCase):
         self.assertEqual(ha_verify.state_text(state("media_player.m", "playing", volume_level=0.3, is_volume_muted=True)),
                          "playing vol 0.30 muted")
         self.assertEqual(ha_verify.state_text(None), "?")
+
+
+class EntityIds(unittest.TestCase):
+    def test_every_listed_entity_is_returned_however_many_but_only_few_are_polled(self):
+        many = [f"light.l{i}" for i in range(ha_verify.MAX_ENTITIES + 1)]
+        self.assertEqual(ha_verify.entity_ids({"entity_id": many}), tuple(many))
+        self.assertIsNone(ha_verify.targets({"entity_id": many}))
+        self.assertIsNone(ha_verify.entity_ids({"entity_id": "all"}))
+        self.assertIsNone(ha_verify.entity_ids({"area_id": "kitchen", "entity_id": "light.a"}))
 
 
 if __name__ == "__main__":

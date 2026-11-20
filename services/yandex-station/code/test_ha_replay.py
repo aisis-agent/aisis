@@ -16,13 +16,14 @@ from unittest.mock import AsyncMock
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from test_hacli_verify import Stack     # first: it points ha-cli's files at a scratch directory before `hacli` is imported
+
 import ha_actions
 import ha_fakes
 import ha_action_log
 import hacli
 from adapter import Adapter
 from test_ha_actions import AREA_ENTITIES, PLAYER_AREAS, STATES, LIVING
-from test_hacli_verify import Stack
 
 CLIP_TEXT = "выключи свет"
 
@@ -123,6 +124,24 @@ class ClipReplay(Stack, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text, ha_actions.REPLY_QUEUED)
         self.assertNotIn("перезагруж", text)
         self.assertGreaterEqual(len(hacli._queue), 1)
+
+    async def test_a_mode_and_its_setpoint_queued_during_an_outage_replay_in_order(self):
+        """set_hvac_mode must reach Home Assistant before the set_temperature that depends on it, as they were sent."""
+        actions = ha_actions.HaActions(self.adapter._ha_get_json, self.adapter._ha_post_json)
+        self.ha.script("light.turn_on", state_after=0.0, respond_after=0.0)
+        await actions.run("ha.light_brightness", {"percent": 50, "room": None}, LIVING)      # warm the registry and state caches
+        self.ha.stop_listening()
+        text = await actions.run("ha.climate", {"room": None, "mode": "heat", "temperature": 30}, LIVING)
+        self.assertEqual(text, ha_actions.REPLY_QUEUED)
+        self.assertEqual([(path.removeprefix("/api/services/"), body.get("hvac_mode", body.get("temperature"))) for path, body, _ in hacli._queue],
+                         [("climate/set_hvac_mode", "heat"), ("climate/set_temperature", 30)])
+        self.ha.start_listening()
+        await asyncio.get_running_loop().run_in_executor(None, hacli.probe_once)
+        self.assertEqual(hacli._queue, [])
+        climate = [(path.removeprefix("/api/services/"), body) for path, body in self.ha.calls("/api/services/climate/")]
+        self.assertEqual(climate, [("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "heat"}),
+                                   ("climate/set_temperature", {"entity_id": "climate.kondei_1", "temperature": 30})])
+        self.assertEqual([r["service"] for r in self.records("replay")], ["climate.set_hvac_mode", "climate.set_temperature"])
 
 
 if __name__ == "__main__":

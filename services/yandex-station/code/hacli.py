@@ -78,9 +78,13 @@ CLIENT_TIMEOUT_S = 2.0
 # and the call thread goes on after the caller was answered (the late result is journalled).
 CALL_BUDGET_S = 2.5
 CALL_TIMEOUT_S = 2.3
+LATE_VERIFY_TOTAL_S = 6.0   # a call the budget could not confirm is looked at again this long after it was sent (background)
+LATE_POLL_S = 0.5
+LATE_VERIFY_MAX = 4         # at most this many background looks at once
 POLL_FIRST_S = 0.2      # the first state check comes this long after the call left
 POLL_EVERY_S = 0.25
 STATE_READ_S = 0.6      # one state read must not eat the budget
+FINAL_PROBE_S = 0.2     # the last look at Home Assistant before an answer without a verdict: it must fit between CALL_BUDGET_S and the callers' 3 s
 BEFORE_READ_S = 0.5    # the state read before the call: it may not delay the call by more than this
 DOWN_CONFIRM_S = 0.25   # a second look this long after a call that found Home Assistant gone
 UNRESPONSIVE_S = 5.0   # no answer to anything for this long: Home Assistant is down, cause unknown (less: slow)
@@ -99,6 +103,11 @@ OUTAGE_WINDOW = 40
 DOWN_KINDS = frozenset({'refused', 'reset', 'dns', 'unreachable', 'starting'})
 
 _lock = threading.Lock()
+_late_slots = threading.BoundedSemaphore(LATE_VERIFY_MAX)
+# Only calls that never connected (refused/dns/unreachable) are queued, so none of them ran, and they replay first in, first out.
+# Known limitation: nothing orders a replay against a NEWER live command on the same device that reached Home Assistant first;
+# the older queued write would land after it (tracked as a hardening ticket). Dropping queued entries by entity is not the answer:
+# it would drop prerequisites (set_hvac_mode before set_temperature) and targets the newer command did not touch.
 _queue: list[tuple[str, dict | None, str]] = []  # (path, body, action id) service calls waiting for Home Assistant
 _wake = threading.Event()  # set when a request saw trouble: probe now, then fast
 
@@ -124,6 +133,7 @@ class Reply:
     raw: bytes = b''
     error: str | None = None  # why nothing came back (timeout|refused|reset|dns|unreachable|ssl|other), or `starting` on a 503 «starting»
     ms: int = 0
+    done_at: float = 0.0     # time.monotonic() when the request ended (0: not known)
 
     @property
     def down_evidence(self) -> bool:
@@ -133,6 +143,13 @@ class Reply:
     @property
     def answered(self) -> bool:
         return self.status > 0 and not self.down_evidence
+
+    @property
+    def never_sent(self) -> bool:
+        """The call certainly did not reach Home Assistant: no connection was made (refused, no such host, no route), so it is safe
+        to send again. Anything after the connection (a timeout, a reset, a gateway answer whatever its text) leaves it unknown
+        whether the service ran."""
+        return self.error in ('refused', 'dns', 'unreachable')
 
     @property
     def what(self) -> str:
@@ -157,6 +174,13 @@ def _classify(err: BaseException) -> str:
     return 'other'
 
 
+def _finished(reply: Reply, started: float) -> Reply:
+    """Stamp the reply with when its request ended (monotonic), so that a state read can be told to have started before or after it."""
+    reply.done_at = time.monotonic()
+    reply.ms = int((reply.done_at - started) * 1000)
+    return reply
+
+
 def ha_call(path: str, body: dict | None = None, timeout: float = HA_TIMEOUT_S) -> Reply:
     started = time.monotonic()
     req = urllib.request.Request(HA_URL + path, method='GET' if body is None else 'POST')
@@ -173,9 +197,9 @@ def ha_call(path: str, body: dict | None = None, timeout: float = HA_TIMEOUT_S) 
         with e:
             status, raw = e.code, e.read()
     except Exception as err:
-        return Reply(0, b'', _classify(err), int((time.monotonic() - started) * 1000))
+        return _finished(Reply(0, b'', _classify(err)), started)
     starting = status == 503 and b'starting' in raw[:400].lower()
-    return Reply(status, raw, 'starting' if starting else None, int((time.monotonic() - started) * 1000))
+    return _finished(Reply(status, raw, 'starting' if starting else None), started)
 
 
 def read_cache() -> dict:
@@ -388,8 +412,8 @@ def _check(expect: ha_verify.Expectation, entities: tuple[str, ...], timeout: fl
 class ServiceCall:
     """One `POST /api/services/<domain>/<service>`: state before, the call, state checks until the device agrees or the budget ends."""
 
-    def __init__(self, path: str, body: dict | None) -> None:
-        self.path, self.body = path, body
+    def __init__(self, path: str, body: dict | None, query: str = '') -> None:
+        self.path, self.body, self.query = path, body, query
         self.started = time.monotonic()
         self.wall = time.time()
         self.id = secrets.token_hex(4)
@@ -408,18 +432,22 @@ class ServiceCall:
         self.down_look: Reply | None = None   # the second look that confirmed Home Assistant gone
         self.rejected = False
         self.verified_ms: int | None = None
+        self.read_at = 0.0               # when the state read behind `verdict` started
+        self.read_down = 0               # polls in a row whose every state read found Home Assistant gone
 
     def _left(self) -> float:
         return self.started + CALL_BUDGET_S - time.monotonic()
 
     def run(self) -> Answer:
-        before_replies: list[Reply] = []
-        if self.entities:
+        self.expect = ha_verify.expectation(self.domain, self.service, self.body) if self.domain else None
+        if self.entities and (self.expect is not None or self.service == 'toggle'):
+            # The state before the call tells a toggle's goal and whether the device already was where the call leads; a call with
+            # nothing to check is not delayed by it.
             self.before, before_replies = read_states(self.entities, BEFORE_READ_S)
             self.reads_answered = sum(1 for reply in before_replies if reply.answered)
-        self.expect = ha_verify.expectation(self.domain, self.service, self.body, self.before) if self.domain else None
+            self.expect = ha_verify.expectation(self.domain, self.service, self.body, self.before)
         self.already = bool(self.expect and self.entities and self.expect.check(self.before).result == 'ok')
-        self.call = _Call(self.path, self.body, self.id)
+        self.call = _Call(self.path + self.query, self.body, self.id)
         self._watch()
         return self._answer()
 
@@ -440,22 +468,78 @@ class ServiceCall:
             else:
                 call.done.wait(max(0.0, min(pause, self._left())))     # a quick answer is looked at at once
             reply = call.reply
+            if reply is not None and 400 <= reply.status < 500:
+                self.rejected = True             # its refusal came while we waited: a state that matches does not make it a success
+                return
             if reply is not None and reply.down_evidence:
                 look = _probe(min(STATE_READ_S, max(0.1, self._left())))
                 if look.down_evidence:
-                    self.down_look = look        # the call found Home Assistant gone and so does this second look
+                    self.down_look, self.verdict = look, None     # the call found Home Assistant gone and so does this second look
                     return
             if self.expect is None:
                 if call.done.is_set():
                     return                       # Home Assistant answered like a gateway but is there, and there is no state to look at
                 continue
+            read_at = time.monotonic()
             verdict, states, replies = _check(self.expect, self.entities, min(STATE_READ_S, max(0.1, self._left())))
-            self.verdict, self.states = verdict, states
+            self.verdict, self.states, self.read_at = verdict, states, read_at
             self.attempts += 1
             self.reads_answered += sum(1 for r in replies if r.answered)
+            # Home Assistant may go away while the call is in flight: two polls in a row where nothing but «gone» came back say so.
+            # Counted on every poll (a successful read breaks the streak, a matching state included) and only while Home Assistant
+            # has not answered the call: one that took it and then went away (a restart) is not queued again, or a toggle would
+            # run twice. A call that merely timed out has not answered.
+            gone = replies and all(r.down_evidence for r in replies) and not (call.reply is not None and call.reply.answered)
+            self.read_down = self.read_down + 1 if gone else 0
+            if self.read_down >= 2:
+                self.down_look = replies[-1]
+                return
             if verdict.result == 'ok':
+                if self.already and not (call.reply is not None and call.reply.answered):
+                    # The device already was in the wanted state, so the state cannot show that Home Assistant took the call:
+                    # only its own answer can say whether it was refused. Keep watching (a refusal, an outage) until it comes.
+                    continue
                 self.verified_ms = int((time.monotonic() - call.sent) * 1000)
                 return
+
+    def _judge(self, reply: Reply | None, verdict: ha_verify.Verdict | None, ms: int, read_at: float,
+               late_open: bool | None = None) -> dict[str, Any] | None:
+        """The verify record for a state read (`read_at`: when it started) and the latest reply of Home Assistant; None when the state
+        could not be read. The foreground answer and the late background look both judge through this."""
+        if reply is not None and 400 <= reply.status < 500:
+            return {'result': 'skipped', 'reason': 'rejected'}
+        if verdict is None or verdict.result not in ('ok', 'failed'):
+            return None
+        if verdict.result == 'ok':
+            if self.already and not (reply is not None and reply.answered):
+                # The device was in the wanted state before the call, so its state proves nothing: only Home Assistant's answer does.
+                return {'result': 'unknown', 'reason': 'already_in_state_unanswered', 'ms': ms, 'after': verdict.after}
+            verify: dict[str, Any] = {'result': 'ok', 'reason': 'already_in_state' if self.already else 'state_matched',
+                                      'ms': self.verified_ms if self.verified_ms is not None else ms, 'after': verdict.after}
+            if verdict.unchecked:
+                verify['unchecked'] = list(verdict.unchecked)
+            return verify
+        if not self._mismatch_is_final(verdict, reply, read_at, late_open):
+            # A climate unit takes seconds: the old mode shows on the state while Home Assistant's call is still running, and the new
+            # one a moment after the budget (2026-11-15, 2026-11-20). A mismatch that Home Assistant had not answered is no failure.
+            return {'result': 'unknown', 'reason': 'not_yet_confirmed', 'ms': ms, 'after': verdict.after}
+        return {'result': 'failed', 'reason': verdict.reason, 'ms': ms, 'after': verdict.after, 'wrong': verdict.wrong}
+
+    def _deferrable(self, verdict: ha_verify.Verdict) -> bool:
+        """A mismatch that may still resolve: every mismatched entity is a climate unit (a lamp obeys at once, a unit takes seconds)."""
+        return (verdict.reason != 'device_unavailable' and bool(verdict.wrong)
+                and all(entity.startswith('climate.') for entity in verdict.wrong))
+
+    def _mismatch_is_final(self, verdict: ha_verify.Verdict, reply: Reply | None, read_at: float, late_open: bool | None = None) -> bool:
+        """Whether a state that is not the wanted one is a failure. `late_open`: None in the answer to the caller (a mismatch that
+        may still resolve, a climate unit's, is deferred; any other is final), True while the background look has time left (never
+        final), False at its deadline. A deferred mismatch is a failure only once Home Assistant answered the call ok and the state
+        was read after that answer completed."""
+        if late_open:
+            return False
+        if late_open is None and not self._deferrable(verdict):
+            return True
+        return reply is not None and reply.answered and read_at >= reply.done_at
 
     def _answer(self) -> Answer:
         call, expect, verdict = self.call, self.expect, self.verdict
@@ -466,19 +550,24 @@ class ServiceCall:
         verify: dict[str, Any] = {'result': 'skipped', 'reason': 'not_verifiable'}
         status, payload, why = 200, b'', 'passed_through'
 
-        if verdict is not None and verdict.result == 'ok':
-            verify = {'result': 'ok', 'reason': 'already_in_state' if self.already else 'state_matched', 'ms': self.verified_ms,
-                      'after': verdict.after}
-            payload = reply.raw if reply is not None and 200 <= reply.status < 300 else json.dumps([s for s in self.states.values() if s]).encode()
-            why = 'verified_state'
-        elif self.rejected and reply is not None:
-            verify = {'result': 'skipped', 'reason': 'rejected'}
+        judged = self._judge(reply, verdict, since_sent, self.read_at)
+        if judged is not None and judged['reason'] == 'rejected':      # judged on the latest answer: a refusal can arrive while the state is read
+            verify = judged
             status, payload, why = reply.status, reply.raw, 'ha_rejected'
+        elif self.down_look is not None and reply is not None and reply.answered:
+            # Home Assistant took the call (its answer arrived after the outage was seen): it ran, so it is never queued again.
+            verify = {'result': 'unknown', 'reason': 'ha_down_after_answer', 'ms': since_sent}
+            status, payload, why = 504, json.dumps({'error': 'ha_down_after_answer', 'verify': verify}).encode(), 'unverified_in_flight'
+        elif self.down_look is not None and not (reply is not None and reply.never_sent):
+            # It is not known whether the call ran: still in flight, or it ended in a timeout, a reset or a gateway answer. Sending it
+            # again could undo or repeat it, whatever the service: only a call that never connected is queued.
+            verify = {'result': 'unknown', 'reason': 'ha_down_in_flight', 'ms': since_sent}
+            status, payload, why = 504, json.dumps({'error': 'ha_down_in_flight', 'verify': verify}).encode(), 'unverified_in_flight'
         elif self.down_look is not None:
-            evidence = (reply.error if reply is not None and reply.error else None) or self.down_look.error or f'http_{self.down_look.status}'
+            evidence = self.down_look.error or f'http_{self.down_look.status}'
             verify = {'result': 'unknown', 'reason': 'ha_down_observed', 'ms': since_sent}
             with _lock:
-                _queue.append((self.path, self.body, self.id))
+                _queue.append((self.path + self.query, self.body, self.id))
                 position = len(_queue)
             eta = recovery_eta_s()
             status = 202
@@ -488,12 +577,18 @@ class ServiceCall:
         elif expect is None and reply is not None and reply.status and not reply.down_evidence:
             status, payload = reply.status, reply.raw    # Home Assistant answered and nothing in the state could say otherwise
         elif expect is None:
-            reason = 'no_answer_unverifiable' if _probe(0.4).answered else 'ha_no_answer'
+            reason = 'no_answer_unverifiable' if _probe(FINAL_PROBE_S).answered else 'ha_no_answer'
             verify = {'result': 'unknown', 'reason': reason, 'ms': since_sent}
             status, payload, why = 504, json.dumps({'error': reason, 'verify': verify}).encode(), 'unverified_no_answer'
-        elif verdict is not None and verdict.result == 'failed':
-            verify = {'result': 'failed', 'reason': verdict.reason, 'ms': since_sent, 'after': verdict.after, 'wrong': verdict.wrong}
-            status, payload, why = 502, json.dumps({'error': verdict.reason, 'verify': verify}).encode(), 'state_not_as_expected'
+        elif judged is not None:
+            verify = judged
+            if judged['result'] == 'ok':
+                payload = reply.raw if reply is not None and 200 <= reply.status < 300 else json.dumps([s for s in self.states.values() if s]).encode()
+                why = 'verified_state'
+            else:
+                failed = judged['result'] == 'failed'
+                status, why = (502, 'state_not_as_expected') if failed else (504, 'unverified_no_answer')
+                payload = json.dumps({'error': judged['reason'], 'verify': judged}).encode()
         else:
             reason = 'ha_no_answer' if self.reads_answered == 0 else 'state_unreadable'
             verify = {'result': 'unknown', 'reason': reason, 'ms': since_sent}
@@ -505,6 +600,8 @@ class ServiceCall:
         if verify.get('ms') is not None:
             headers['X-Aisis-Verify-Ms'] = str(verify['ms'])
         headers['X-Aisis-Verify-Attempts'] = str(self.attempts)
+        if verify.get('unchecked'):
+            headers['X-Aisis-Verify-Unchecked'] = ','.join(verify['unchecked'])
         if verify.get('after'):
             headers['X-Aisis-Verified-State'] = _ascii(','.join(f'{k}={v}' for k, v in list(verify['after'].items())[:5]))[:240]
         headers['X-Aisis-Ha-Status'] = reply.what if reply is not None else 'pending'
@@ -516,13 +613,54 @@ class ServiceCall:
             'before': {k: ha_verify.state_text(v) for k, v in self.before.items()}, 'call': _call_record(reply),
             'verify': verify, 'reply': {'status': status, 'why': why}, 'ms': int((time.monotonic() - self.started) * 1000)}
         JOURNAL.write(record)
+        if verify['result'] == 'unknown' and status != 202 and self.down_look is None and expect is not None:
+            self._start_late_verification()
         if reply is None:
             call.caller_answered()
         return Answer(status, payload, headers, record)
 
+    def _start_late_verification(self) -> None:
+        """A call the budget could not confirm is looked at again for a few seconds in the background and what the device did is
+        journalled. At most LATE_VERIFY_MAX of these run at once: a busy moment drops the look, it never queues one."""
+        if not _late_slots.acquire(blocking=False):
+            return
+        try:
+            threading.Thread(target=self._late_verification, name='ha-late', daemon=True).start()
+        except BaseException:
+            _late_slots.release()
+            raise
 
-def service_call(path: str, body: dict | None) -> Answer:
-    return ServiceCall(path, body).run()
+    def _late_verification(self) -> None:
+        expect, call = self.expect, self.call
+        assert expect is not None and call is not None
+        try:
+            deadline = self.started + LATE_VERIFY_TOTAL_S
+            while True:
+                at_deadline = time.monotonic() >= deadline
+                read_at = time.monotonic()
+                verdict, states, _ = _check(expect, self.entities, STATE_READ_S)
+                ms = int((time.monotonic() - call.sent) * 1000)
+                verify = self._judge(call.reply, verdict, ms, read_at, late_open=not at_deadline)
+                if (verify is not None and verify['result'] != 'unknown') or at_deadline:
+                    break           # any mismatch, a missing answer or an unreadable state is waited out until the deadline
+                time.sleep(LATE_POLL_S)
+            record: dict[str, Any] = {
+                'kind': 'late_verify', 'ts': round(self.wall, 3), 'done_ts': round(time.time(), 3), 'id': self.id,
+                'service': f'{self.domain}.{self.service}',
+                'entities': [f'{expect.whole_domain}.*'] if expect.whole_domain else list(self.entities),
+                'data': self.body if isinstance(self.body, dict) else {}, 'expect': expect.want,
+                'before': {k: ha_verify.state_text(v) for k, v in self.before.items()}, 'call': _call_record(call.reply),
+                'verify': verify or {'result': 'unknown', 'reason': 'state_unreadable', 'ms': ms}, 'ms': ms}
+            if any(entity.startswith('climate.') for entity in self.entities):
+                record['climate'] = {entity: {'hvac_mode': state.get('state'), 'temperature': (state.get('attributes') or {}).get('temperature')}
+                                     for entity, state in states.items() if isinstance(state, dict)}
+            JOURNAL.write(record)
+        finally:
+            _late_slots.release()
+
+
+def service_call(path: str, body: dict | None, query: str = '') -> Answer:
+    return ServiceCall(path, body, query).run()
 
 
 # -- the background probe, the queue replay --------------------------------------------------------------------------------
@@ -549,7 +687,7 @@ def probe_once() -> None:
     observe(reply)
     pending: list[tuple[str, dict | None, str]] = []
     with _lock:
-        if reply.answered and _queue:
+        if reply.status == 200 and _queue:
             pending, _queue[:] = _queue[:], []
     for path, body, action_id in pending:
         _replay(path, body, action_id)
@@ -559,7 +697,7 @@ def _replay(path: str, body: dict | None, action_id: str) -> None:
     """A call that waited for Home Assistant's return: sent, then checked against the state like any other."""
     sent = ha_call(path, body, HA_TIMEOUT_S)
     observe(sent)
-    parts = path.split('/')
+    parts = path.partition('?')[0].split('/')
     found = ha_verify.targets(body)
     entities = found[0] if found else ()
     expect = ha_verify.expectation(parts[3], parts[4], body) if len(parts) >= 5 else None
@@ -572,6 +710,8 @@ def _replay(path: str, body: dict | None, action_id: str) -> None:
             time.sleep(POLL_EVERY_S)
             verdict = _check(expect, entities, STATE_READ_S)[0]
         record['verify'] = {'result': verdict.result, 'reason': verdict.reason, 'after': verdict.after}
+        if verdict.unchecked:
+            record['verify']['unchecked'] = list(verdict.unchecked)
     JOURNAL.write(record)
 
 
@@ -645,8 +785,8 @@ class Handler(BaseHTTPRequestHandler):
                     return
             self._send(404, b'{"error": "not in cache"}', {'X-Aisis-Cache': 'stale'})
             return
-        # Other GETs: straight proxy.
-        reply = ha_call(path, timeout=CLIENT_TIMEOUT_S)
+        # Other GETs: straight proxy, the query string (`/api/history/period/...?filter_entity_id=`, the logbook's `entity=`) included.
+        reply = ha_call(self.path, timeout=CLIENT_TIMEOUT_S)
         observe(reply)
         if reply.status:
             self._send(reply.status, reply.raw)
@@ -683,7 +823,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._unreachable(reply)
                 return
-            answer = service_call(path, body)
+            answer = service_call(path, body, query)
             self._send(answer.status, answer.body, answer.headers)
             return
         reply = ha_call(path + query, body, CLIENT_TIMEOUT_S)

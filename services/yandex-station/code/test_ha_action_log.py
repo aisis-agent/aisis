@@ -54,12 +54,33 @@ class Journal(unittest.TestCase):
         self.assertLessEqual(len(line), ha_action_log.MAX_LINE)
         self.assertTrue(json.loads(line)["cut"])
 
+    def test_an_oversized_late_record_still_reads_back_as_json(self):
+        climate = {f"climate.{'x' * 200}{i}": {"hvac_mode": "cool", "temperature": 24} for i in range(8)}
+        self.journal().write({"kind": "late_verify", "ts": 1000.0, "id": "a1", "service": "climate.set_hvac_mode", "entities": list(climate),
+                              "verify": {"result": "ok", "reason": "state_matched", "ms": 4000}, "climate": climate})
+        found = ha_action_log.read(self.path, 999.0, 1001.0)
+        self.assertEqual([(r["kind"], r["id"], r["cut"]) for r in found], [("late_verify", "a1", True)])
+        self.assertEqual(found[0]["verify"]["result"], "ok")
+
     def test_secrets_never_reach_the_journal(self):
         self.journal().write(action(data={"token": "abcdef", "message": "привет", "brightness_pct": 30}))
         with open(self.path, encoding="utf-8") as fh:
             record = json.loads(fh.read())
         self.assertNotIn("token", record["data"])
         self.assertEqual(record["data"]["brightness_pct"], 30)
+
+    def test_lock_and_alarm_codes_never_reach_the_journal(self):
+        self.journal().write(action(data={"code": "4711", "pin": "1", "color_name": "red"}))
+        with open(self.path, encoding="utf-8") as fh:
+            record = json.loads(fh.read())
+        self.assertEqual(record["data"], {"color_name": "red"})
+
+    def test_a_lone_surrogate_in_a_text_does_not_lose_the_record_or_break_reading(self):
+        self.journal().write(action(data={"effect": "a\udc80b"}))
+        self.assertEqual(len(ha_action_log.read(self.path, 0, 1e12)), 1)
+        with open(self.path, "ab") as fh:
+            fh.write(b'{"ts":1,"x":"\xd0"}\n')       # a Cyrillic letter cut in half by a short write
+        self.assertEqual(len(ha_action_log.read(self.path, 0, 1e12)), 2)
 
     def test_unwritable_path_never_breaks_the_caller(self):
         journal = ha_action_log.Journal(os.path.join(self.tmp.name, "missing", "dir", "x.jsonl"), stream=self.err)
@@ -90,6 +111,12 @@ class RussianLines(unittest.TestCase):
         record = action(call={"status": 200, "ms": 120}, verify={"result": "ok", "reason": "state_matched", "ms": 310,
                                                                   "after": {"light.studio": "off"}})
         self.assertEqual(ha_action_log.action_line(record), "HA light.turn_off light.studio → проверено: light.studio выкл за 0.3 с")
+
+    def test_partial_verification_is_not_called_plain_verification(self):
+        record = action(call={"status": 200, "ms": 120}, verify={"result": "ok", "reason": "state_matched", "ms": 310,
+                                                                  "after": {"light.studio": "on"}, "unchecked": ["color_temp_kelvin"]})
+        self.assertEqual(ha_action_log.action_line(record),
+                         "HA light.turn_off light.studio → проверено частично: light.studio вкл за 0.3 с; не проверено: color_temp_kelvin")
 
     def test_unconfirmed_when_ha_acknowledged_but_the_device_did_not_change(self):
         record = action(call={"status": 200, "ms": 120}, verify={"result": "failed", "reason": "state_mismatch", "ms": 2400,

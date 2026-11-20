@@ -445,7 +445,21 @@ class Outage(Base):
             return HaReply(next(statuses))
 
         a = LivingRoomActions(self.ha.get, post, ttl=60.0, clock=self.now)
-        self.assertEqual(await a.run("ha.light_brightness", {"percent": 50, "room": "living"}), ha_actions.REPLY_FAILED)
+        self.assertEqual(await a.run("ha.light_brightness", {"percent": 50, "room": "living"}),
+                         f"{ha_actions.REPLY_FAILED} {ha_actions.REPLY_QUEUED_UNKNOWN}")      # the queued lamp still changes after recovery: say so
+
+    async def test_a_failure_before_a_queued_call_still_reports_the_queued_work(self):
+        self.make()
+        statuses = iter([500, 202])
+
+        async def post(path, body):
+            if path == "/api/template":
+                return await self.ha.post(path, body)
+            return HaReply(next(statuses))
+
+        a = LivingRoomActions(self.ha.get, post, ttl=60.0, clock=self.now)
+        self.assertEqual(await a.run("ha.light_brightness", {"percent": 50, "room": "living"}),
+                         f"{ha_actions.REPLY_FAILED} {ha_actions.REPLY_QUEUED_UNKNOWN}")
 
 
 class EquipmentLights(Base):
@@ -556,6 +570,19 @@ class Verification(Base):
         text, record = await self.run_traced(HaReply(200))
         self.assertEqual((text, record["reply_why"]), ("Яркость 40 процентов.", "ha_acknowledged"))
 
+    async def test_a_partially_verified_call_is_not_counted_fully_verified(self):
+        reply = verdict()
+        reply.verify["unchecked"] = ["color_temp_kelvin"]
+        text, record = await self.run_traced(reply)
+        self.assertEqual(record["reply_why"], "ha_partially_verified")
+        self.assertEqual(record["calls"][0]["verify"]["unchecked"], ["color_temp_kelvin"])
+
+    async def test_the_unchecked_header_survives_parsing(self):
+        parsed = HaReply.from_response(200, None, {"X-Aisis-Verify": "ok", "X-Aisis-Verify-Reason": "state_matched",
+                                                   "X-Aisis-Verify-Unchecked": "color_temp_kelvin,rgb_color"})
+        self.assertEqual(parsed.verify["unchecked"], ["color_temp_kelvin", "rgb_color"])
+        self.assertNotIn("unchecked", HaReply.from_response(200, None, {"X-Aisis-Verify": "ok"}).verify)
+
     async def test_ha_cli_unreachable_is_neutral(self):
         async def post(path, body):
             if path.startswith("/api/services/"):
@@ -577,6 +604,30 @@ class Verification(Base):
         text = await a.run("ha.climate", {"room": "upstairs", "mode": "heat", "temperature": 28})
         self.assertEqual(text, ha_actions.REPLY_NOT_CONFIRMED)
         self.assertEqual(len(self.ha.services), 1)            # the setpoint is not sent after a mode that did not take
+
+    async def test_a_lamp_that_is_not_confirmed_does_not_stop_the_other_lamps(self):
+        replies = [verdict(502, "failed", "state_mismatch"), verdict(200, "ok", "state_matched")]
+
+        class Sequence(FakeHa):
+            async def post(self, path, body):
+                if path.startswith("/api/services/"):
+                    self.services.append((path, body))
+                    return replies.pop(0)
+                return await super().post(path, body)
+
+        self.now = Now()
+        self.ha = Sequence()
+        a = LivingRoomActions(self.ha.get, self.ha.post, ttl=60.0, clock=self.now)
+        text = await a.run("ha.light_color", {"color": "warm", "room": "living"})
+        self.assertEqual(text, ha_actions.REPLY_NOT_CONFIRMED)
+        self.assertEqual([body["entity_id"] for _, body in self.svc()], ["light.living_lamp", "light.living_strip"])
+
+    async def test_a_reply_that_called_no_service_is_not_traced_as_acknowledged(self):
+        a = self.make()
+        with mock.patch.object(utterance_trace, "note") as note:
+            await a.run("ha.light_brightness", {"percent": 50, "room": "studio"})   # the studio has only an on/off plug
+        self.assertEqual(self.svc(), [])
+        self.assertIn(mock.call(reply_why="not_executed"), note.call_args_list)
 
 
 class HeadersToReply(unittest.TestCase):

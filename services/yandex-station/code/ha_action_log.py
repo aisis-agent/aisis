@@ -11,6 +11,9 @@ Records (all carry `v`, `kind`, `ts`):
   ha_status  from, to (up|slow|down), error, down_s: Home Assistant's availability as ha-cli observed it
   replay     id (of the queued action), status/error, ms: a call that waited for Home Assistant's return and was sent again
   ha_response id, call {status|error, ms}: how a call that outlived its caller's answer finished
+  late_verify id (of the action), service, entities, data, before, call, verify {result, reason, after, wrong}, climate {entity:
+             {hvac_mode, temperature}}, ms (since the call was sent): the device state a few seconds after a call the budget could
+             not confirm (verify.unknown), looked at in the background
 """
 from __future__ import annotations
 
@@ -25,7 +28,7 @@ VERSION = 1
 MAX_LINE = 1800              # a journal line stays well inside journald's line limit
 MAX_BYTES = 1_000_000
 BACKUPS = 2
-_SECRET = re.compile(r"token|secret|password|passwd|authorization|api[_-]?key|bearer", re.IGNORECASE)
+_SECRET = re.compile(r"token|secret|password|passwd|authorization|api[_-]?key|bearer|(?:^|[_-])(?:code|pin|passcode)(?:$|[_-])", re.IGNORECASE)
 _VALUE_CHARS = 40
 
 ERROR_RU = {"timeout": "таймаут", "refused": "соединение отклонено", "reset": "соединение сброшено", "dns": "имя не найдено",
@@ -55,7 +58,7 @@ def _bounded(record: dict[str, Any]) -> str:
     if len(line) <= MAX_LINE:
         return line
     record = dict(record, cut=True)
-    for field in ("data", "before"):
+    for field in ("data", "before", "climate"):
         record.pop(field, None)
         line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
         if len(line) <= MAX_LINE:
@@ -88,7 +91,7 @@ class Journal:
                 pass
             try:
                 self._append(line + "\n")
-            except OSError:
+            except (OSError, ValueError):
                 pass
 
     def _append(self, text: str) -> None:
@@ -96,11 +99,14 @@ class Journal:
             size = os.path.getsize(self.path)
         except OSError:
             size = 0
-        if size and size + len(text.encode("utf-8")) > self.max_bytes:
+        data = text.encode("utf-8", "replace")      # a lone surrogate in a client's text must not lose the record
+        if size and size + len(data) > self.max_bytes:
             self._rotate()
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
-            os.write(fd, text.encode("utf-8"))
+            written = 0
+            while written < len(data):
+                written += os.write(fd, data[written:])
         finally:
             os.close(fd)
 
@@ -116,7 +122,7 @@ def read(path: str | os.PathLike, since: float, until: float, backups: int = BAC
     found: list[dict[str, Any]] = []
     for name in [f"{path}.{index}" for index in range(backups, 0, -1)] + [str(path)]:
         try:
-            with open(name, encoding="utf-8") as fh:
+            with open(name, encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     try:
                         record = json.loads(line)
@@ -159,6 +165,8 @@ def verdict_line(verify: dict[str, Any], *, ha: str | None = None, ha_ms: Any = 
     note = _ha_note(ha, ha_ms)
     if result == "ok":
         tail = f"проверено: {_entities_ru(verify.get('after') or {}) or 'все цели'} за {_seconds(verify.get('ms'))}"
+        if verify.get("unchecked"):
+            tail = "проверено частично: " + tail.removeprefix("проверено: ") + f"; не проверено: {', '.join(verify['unchecked'])}"
         if reason == "already_in_state":
             note = "уже было в этом состоянии"
     elif result == "failed":
@@ -171,6 +179,10 @@ def verdict_line(verify: dict[str, Any], *, ha: str | None = None, ha_ms: Any = 
     elif result == "unknown" and reason == "ha_down_observed":
         tail = f"HA недоступен ({ERROR_RU.get(down or ha or '', down or ha or 'нет связи')})"
         note = "команда в очереди до возвращения HA" if queued else ""
+    elif result == "unknown" and reason in ("ha_down_in_flight", "ha_down_after_answer"):
+        tail = "не проверено: HA пропал, пока команда выполнялась; в очередь не поставлена"
+    elif result == "unknown" and reason == "not_yet_confirmed":
+        tail = f"пока не подтверждено: {_entities_ru(verify.get('after') or {}) or 'состояние'}, устройство ещё меняется"
     elif result == "unknown":
         tail = f"не проверено: HA не ответил за {_seconds(verify.get('ms'))}"
     elif reason == "rejected":
@@ -190,7 +202,7 @@ def action_line(record: dict[str, Any]) -> str:
         return f"HA: {record.get('from')} → {record.get('to')}" + (f" ({ERROR_RU.get(error, error)})" if error else "")
     if kind == "replay":
         return f"HA повтор из очереди {record.get('service', '')} → {record.get('call', {}).get('status') or ERROR_RU.get(record.get('call', {}).get('error'), record.get('call', {}).get('error'))}"
-    if kind != "action":
+    if kind not in ("action", "late_verify"):
         return ""
     entities = list(record.get("entities") or [])
     shown = " ".join(entities[:3]) + (f" +{len(entities) - 3}" if len(entities) > 3 else "")
@@ -198,14 +210,18 @@ def action_line(record: dict[str, Any]) -> str:
     head = " ".join(part for part in (f"HA {record.get('service', '?')}", shown, data) if part)
     call = record.get("call") or {}
     ha = call.get("error") or (str(call["status"]) if "status" in call else None)
-    tail = verdict_line(record.get("verify") or {}, ha=ha, ha_ms=call.get("ms"), down=call.get("error"),
+    verify = record.get("verify") or {}
+    if kind == "late_verify":
+        verify = {**verify, "ms": record.get("ms")}
+    tail = verdict_line(verify, ha=ha, ha_ms=call.get("ms"), down=call.get("error"),
                         queued=(record.get("reply") or {}).get("status") == 202)
-    return f"{head} → {tail}"
+    return f"{'позже: ' if kind == 'late_verify' else ''}{head} → {tail}"
 
 
 # Why the reply was what it was (the reason codes of ha_actions.py `reply_why` and of the ha-cli journal `reply.why`).
 WHY_RU = {
     "ha_verified": "состояние устройства проверено и совпало",
+    "ha_partially_verified": "состояние проверено только частично: часть запроса по состоянию не видна",
     "verified_state": "состояние устройства проверено и совпало",
     "ha_acknowledged": "HA принял команду, состояние не проверялось",
     "passed_through": "ответ HA как есть: по состоянию проверить нечего",
@@ -241,7 +257,7 @@ def record_lines(records: list[dict[str, Any]], known: set[str] | None = None) -
                 out.append((3, "💬 причина ответа ha-cli: " + WHY_RU.get(why, why)))
         elif kind == "ha_status":
             out.append((1, "⚠ " + action_line(record)))
-        elif kind == "replay":
+        elif kind in ("replay", "late_verify"):
             out.append((3, "🔧 " + action_line(record)))
     return out
 
