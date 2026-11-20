@@ -20,6 +20,7 @@ The authoritative product definition is [docs/specs/000-master-spec.md](docs/spe
 - `docs/specs/` — product and subsystem specifications.
 - `docs/architecture/contracts.md` — typed contracts and discriminated unions.
 - `docs/architecture/repo-layout.md` — target (planned) repository layout, boundaries and deployment shape.
+- `docs/architecture/voice-stack-layers.md` — the live Yandex Station voice stack: layers, who answers a phrase, and which parts are own, forked or off the shelf.
 - `docs/research/` — verified platform constraints and existing-system notes.
 
 ## Design principles

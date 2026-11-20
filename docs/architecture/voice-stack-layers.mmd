@@ -1,0 +1,112 @@
+flowchart TB
+  subgraph S_DEVICE["1 DEVICE: firmware, protocol edge"]
+    direction LR
+    DEV(["<b>Yandex Station Mini</b> (rooted)<br/>vendor firmware + on-device spotters"])
+    KIT[["<b>aisis-station-kit</b> :18080/18443<br/>eQuasar sync, ADB enable<br/>fork of krevetkqqq/lite-kit"]]
+  end
+  subgraph S_GATEWAY["2 GATEWAY: network edge, transport"]
+    direction LR
+    DNS["<b>dns-relay</b><br/>overrides the Yandex names<br/>for the speaker only"]
+    TLS(["<b>tls-voice</b> nginx :443<br/>v3rt3p/https-proxy + our config"])
+    SW["<b>switch-prod</b> nginx :31115/6/4<br/>blue/green selector"]
+  end
+  subgraph S_QUASAR["3 QUASAR server (TypeScript): API, uniproxy, fast intents"]
+    direction LR
+    QCORE[["<b>quasar-server core</b><br/>fork of v3rt3p/quasar-server<br/>fefcd58 + patched files"]]
+    QFAST["<b>fast-intent layer</b><br/>own, not in git (#108)"]
+    QHOOK["<b>grammar hook + overlays</b><br/>speaker-room, weather-via-cli, volume-zero"]
+    PG(["<b>postgres 17.6</b> :31119"])
+  end
+  subgraph S_ASR["4 ASR: speech to text"]
+    direction TB
+    STT["<b>aisis-station-stt</b> :31121<br/>VAD, wake-window cut, clips"]
+    WH(["<b>wyoming-whisper</b> :10300 CUDA<br/>faster-whisper large-v3-turbo"])
+    WPT["<b>aisis-whisper-prompt.timer</b>"]
+  end
+  subgraph S_NLU["5 NLU, DIALOG, SKILLS: aisis-station-adapter :31117"]
+    direction TB
+    GR["<b>intent grammar + intent_route</b><br/>/intent/decide, ru.yaml, no model"]
+    MEM["<b>memory + utterance trace</b>"]
+    JEV{{"<b>Jev</b> advisory, OFF<br/>Vercel AI Gateway"}}
+    SK["<b>skills + executors</b><br/>weather, calc, timers, AC, music"]
+  end
+  subgraph S_TTS["6 TTS: text to audio out"]
+    direction TB
+    TTS["<b>adapter /v1/audio/speech</b><br/>OpenAI-style, ffmpeg to Opus"]
+    FISH{{"<b>Fish Audio</b> / Yandex TTS"}}
+  end
+  subgraph S_EXEC["7 EXECUTION: home, media, weather"]
+    direction LR
+    HA(["<b>Home Assistant</b> 2026.9.3<br/>odroid, docker"])
+    HACLI["<b>aisis-ha-cli</b> :8795<br/>state cache, offline queue"]
+    MA(["<b>Music Assistant</b> 2.10.4"])
+    WCLI[/"<b>weather-cli</b> own repo"/]
+    ASP["<b>aisis_speaker</b> HA component<br/>vendored, author UNKNOWN"]
+    REM[/"<b>remote_announcements</b>,<br/>ha-host-actions: own repos"/]
+  end
+  subgraph S_BRAIN["8 BRAIN: language model, no tools"]
+    direction TB
+    CP["<b>claude_primary.py</b> router"]
+    PM["<b>aisis-station-pm</b> :31118<br/>ChatGPT tab via CDP :9226"]
+    LLM{{"<b>Claude API</b> / <b>ChatGPT web</b>"}}
+  end
+  subgraph S_OPS["9 OPS: monitoring, deploy, feedback"]
+    direction LR
+    DASH["<b>aisis-dashboard</b> :8781"]
+    SPA>"<b>dashboard SPA source</b><br/>UNKNOWN repo"]
+    CLIP["<b>aisis-clipfeed</b>"]
+    TGC[/"<b>tg-cli</b> own repo"/]
+    TGS{{"Telegram"}}
+    FO["<b>aisis-failover</b><br/>+ service-failover"]
+    BG["<b>bluegreen/</b> + corpus-runner"]
+    KC[/"<b>keychain-cli</b> own repo"/]
+  end
+
+  DEV -- "1 audio up, WSS" --> DNS
+  DNS --> TLS
+  TLS --> SW
+  SW -- "2 active colour" --> QCORE
+  QCORE -- "3/5 PCM up, text down, WS" --> STT
+  STT -- "4 Wyoming TCP" --> WH
+  WPT -.-> WH
+  QCORE --> QFAST
+  QFAST --> QHOOK
+  QHOOK -- "6 POST /intent/decide" --> GR
+  QCORE -. "A unanswered: WS /processor" .-> GR
+  QFAST -- "7 HA REST :8795" --> HACLI
+  HACLI --> HA
+  SK --> HACLI
+  SK --> MA
+  SK --> WCLI
+  GR --> SK
+  SK -. "B nothing answered: brain" .-> CP
+  GR -.-> JEV
+  GR --- MEM
+  CP --> LLM
+  CP -.-> PM
+  PM --> LLM
+  QCORE -- "8 POST /v1/audio/speech" --> TTS
+  TTS --> FISH
+  QCORE -- "9 Ogg Opus + directives, WSS" --> DEV
+  KIT -. "get_sync_info, ADB" .-> DEV
+  HA --- ASP
+  HA --- REM
+  QCORE --- PG
+  CLIP --> TGC --> TGS
+
+  classDef own fill:#c8e6c9,stroke:#2e7d32,color:#1b1b1b,stroke-width:2px
+  classDef asis fill:#e0e0e0,stroke:#616161,color:#1b1b1b,stroke-width:2px
+  classDef cfg fill:#bbdefb,stroke:#1565c0,color:#1b1b1b,stroke-width:2px
+  classDef fork fill:#ffe0b2,stroke:#e65100,color:#1b1b1b,stroke-width:4px
+  classDef ownrepo fill:#b2dfdb,stroke:#00695c,color:#1b1b1b,stroke-width:2px
+  classDef ext fill:#e1bee7,stroke:#6a1b9a,color:#1b1b1b,stroke-width:2px
+  classDef unk fill:#fff9c4,stroke:#f9a825,color:#1b1b1b,stroke-width:3px,stroke-dasharray:6 4
+  classDef vend fill:#f8bbd0,stroke:#ad1457,color:#1b1b1b,stroke-width:2px
+  class DNS,SW,QFAST,QHOOK,STT,WPT,GR,MEM,SK,TTS,HACLI,CP,PM,DASH,CLIP,FO,BG own
+  class DEV asis
+  class WH,PG,HA,MA,TLS cfg
+  class KIT,QCORE fork
+  class WCLI,TGC,KC,REM ownrepo
+  class JEV,LLM,FISH,TGS ext
+  class ASP vend
+  class SPA unk
