@@ -28,6 +28,7 @@ import asr_correct
 import dialog_context
 import dialogstore
 import ha_actions
+import hypothesis_store
 import intent_route
 import jev
 import led_animation
@@ -48,6 +49,7 @@ from calc import evaluate as calc_evaluate
 from memory import MEMORY_HINT_RE, Memory, parse_facts, sync_dialogs
 
 LOG = logging.getLogger("aisis.yandex")
+HYPOTHESES_MAX_BYTES = 49152   # /asr/hypotheses: an NBest of a few readings is a few kilobytes
 BRACHO_REFERENCE = "5cd1ffa5dbb4419cb5766435139c6d92"
 ERROR_REPLY = "Не удалось получить ответ ChatGPT. Проверь авторизацию и подключение. Я не буду повторять запрос автоматически."
 
@@ -213,6 +215,8 @@ class Adapter:
         self.corrector: asr_correct.Corrector | None = None
         self.corrector_http: ClientSession | None = None
         self.warm_task: asyncio.Task | None = None
+        # The latest recognition evidence of the STT gateway's second recogniser (POST /asr/hypotheses), 15 s.
+        self.hypotheses = hypothesis_store.HypothesisStore()
         self.catalog_cache: tuple[float, voice_vocab.Catalog] | None = None
 
     def _build_intents(self) -> intent_route.IntentRouter | None:
@@ -363,6 +367,7 @@ class Adapter:
             "tts_voice": tts_settings.load()["tts_voice"], "alice_tts": self.alice_last,
             "intent_grammar": {"mode": self.intent_mode, "loaded": self.intents is not None,
                                "routes": dict(self.intents.stats) if self.intents else {}},
+            "hypotheses": self.hypotheses.stats(),
             "jev": {"mode": self.jev_mode, "active": self.jev is not None,
                     "acting": self.jev is not None and self.jev_mode == "on" and self.jev_settings.acts,
                     "threshold": self.jev_settings.threshold, "refuse": self.jev_settings.refuse,
@@ -1051,6 +1056,33 @@ class Adapter:
                                       "mode": "ignore", "status": "unavailable", "ms": 0})
         return web.json_response(await corrector.correct(text, alternatives, recent, str(body.get("source", ""))[:40]))
 
+    async def asr_hypotheses(self, request):
+        """Evidence from the STT gateway: what a second recogniser (second_opinion.py) thought of the audio behind `text`.
+
+        Kept 15 s in `self.hypotheses` (hypothesis_store.py) for the quasar hook and the correction dialog. The gateway never reads
+        the answer and a failure here must never reach a voice turn: 204 when kept, 200 {stored: false, reason} when not.
+        """
+        self.authorize(request)
+        raw = b""
+        async for chunk in request.content.iter_chunked(8192):
+            raw += chunk
+            if len(raw) > HYPOTHESES_MAX_BYTES:
+                return web.json_response({"stored": False, "reason": "too_large"})
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return web.json_response({"stored": False, "reason": "invalid_json"})
+        text, station, source, nbest, ms = (body.get(k) for k in ("text", "station", "source", "nbest", "ms")) if isinstance(body, dict) else (None,) * 5
+        hypotheses = nbest.get("hypotheses") if isinstance(nbest, dict) else None
+        if not (isinstance(text, str) and text.strip() and len(text) <= 400 and source in ("whisper", "spotter")
+                and (station is None or isinstance(station, str) and len(station) <= 64)
+                and isinstance(hypotheses, list) and len(hypotheses) <= 32
+                and (ms is None or isinstance(ms, int) and not isinstance(ms, bool))):
+            return web.json_response({"stored": False, "reason": "invalid"})
+        if not self.hypotheses.put(station, text, nbest, source=source, ms=ms, now=time.monotonic()):
+            return web.json_response({"stored": False, "reason": "unavailable"})
+        return web.Response(status=204)
+
     async def intent_decide(self, request):
         """The quasar overlay's first question for a phrase: does the grammar answer it before the container's own handlers?
 
@@ -1137,6 +1169,7 @@ class Adapter:
         app.router.add_get("/v1/remote-announcements/status", self.announcement_status)
         app.router.add_post("/laya", self.laya)
         app.router.add_post("/asr/correct", self.asr_correct)
+        app.router.add_post("/asr/hypotheses", self.asr_hypotheses)
         app.router.add_post("/intent/decide", self.intent_decide)
         app.router.add_post("/music/play", self.music_play)
         app.router.add_post("/music/control", self.music_control)

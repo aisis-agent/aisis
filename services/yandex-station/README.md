@@ -407,11 +407,12 @@ supported command:
 services/yandex-station/bluegreen/deploy.sh unit adapter /path/to/reviewed/adapter.py
 ```
 
-`announcement_cache.py` must be next to the supplied adapter. The command checks
-both sources, backs up both installed files, installs the companion first, and
-restarts the adapter. A failed health check restores the previous pair. Only the
-companion's stale bytecode is invalidated; unrelated modules and files are left
-alone. A failed restore or restart identifies the retained backup for recovery.
+The sibling modules the supplied file imports must be next to it: for the adapter `announcement_cache.py` and `hypothesis_store.py`,
+for `unit stt /path/to/reviewed/stt_wyoming.py` `second_opinion.py`, `spotter_clips.py` and `voiceclips.py`. The command checks
+the sources, backs up every installed file it replaces, installs the companions first, and restarts the unit. A failed health
+check restores the previous files (a module the previous version did not have is removed). Only the stale bytecode of the
+replaced files is invalidated; unrelated modules and files are left alone. A failed restore or restart identifies the retained
+backup for recovery.
 
 Deployment and rollback share a process-owned `maintenance.lock`. The associated
 marker is refreshed only while its owner token and inode still belong to that
@@ -431,6 +432,68 @@ before calc, the skills and the brain (`intent_route.py`); the quasar overlay `o
 `/intent/decide`. Measurements, switches (`AISIS_INTENT_GRAMMAR`, `GRAMMAR_HOOK`), risks and the owner's steps:
 `docs/research/intent-grammar-rollout-2026-11.md`. Back-test the labelled corpora with
 `cd code && python3 -m intent_grammar backtest --route combined --gate`.
+
+## Recognition alternatives: a second opinion beside Whisper
+
+Whisper answers a transcript and nothing else: no alternatives, no confidence. Case: the owner said «Выключи свет», the speaker's own
+spotter heard «включи свет», the quasar layer answered «Свет в студии уже включен.». The streaming gateway (`code/stt_wyoming.py`,
+`code/second_opinion.py`) therefore runs a **second recogniser of a different architecture on the same audio**: GigaAM-v3 CTC on the
+CPU (no VRAM), a warm worker process from the stt-cli core. CTC posteriors give the posteriors of its own readings and the exact
+likelihood of any candidate, so the confusable reading («выключи свет» for «включи свет») is scored. The result is an `NBest`; its
+percentages are the share of probability mass among the listed readings, never a probability that the phrase was said, and are
+never read aloud.
+
+- **Off by default.** With `AISIS_HYP_ENABLED` unset nothing changes: no worker, no client session, no extra call, the same final.
+- **Same audio.** The recogniser gets the very PCM that goes to Whisper (the level-lifted copy), started at the same moment.
+- **When the final waits.** Only a phrase of at most 8 words holding a word of a confusable set («включи», «выключи», «громче», …)
+  waits for the opinion, at most `AISIS_HYP_WAIT_MS` beyond Whisper. Everything else sends the final at once; its opinion is
+  recorded when it arrives. The Wyoming transcript itself is never changed.
+- **Evidence.** Before the final leaves, a loopback POST (150 ms total timeout, failures swallowed) hands
+  `{station, text, source: "whisper", nbest, ms}` to the adapter's `POST /asr/hypotheses`, and the final waits for the adapter's
+  answer, at most that timeout and never longer than `AISIS_HYP_WAIT_MS` (`0`: it does not wait, the POST still goes): quasar asks
+  the adapter about this phrase right after the final, so the evidence must be stored first. The outcome is logged
+  (`stt_hyp publish status=ok|http:<code>|timeout|error:<class>`); a POST still running at the bound finishes on its own. The
+  adapter keeps the evidence 15 s, at most 64 entries (`hypothesis_store.py`), for the quasar hook and the correction dialog;
+  `/healthz` of the adapter shows the store. The gateway's websocket carries no station id today (it uses `x-aisis-station` or
+  `?station=` when a client sends one), so the evidence is stored for any station. The adapter checks `AISIS_ADAPTER_TOKEN`: give
+  the gateway unit the same value. With speaker enforcement on, the words of a foreign voice (the empty `foreign_voice` final) are
+  never published, however late the opinion arrives, and that final does not wait for the opinion; it is still kept with the clip.
+  **Shadow only in this change:** nothing reads the stored evidence yet (the consumers arrive with the correction-FSM change), and
+  with `AISIS_HYP_ENABLED` unset there is no opinion, hence no publish and no wait.
+- **Spotter path.** `POST /spotter-clip` runs the same decode on the uploaded audio after answering it and publishes with
+  `source: "spotter"`; it cannot prevent the action the speaker already took, it is evidence for diagnostics and the next layer.
+- **Kept with the clip.** `clip_hypotheses(clip_id, ts, source, primary_text, nbest, ms)` in `dialogs.sqlite3` (read with
+  `voiceclips.hypotheses_of`), one row per archived clip that has an opinion, removed with the clip by the retention pruning.
+- **Fail-open.** A missing core or engine, a worker that dies, times out or hangs, or an adapter that is down changes neither the
+  transcript nor, beyond the two bounds above (the wait for the opinion, the wait for the adapter), its timing. The worker is restarted at most once per 30 s. A stalled worker cannot pile
+  up work: at most 8 decodes and scorings are in flight (a turn beyond that gets no opinion, logged `status=busy`), and one that
+  has not finished 20 s after it began is cancelled, which also frees a hung worker start.
+- **Health.** `/healthz` and a green `/healthz/asr` of the gateway carry `second_opinion: {enabled, state, model, last_ms}`
+  (`disabled`, `idle`, `starting`, `ready`, `down:<error class>`).
+
+| Setting (gateway environment) | Default | Meaning |
+|---|---|---|
+| `AISIS_HYP_ENABLED` | off | `1`/`true`/`yes`/`on` turns the second opinion on. Flip it only after the install below. |
+| `AISIS_HYP_PYTHON` | `<stt-cli home>/engines/onnx-asr/bin/python` when it exists | Interpreter of the onnx-asr engine environment (`onnx-asr==0.12.0`, onnxruntime, numpy; the model in its Hugging Face cache). `<stt-cli home>` is `$STT_HOME`, else `$XDG_DATA_HOME/stt-cli`, else `~/.local/share/stt-cli` (stt-cli's own convention). |
+| `AISIS_HYP_MODEL` | `gigaam-v3-ctc` | The onnx-asr model name. |
+| `AISIS_HYP_THREADS` | `4` | CPU threads of the worker. |
+| `AISIS_HYP_WAIT_MS` | `300` | How long a final that needs the opinion may wait beyond Whisper. `0` never waits. |
+| `AISIS_ADAPTER_URL` | `http://127.0.0.1:31117` | The adapter the evidence is posted to. |
+| `AISIS_ADAPTER_TOKEN` | unset | Bearer token of the adapter (same as the adapter's own). |
+
+The core is installed into the service venv from a hash-pinned release wheel of stt-cli (it has no dependencies of its own). The pin file
+`code/requirements-stt-lib.txt` is added with the stt-cli release whose wheel hash it carries; **until it exists, leave
+`AISIS_HYP_ENABLED` unset** (the gateway then runs as before). Then:
+
+```bash
+uv pip install --python ~/.local/share/aisis/venv/bin/python --require-hashes --no-deps -r code/requirements-stt-lib.txt
+```
+
+The worker does not run in that venv: it runs in an onnx-asr engine environment that the core does not provision (on this host it is
+`~/.local/share/stt-cli/engines/onnx-asr`, made by stt-cli's engine tooling). Check the pair before flipping the switch: `~/.local/share/stt-cli/engines/onnx-asr/bin/python -c "import onnx_asr"`
+and `~/.local/share/aisis/venv/bin/python -c "import stt_cli.hypotheses"`. Then add `AISIS_HYP_ENABLED=1` to the gateway unit's
+environment and restart `aisis-station-stt.service` (the adapter needs this version first so that `/asr/hypotheses` exists; until
+then the POST is a logged, swallowed 404).
 
 ## Jev: an advisory classifier for the turns that go to the brain
 
