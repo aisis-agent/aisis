@@ -10,6 +10,12 @@ handlers. A turn that reaches the adapter with such a decision still goes to the
 
 Fail-open: a grammar that cannot be loaded, an executor that raises, or a mode of `off` leave the old path
 (calc -> skills -> brain) untouched.
+
+The repair dialog (#182, correction.py): before the normal classification `route` first reads the utterance as the answer to a
+question the speaker asked («Мне послышалось «включи свет»…», grammar contexts `repair.*`), then consults the correction engine for a
+new question (a stored second opinion or the quasar layer's no-op cue). `AISIS_CORRECTION=off|shadow|on` (default off). An accepted
+alternative is run here when this adapter owns its executor, handed to the overlay as route `rerun` when it announced support
+(`rerun: true` in the request) and the action is not risky, and otherwise asked for again («Скажите ещё раз: …»).
 """
 from __future__ import annotations
 
@@ -30,6 +36,7 @@ from intent_grammar.grammar import load, render_reply
 from intent_grammar.timewords import plural
 from timers import duration_accusative, left_text
 import voice_skills
+import correction
 import utterance_trace
 
 LOG = logging.getLogger("aisis.intent")
@@ -60,7 +67,9 @@ TIMER_ACTION_EXECUTORS = frozenset(("timer.start", "alarm.set", "timer.cancel", 
 
 @dataclass
 class Route:
-    """What to do with a turn. kind: reply | silent | volume | dialog_end | none (the old path continues)."""
+    """What to do with a turn. kind: reply | silent | volume | dialog_end | rerun | none (the old path continues).
+    `rerun`: `text` is a phrase the overlay matches as if it had been spoken (the corrected reading of a repair dialog; only for a caller that
+    announced `rerun: true`). `context`: the station's repair dialog is open after this answer (the overlay's «повтори» defers to the hook)."""
     kind: str
     text: str | None = None
     listen: bool = False
@@ -68,10 +77,14 @@ class Route:
     intent: str | None = None
     source: str = "none"
     ms: int = 0
+    context: bool = False
 
     def as_json(self) -> dict[str, Any]:
-        return {"route": self.kind, "text": self.text, "listen": self.listen, "volume": self.volume,
+        data = {"route": self.kind, "text": self.text, "listen": self.listen, "volume": self.volume,
                 "intent": self.intent, "ms": self.ms}
+        if self.context:
+            data["context"] = True
+        return data
 
 
 NONE = Route("none")
@@ -135,6 +148,21 @@ class IntentRouter:
     brain_asked: dict[str, float] = field(default_factory=dict)                     # station -> when the brain last spoke to it with a question
     memo: tuple[str, "Route", float] | None = None        # the one remembered utterance: (canonical text, its route, when it ran)
     running: dict[str, asyncio.Task["Route"]] = field(default_factory=dict)   # timer/alarm utterances in flight, by canonical text
+    hypotheses: Any | None = None       # hypothesis_store.HypothesisStore (`get(station, text, now)` -> the gateway's second opinion payload), or None
+    correction_mode: str = "off"        # AISIS_CORRECTION: off | shadow (decide and trace, never speak) | on
+    correction_core: Any | None = None  # the stt_cli.hypotheses module (tests pass a fake); None imports the real one
+    correction: correction.Correction | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        if self.correction_mode in ("shadow", "on"):
+            try:
+                self.correction = correction.Correction(self.classify, self._decide_in, self.hypotheses, mode=self.correction_mode,
+                                                        core=self.correction_core)
+            except Exception as err:   # no core installed, bad data: the speaker runs exactly as before
+                LOG.warning("correction_unavailable class=%s", type(err).__name__)
+
+    def _decide_in(self, text: str, context: Any) -> Decision | None:
+        return self.grammar.decide(text, context=context)
 
     # ── pure classification (the back-test measures this) ───────────────────
     def classify(self, text: str, phase: str | None = None, *, fallback: bool = True) -> Decision | None:
@@ -299,33 +327,128 @@ class IntentRouter:
             return "nothing to repeat"
         return f"executor {executor} gave no answer"
 
-    async def route(self, station: str, text: str, *, phase: str | None = None, via_quasar: bool = False) -> Route:
-        """Decide and execute one turn; Route("none") hands it on. `via_quasar`: the caller (quasar) runs volume itself."""
+    async def route(self, station: str, text: str, *, phase: str | None = None, via_quasar: bool = False, rerun: bool = False,
+                    noop: dict[str, Any] | None = None, device: str | None = None) -> Route:
+        """Decide and execute one turn; Route("none") hands it on. `via_quasar`: the caller (quasar) runs volume itself.
+        `rerun`: the caller supports the route `rerun`. `noop`: the quasar layer's cue «the device is already in the state the text asks
+        for» ({desired, label, targets}). `device`: the speaker's own id when the caller knows it (the repair dialog is kept per device)."""
         started = time.perf_counter_ns()
         decision = None
+        engine, key = self.correction, device or (None if via_quasar else station)   # a hook that names no device owns no dialog
         try:
-            decision = self.classify(text, phase, fallback=not self.asked_a_question(station))
-            joined = self._joined_answer(station, text, phase)
-            if joined is not None:
-                decision, text = joined
-                utterance_trace.note(joined=text)
-            if decision is None:
-                route = NONE
-            elif self._timer_action(decision, via_quasar, station):
-                route = await self._timer_action_once(station, text, decision, via_quasar)
-            else:
-                route = await self._run(station, decision, via_quasar)
-            if decision is not None and decision.tier == "clarify":
-                self.pending[station] = (text, self.monotonic())
+            route = await self._dialog_turn(key, text, via_quasar, rerun, noop)
+            if route is not None:
+                self.pending.pop(station, None)   # the dialog took the turn: a clarification asked before is superseded, a bare answer joins nothing
+            if route is None:
+                decision = self.classify(text, phase, fallback=not self.asked_a_question(station))
+                decision, text = self._with_joined_answer(station, text, phase, decision)
+                route = await self._run_decision(station, text, decision, via_quasar)
+                if decision is not None and decision.tier == "clarify":
+                    self.pending[station] = (text, self.monotonic())
         except Exception as err:  # fail open: the old path answers
             LOG.warning("intent_route_failed class=%s", type(err).__name__)
             utterance_trace.error("route: " + type(err).__name__)
+            if engine is not None:
+                engine.close(key)   # a dialog step that crashed leaves nothing open
             route = NONE
+        route = self._mark_open_dialog(key, route)
         route = dataclasses.replace(route, ms=(time.perf_counter_ns() - started) // 1_000_000)   # a copy: NONE is shared
-        self.stats[route.source if route.kind != "none" else "none"] = self.stats.get(
-            route.source if route.kind != "none" else "none", 0) + 1
+        source = route.source if route.kind != "none" else "none"
+        self.stats[source] = self.stats.get(source, 0) + 1
         self._trace(decision, route, via_quasar, station)
         return route
+
+    async def _dialog_turn(self, key: str | None, text: str, via_quasar: bool, rerun: bool, noop: dict[str, Any] | None) -> Route | None:
+        """The repair dialog's route for the turn, or None (no dialog, no device to keep one for, or it did not take the turn)."""
+        engine = self.correction
+        if engine is None or key is None:
+            return None
+        try:
+            return await self._correct(key, text, via_quasar, rerun, noop)
+        except Exception as err:   # the dialog is an extra: whatever it breaks on, the normal route below still answers
+            LOG.warning("correction_failed class=%s", type(err).__name__)
+            utterance_trace.error("correction: " + type(err).__name__)
+            engine.close(key)
+            return None
+
+    def _with_joined_answer(self, station: str, text: str, phase: str | None, decision: Decision | None) -> tuple[Decision | None, str]:
+        """The decision and text of the turn, replaced by the clarification question joined to this answer when it completes one."""
+        joined = self._joined_answer(station, text, phase)
+        if joined is None:
+            return decision, text
+        utterance_trace.note(joined=joined[1])
+        return joined
+
+    async def _run_decision(self, station: str, text: str, decision: Decision | None, via_quasar: bool) -> Route:
+        if decision is None:
+            return NONE
+        if self._timer_action(decision, via_quasar, station):
+            return await self._timer_action_once(station, text, decision, via_quasar)
+        return await self._run(station, decision, via_quasar)
+
+    def _mark_open_dialog(self, key: str | None, route: Route) -> Route:
+        """A turn answered here is no longer the brain's question to ask; `context`: the repair dialog is still open after it."""
+        engine = self.correction
+        if engine is None or key is None:
+            return route
+        if route.kind != "none":
+            engine.drop_hint(key)   # answered: the question is not the brain's business
+        if engine.active(key, self.monotonic()) is not None:
+            return dataclasses.replace(route, context=True)
+        return route
+
+    # ── the repair dialog (correction.py) ───────────────────────────────────
+    def take_question(self, station: str) -> str | None:
+        """The question the speaker asked that the last reply did not answer, once, for the brain's turn text; None without one."""
+        if self.correction is None:
+            return None
+        return self.correction.take_question(station, self.monotonic())
+
+    async def _correct(self, key: str, text: str, via_quasar: bool, rerun: bool, noop: dict[str, Any] | None) -> Route | None:
+        """The turn as the repair dialog sees it: an answer to the open question, then a new question. None: not the dialog's, the normal
+        route reads it. Emergency text is never the dialog's: it is no reply (the grammar reads it above every context) and the engine vetoes it."""
+        engine = self.correction
+        now = self.monotonic()
+        dialog = engine.active(key, now)
+        expired = engine.take_expired(key)
+        if expired is not None:
+            engine.note_expired(expired)
+        if dialog is not None:
+            step = engine.reply(key, text, now=now, via_quasar=via_quasar, probe=noop is not None)
+            if step is not None:
+                return await self._dialog_route(key, step, via_quasar, rerun)
+        offer = engine.consult(key, text, now=now, via_quasar=via_quasar, noop=noop)
+        if offer is None or offer.shadow:
+            return None
+        return Route("reply", offer.say, listen=offer.listen, intent="repair.give_up" if offer.outcome else "repair.ask", source="correction")
+
+    async def _dialog_route(self, station: str, step: correction.Step, via_quasar: bool, rerun: bool) -> Route:
+        if step.end:   # «отмена»: nothing happens; the overlay closes its dialog, a turn answers with nothing
+            return Route("dialog_end" if via_quasar else "silent", intent="repair.cancel", source="correction")
+        if step.run is not None:
+            return await self._run_reading(station, step, via_quasar, rerun)
+        return Route("reply", step.say, listen=step.listen, intent="repair.say", source="correction")
+
+    async def _run_reading(self, station: str, step: correction.Step, via_quasar: bool, rerun: bool) -> Route:
+        """Run the phrase a spoken «да» (or the reading said back) chose. The normal route decides whether it runs here: only a decision this
+        adapter executes (never a guess that needs a «да», never a risky action the overlay would run) is. A quasar-owned action goes back to
+        the overlay as `rerun` when it asked for it and the action is not risky; every other case asks the owner to say it again.
+        `station` is the speaker's own key (the device id of the hook, else the turn's station): a roomless command is resolved against
+        the room of that speaker, never against the hook's generic `quasar` label."""
+        phrase = step.run
+        decision = self.classify(phrase, fallback=False)
+        if decision is not None and decision.tier in ("execute", "query") and not decision.fuzzy \
+                and self.executable(decision, via_quasar=via_quasar, station=station):
+            route = await self._run_decision(station, phrase, decision, via_quasar)
+            if route.kind == "reply":
+                lead = correction.DONE_TEXT.format(phrase=correction.shown(phrase))
+                return dataclasses.replace(route, text=f"{lead} {route.text}".strip() if route.text else lead, source="correction")
+            if route.kind != "none":
+                return dataclasses.replace(route, source="correction")
+        if via_quasar and rerun and not step.risky:
+            return Route("rerun", phrase, intent="repair.rerun", source="correction")
+        return Route("reply", correction.SAY_AGAIN_TEXT.format(phrase=correction.shown(phrase)), listen=True, intent="repair.say_again",
+                     source="correction")
 
     def _trace(self, decision: Decision | None, route: Route, via_quasar: bool, station: str) -> None:
         trace = utterance_trace.current()
@@ -333,6 +456,8 @@ class IntentRouter:
             return
         trace.stage_ms("route", route.ms)
         if decision is None:
+            if route.source == "correction":
+                trace.note(intent=route.intent)   # the repair dialog's own line («repair.ask», «repair.rerun»): the trace names it
             return
         trace.note(**self.trace_fields(decision))
         trace.stage_ms("grammar", decision.elapsed_us // 1000)

@@ -1,0 +1,572 @@
+{"text": "да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "ага", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "угу", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "конечно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "именно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "верно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "точно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "так", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "давай", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "правильно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "Да, конечно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "да да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "ну да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "Алиса, да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "все верно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "да, именно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "конечно да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "совершенно верно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "да давай", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "угу, да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "Да.", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "да!", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "ага.", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "согласен", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "выключи", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "Выключи свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "выключить свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "выключить", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "нет, выключи свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "я хотел выключить", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "да, выключи", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "мне нужно выключить свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}}
+{"text": "включи", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}}
+{"text": "включи свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}}
+{"text": "включить свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}}
+{"text": "нет, включи свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}}
+{"text": "я так и сказал", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}}
+{"text": "я хотела включить", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}}
+{"text": "да, включи", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}}
+{"text": "включить", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}}
+{"text": "нет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "не так", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "неверно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "неа", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "не надо", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "нет, не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "совсем не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "нет нет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "нет, не так", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "это не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "неправильно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "Нет.", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "нее", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "не-а", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "не нужно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "повтори", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "повтори ещё раз", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "ещё раз", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "что?", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "как", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "повторите, пожалуйста", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "что ты сказала", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "повторите вопрос", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "Алиса, повтори", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "отмена", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "забудь", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "не надо ничего", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "оставь", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "стоп", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "отбой", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "ничего не надо", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "ладно, забудь", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "оставь как есть", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "проехали", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "ничего", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "Алиса, отмена", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "стой", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "хватит", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "включи чайник", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "расскажи анекдот", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "который час", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "привет", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "да и громче", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "да, выключи свет в спальне", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "что такое фотосинтез", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "не надо включать свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "поставь таймер на пять минут", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "включи музыку", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "какая погода", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "не выключай свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "спасибо", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "как дела", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "сколько будет два плюс два", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "вызови скорую", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "мне плохо", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "помогите", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "у нас пожар", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "не могу дышать", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "позвони 112", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "ага", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "угу", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "конечно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "именно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "верно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "точно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "так", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "давай", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "правильно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "Да, конечно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "да да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "ну да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "Алиса, да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "все верно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "да, именно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "конечно да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "совершенно верно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "да давай", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "угу, да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "Да.", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "да!", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "ага.", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "согласен", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "тише", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "сделай тише", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "да, тише", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "нет, сделай тише", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "мне надо тише", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "громче", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "сделай громче", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "нет, громче", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "я сказал громче", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "я так и сказал", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "нет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "не так", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "неверно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "неа", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "не надо", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "нет, не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "совсем не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "нет нет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "нет, не так", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "это не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "неправильно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "Нет.", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "нее", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "не-а", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "не нужно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "повтори", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "повтори ещё раз", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "ещё раз", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "что?", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "как", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "повторите, пожалуйста", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "что ты сказала", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "повторите вопрос", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "Алиса, повтори", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "отмена", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "забудь", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "не надо ничего", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "оставь", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "стоп", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "отбой", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "ничего не надо", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "ладно, забудь", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "оставь как есть", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "проехали", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "ничего", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "Алиса, отмена", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "стой", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "хватит", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "включи чайник", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "расскажи анекдот", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "который час", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "привет", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "да и громче", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "да, выключи свет в спальне", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "что такое фотосинтез", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "не надо включать свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "поставь таймер на пять минут", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "включи музыку", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "какая погода", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "не выключай свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "спасибо", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "как дела", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "сколько будет два плюс два", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "вызови скорую", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "мне плохо", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "помогите", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "у нас пожар", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "не могу дышать", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "позвони 112", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["тише", "сделай тише"], "heard": ["громче", "сделай громче"]}}
+{"text": "да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "ага", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "угу", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "конечно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "именно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "верно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "точно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "так", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "давай", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "правильно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "Да, конечно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "да да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "ну да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "Алиса, да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "все верно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "да, именно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "конечно да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "совершенно верно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "да давай", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "угу, да", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "Да.", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "да!", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "ага.", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "согласен", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "выключи телевизор", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "выключи", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "выключить телевизор", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "нет, выключи телевизор", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "я хотел выключить телевизор", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.accept"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "включи телевизор", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "включи", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "включить телевизор", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "нет, включи телевизор", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "я так и сказал", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.keep"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "нет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "не так", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "неверно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "неа", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "не надо", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "нет, не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "совсем не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "нет нет", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "нет, не так", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "это не то", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "неправильно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "Нет.", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "нее", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "не-а", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "не нужно", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "повтори", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "повтори ещё раз", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "ещё раз", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "что?", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "как", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "повторите, пожалуйста", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "что ты сказала", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "повторите вопрос", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "Алиса, повтори", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "отмена", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "забудь", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "не надо ничего", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "оставь", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "стоп", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "отбой", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "ничего не надо", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "ладно, забудь", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "оставь как есть", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "проехали", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "ничего", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "Алиса, отмена", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "стой", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "хватит", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "включи чайник", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "расскажи анекдот", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "который час", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "привет", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "да и громче", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "да, выключи свет в спальне", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "что такое фотосинтез", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "не надо включать свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "поставь таймер на пять минут", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "включи музыку", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "какая погода", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "не выключай свет", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "спасибо", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "как дела", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "сколько будет два плюс два", "context": "repair.confirm", "kind": "synthetic", "expect": {"outside": true}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "вызови скорую", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "мне плохо", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "помогите", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "у нас пожар", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "не могу дышать", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "позвони 112", "context": "repair.confirm", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"alt": ["выключи телевизор", "выключи"], "heard": ["включи телевизор", "включи"]}}
+{"text": "включи", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_first"}}
+{"text": "включи свет", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_first"}}
+{"text": "включить свет", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_first"}}
+{"text": "нет, включи свет", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "я так и сказал", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "я хотела включить", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_first"}}
+{"text": "да, включи", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_first"}}
+{"text": "включить", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_first"}}
+{"text": "выключи", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}}
+{"text": "Выключи свет", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}}
+{"text": "выключить свет", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}}
+{"text": "выключить", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}}
+{"text": "нет, выключи свет", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "я хотел выключить", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}}
+{"text": "да, выключи", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}}
+{"text": "мне нужно выключить свет", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}}
+{"text": "первое", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_first"}}
+{"text": "второе", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}}
+{"text": "нет", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "не то", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "не так", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "неверно", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "неа", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "не надо", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "нет, не то", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "совсем не то", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "нет нет", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "нет, не так", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "это не то", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "неправильно", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "Нет.", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "нее", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "не-а", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "не нужно", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}}
+{"text": "повтори", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "повтори ещё раз", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "ещё раз", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "что?", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "как", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "повторите, пожалуйста", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "что ты сказала", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "повторите вопрос", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "Алиса, повтори", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}}
+{"text": "отмена", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "забудь", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "не надо ничего", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "оставь", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "стоп", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "отбой", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "ничего не надо", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "ладно, забудь", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "оставь как есть", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "проехали", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "ничего", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "Алиса, отмена", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "стой", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "хватит", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "включи чайник", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "расскажи анекдот", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "который час", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "привет", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "да и громче", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "да, выключи свет в спальне", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "что такое фотосинтез", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "не надо включать свет", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "поставь таймер на пять минут", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "включи музыку", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "какая погода", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "не выключай свет", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "спасибо", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "как дела", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "сколько будет два плюс два", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "да", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "угу", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "ага", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "вызови скорую", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "мне плохо", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "помогите", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "у нас пожар", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "не могу дышать", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "позвони 112", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "громче", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_first"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "сделай громче", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_first"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "нет, громче", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "я сказал громче", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_first"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "я так и сказал", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "тише", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "сделай тише", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "да, тише", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "нет, сделай тише", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "мне надо тише", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "первое", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_first"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "второе", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.choose_second"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "нет", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "не то", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "не так", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "неверно", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "неа", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "не надо", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "нет, не то", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "совсем не то", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "нет нет", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "нет, не так", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "это не то", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "неправильно", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "Нет.", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "нее", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "не-а", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "не нужно", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.deny"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "повтори", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "повтори ещё раз", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "ещё раз", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "что?", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "как", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "повторите, пожалуйста", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "что ты сказала", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "повторите вопрос", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "Алиса, повтори", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.again"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "отмена", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "забудь", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "не надо ничего", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "оставь", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "стоп", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "отбой", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "ничего не надо", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "ладно, забудь", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "оставь как есть", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "проехали", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "ничего", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "Алиса, отмена", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "стой", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "хватит", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "repair.cancel"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "включи чайник", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "расскажи анекдот", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "который час", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "привет", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "да и громче", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "да, выключи свет в спальне", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "что такое фотосинтез", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "не надо включать свет", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "поставь таймер на пять минут", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "включи музыку", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "какая погода", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "не выключай свет", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "спасибо", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "как дела", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "сколько будет два плюс два", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "да", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "угу", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "ага", "context": "repair.choice", "kind": "synthetic", "expect": {"outside": true}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "вызови скорую", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "мне плохо", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "помогите", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "у нас пожар", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "не могу дышать", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "позвони 112", "context": "repair.choice", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}, "values": {"first": ["громче", "сделай громче"], "second": ["тише", "сделай тише"]}}
+{"text": "отмена", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "забудь", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "не надо ничего", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "оставь", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "стоп", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "отбой", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "ничего не надо", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "ладно, забудь", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "оставь как есть", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "проехали", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "ничего", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "Алиса, отмена", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "стой", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "хватит", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "repair.cancel"}}
+{"text": "да", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "ага", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "угу", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "конечно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "именно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "верно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "точно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "так", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "давай", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "правильно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "Да, конечно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "да да", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "ну да", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "Алиса, да", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "все верно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "да, именно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "конечно да", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "совершенно верно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "да давай", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "угу, да", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "Да.", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "да!", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "ага.", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "согласен", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "нет", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "не то", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "не так", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "неверно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "неа", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "не надо", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "нет, не то", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "совсем не то", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "нет нет", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "нет, не так", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "это не то", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "неправильно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "Нет.", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "нее", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "не-а", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "не нужно", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "повтори", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "повтори ещё раз", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "ещё раз", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "что?", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "как", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "повторите, пожалуйста", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "что ты сказала", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "повторите вопрос", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "Алиса, повтори", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "включи чайник", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "расскажи анекдот", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "который час", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "привет", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "да и громче", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "да, выключи свет в спальне", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "что такое фотосинтез", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "не надо включать свет", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "поставь таймер на пять минут", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "включи музыку", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "какая погода", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "не выключай свет", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "спасибо", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "как дела", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "сколько будет два плюс два", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "выключи свет", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "включи свет", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "выключи", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "включи", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "первое", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "второе", "context": "repair.repeat", "kind": "synthetic", "expect": {"outside": true}}
+{"text": "вызови скорую", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "мне плохо", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "помогите", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "у нас пожар", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "не могу дышать", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "позвони 112", "context": "repair.repeat", "kind": "synthetic", "expect": {"intent": "refuse.emergency"}}
+{"text": "Выключи свет", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.accept"}}
+{"text": "Выключить.", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.accept"}}
+{"text": "Да, выключи", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.accept"}}
+{"text": "Алиса, да", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.accept"}}
+{"text": "Ну да", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.accept"}}
+{"text": "Да, именно", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.accept"}}
+{"text": "Нет, выключи свет", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.accept"}}
+{"text": "Включи", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.keep"}}
+{"text": "Включи свет", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.keep"}}
+{"text": "Нет", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.deny"}}
+{"text": "Не то", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.deny"}}
+{"text": "Нет, не то", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.deny"}}
+{"text": "Не так", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.deny"}}
+{"text": "Повтори", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.again"}}
+{"text": "Ещё раз", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.again"}}
+{"text": "Что?", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.again"}}
+{"text": "Отмена", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.cancel"}}
+{"text": "Забудь", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.cancel"}}
+{"text": "Не надо ничего", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.cancel"}}
+{"text": "Оставь", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.cancel"}}
+{"text": "Стоп", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "repair.cancel"}}
+{"text": "Выключить", "context": "repair.choice", "kind": "authored", "expect": {"intent": "repair.choose_second"}}
+{"text": "Выключи свет", "context": "repair.choice", "kind": "authored", "expect": {"intent": "repair.choose_second"}}
+{"text": "Включить", "context": "repair.choice", "kind": "authored", "expect": {"intent": "repair.choose_first"}}
+{"text": "Включи свет", "context": "repair.choice", "kind": "authored", "expect": {"intent": "repair.choose_first"}}
+{"text": "Не то", "context": "repair.choice", "kind": "authored", "expect": {"intent": "repair.deny"}}
+{"text": "Нет", "context": "repair.choice", "kind": "authored", "expect": {"intent": "repair.deny"}}
+{"text": "Повтори", "context": "repair.choice", "kind": "authored", "expect": {"intent": "repair.again"}}
+{"text": "Отмена", "context": "repair.choice", "kind": "authored", "expect": {"intent": "repair.cancel"}}
+{"text": "Отмена", "context": "repair.repeat", "kind": "authored", "expect": {"intent": "repair.cancel"}}
+{"text": "Выключи свет", "context": "repair.repeat", "kind": "authored", "expect": {"outside": true}}
+{"text": "Да", "context": "repair.repeat", "kind": "authored", "expect": {"outside": true}}
+{"text": "Да, и громче", "context": "repair.confirm", "kind": "authored", "expect": {"outside": true}}
+{"text": "Включи чайник", "context": "repair.confirm", "kind": "authored", "expect": {"outside": true}}
+{"text": "Который час", "context": "repair.confirm", "kind": "authored", "expect": {"outside": true}}
+{"text": "Вызови скорую", "context": "repair.confirm", "kind": "authored", "expect": {"intent": "refuse.emergency"}}
+{"text": "Мне плохо", "context": "repair.choice", "kind": "authored", "expect": {"intent": "refuse.emergency"}}
+{"text": "Помогите", "context": "repair.repeat", "kind": "authored", "expect": {"intent": "refuse.emergency"}}

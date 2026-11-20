@@ -25,6 +25,16 @@ class Record(unittest.TestCase):
             pass
         self.assertIsNone(utterance_trace.current())
 
+    def test_the_correction_record_travels_in_a_trace_as_plain_json(self):
+        record = {"trigger": "contradiction", "reason": None, "decision": "ask", "heard": "включи свет",
+                  "nbest": [{"text": "выключи свет", "percent": 66, "source": "beam", "engine": "gigaam-v3-ctc", "fit": 0.9}], "nbest_ms": 70,
+                  "cue": [{"kind": "noop", "supports": "выключи свет"}],
+                  "dialog": {"state": "awaiting_confirm", "ask": "Вы хотели выключить?", "answer": None, "outcome": None, "retries": 0}}
+        trace = utterance_trace.start("hook", "включи свет")
+        utterance_trace.note(correction=record)
+        data = utterance_trace.end(trace)
+        self.assertEqual(json.loads(utterance_trace.dumps(data))["correction"], record)
+
     def test_a_call_collects_notes_calls_errors_and_stage_time(self):
         trace = utterance_trace.start("turn", "поставь таймер", "st1")
         utterance_trace.note(layer="grammar", intent="timer.set", missing=None)

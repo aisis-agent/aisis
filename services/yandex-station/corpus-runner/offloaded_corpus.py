@@ -51,14 +51,14 @@ MAINTAINED_RUNNERS = {"run_corpus.mts", "expected_kind.mjs", "check_reminder_lay
 ADAPTER_REVISION = {"source_commit": "e859a37b495fca29321c089f79825051bd8bff57",
                     "source_tree": "2782f4d64d88255dd04cfced076e9b26fe2e7f07"}
 ADAPTER_FILES = {
-    "intent_grammar/__init__.py": "514aa739e2cdacc10f684a2c9669a453988322cab8f46a4ecfa0b1120bf110cb",
-    "intent_grammar/grammar.py": "d1ad216b7760f54d6717e208321d50ec072c7e2f63f011f248963b56a02113ba",
+    "intent_grammar/__init__.py": "eacc35556edec256ac9c029ae1f2af467d7fc19bdb6a66358e9836455382f0c9",
+    "intent_grammar/grammar.py": "14c4d4bc93b36f604bf839b66224ba325874ea1e2d0efe51e7e106e15c25a9d9",
     "intent_grammar/normalize.py": "fa6a18abc69edee2b5cc611c0b1fd98b093713c1db0c4a647f29bcbcc6d10483",
-    "intent_grammar/pattern.py": "6cb6f4644590a9cfe8e4dabeba8756fca5a95981e965130371e44dcacf9dea81",
+    "intent_grammar/pattern.py": "8ced88ef290369c6dfe62cd218eb9f4faf494633e4537dbb89f3e2e514df87ed",
     "intent_grammar/numerals.py": "c1f292178318a2ee8e3d0fbb454c89d8280f43929c52fc0d98017442f87e1e9c",
     "intent_grammar/timewords.py": "008f82b0cd9641a6be127e8aa4d457775cfa6080a29b4657d6f92e90fa5e1d7b",
-    "intent_grammar/grammar/ru.json": "15ea884239f0ecd62858a1b2e569ba476ef25a6cb093c44a659cf513131986f7",
-    "intent_grammar/grammar/ru.yaml": "abb2e1a3f98b849b239e46dbb875e1741f4ac583dc37775b3df399b9973c7e4b",
+    "intent_grammar/grammar/ru.json": "2ebd4e02fe97c81348f0fa9f583947520f14703e1a7869cd66cbdefcf64925a7",
+    "intent_grammar/grammar/ru.yaml": "3e326c4a22f8b8b730da71419b74434f857a544388b1161a98f6f5fbd4cb1947",
 }
 SOURCE_PATHS = {
     "/src/backend/ha-intents.ts", "/src/backend/turn-memory.ts",

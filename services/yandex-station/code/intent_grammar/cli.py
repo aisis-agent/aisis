@@ -2,7 +2,8 @@
 
     compile [--check]          write/verify the JSON bundle (grammar/ru.json) the adapter loads without PyYAML
     check                      validate the grammar, run its pinned examples/negatives, list conflicting readings
-    match TEXT...              the decision for each utterance, as JSON
+    match [--context ID [--value NAME=PHRASE ...]] TEXT...
+                               the decision for each utterance, as JSON (inside a dialog context when given)
     backtest                   run the labelled corpora, print the numbers, write a JSON report, gate on it
     nightly {prepare,run,status,morning,label}
                                the nightly loop: corpus growth, measurement, the brief and launch of the agent session
@@ -19,7 +20,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import backtest, nightly
-from .grammar import Grammar, GrammarError, compile_bundle, load
+from .grammar import ActiveContext, Grammar, GrammarError, Intent, compile_bundle, load
 
 DEFAULT_GRAMMAR_PATH = Path(__file__).parent / "grammar" / "ru.yaml"
 ENV_GRAMMAR = "AISIS_INTENT_GRAMMAR_FILE"   # not AISIS_INTENT_GRAMMAR: that one is the adapter's on|shadow|off switch
@@ -30,18 +31,29 @@ def _grammar(path: str | None) -> Grammar:
     return load(path or os.environ.get(ENV_GRAMMAR) or DEFAULT_GRAMMAR_PATH)
 
 
+def _reading_conflict(grammar: Grammar, priority: dict[str, int], intent: Intent, say: str, cid: str | None,
+                      context: ActiveContext | None) -> str | None:
+    """The conflict message when another intent of the same priority reads the pinned example as well as `intent` does, else None."""
+    top = grammar.candidates(say, context)
+    if len(top) < 2 or top[0].intent != intent.id:
+        return None
+    rivals = [c.intent for c in top[1:] if c.intent != intent.id]
+    if rivals and priority[rivals[0]] == priority[intent.id]:
+        return f"{say!r}{'' if cid is None else f' [{cid}]'}: {intent.id} vs {', '.join(rivals)}"
+    return None
+
+
 def _conflicts(grammar: Grammar) -> list[str]:
     """Pinned examples that two different intents read equally well: the grammar is ambiguous there."""
     found: list[str] = []
+    priority = {i.id: i.priority for i in grammar.intents}
     for intent in grammar.intents:
-        for example in intent.examples:
-            top = grammar.candidates(example.say)
-            if len(top) > 1 and top[0].intent == intent.id:
-                rivals = [c.intent for c in top[1:] if c.intent != intent.id]
-                if rivals:
-                    priority = {i.id: i.priority for i in grammar.intents}
-                    if priority[rivals[0]] == priority[intent.id]:
-                        found.append(f"{example.say!r}: {intent.id} vs {', '.join(rivals)}")
+        for cid in intent.contexts or (None,):   # a context intent is read inside each of its contexts, with the context's sample values
+            context = None if cid is None else ActiveContext(cid, grammar.contexts[cid].sample)
+            for example in intent.examples:
+                conflict = _reading_conflict(grammar, priority, intent, example.say, cid, context)
+                if conflict is not None:
+                    found.append(conflict)
     return found
 
 
@@ -50,7 +62,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     failures = grammar.self_check()
     conflicts = _conflicts(grammar)
     print(f"{len(grammar.intents)} intents, {sum(len(i.patterns) for i in grammar.intents)} patterns, "
-          f"{sum(len(i.examples) for i in grammar.intents)} examples, {sum(len(i.negatives) for i in grammar.intents)} negatives")
+          f"{sum(len(i.examples) for i in grammar.intents)} examples, {sum(len(i.negatives) for i in grammar.intents)} negatives, "
+          f"{len(grammar.contexts)} contexts ({sum(1 for i in grammar.intents if i.contexts)} intents in them)")
     for line in failures:
         print("FAIL", line)
     for line in conflicts:
@@ -74,9 +87,23 @@ def cmd_compile(args: argparse.Namespace) -> int:
 
 def cmd_match(args: argparse.Namespace) -> int:
     grammar = _grammar(args.grammar)
+    context = None
+    if args.context:
+        values: dict[str, list[str]] = {}
+        for item in args.value or []:
+            name, sep, phrase = item.partition("=")
+            if not sep or not name:
+                print(f"--value wants NAME=PHRASE, got {item!r}", file=sys.stderr)
+                return 2
+            values.setdefault(name, []).append(phrase)
+        declared = grammar.contexts.get(args.context)
+        context = ActiveContext(args.context, values or (declared.sample if declared else {}))
+    elif args.value:
+        print("--value needs --context", file=sys.stderr)
+        return 2
     for text in args.text:
-        decision = grammar.decide(text)
-        print(json.dumps({"text": text, "decision": None if decision is None else _plain(decision)}, ensure_ascii=False))
+        decision = grammar.decide(text, context=context)
+        print(json.dumps({"text": text, "context": args.context, "decision": None if decision is None else _plain(decision)}, ensure_ascii=False))
     return 0
 
 
@@ -93,6 +120,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         print(f"corpus directory {corpus} does not exist (set {backtest.ENV_CORPUS_DIR} or --corpus)", file=sys.stderr)
         return 2
     rows, manifest = backtest.load_rows(corpus, grammar)
+    dialog_rows = backtest.load_dialog_rows(corpus, fixture=backtest.gates_dialog(grammar))
     if not rows:
         print(f"no labelled rows under {corpus}", file=sys.stderr)
         return 2
@@ -109,7 +137,8 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     with contextlib.nullcontext() if args.no_latest else backtest.baseline_lock():
         previous = backtest.load_previous(previous_path)
         report = backtest.build_report(grammar, rows, manifest, include_text=not args.no_text, previous=previous,
-                                       decide=decide, route=args.route, require_baseline=args.gate and not args.init_baseline)
+                                       decide=decide, route=args.route, require_baseline=args.gate and not args.init_baseline,
+                                       dialog_rows=dialog_rows)
         if args.init_baseline:
             if report["baseline"]["usable"]:
                 # a compatible baseline: only the owner's rebaseline of lost or relabelled rows is accepted (regressions still fail)
@@ -120,7 +149,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             else:
                 # an explicit start (first run of a route) or rebaseline: absolute checks only, the reason travels with the report
                 report = backtest.build_report(grammar, rows, manifest, include_text=not args.no_text, previous=None,
-                                               decide=decide, route=args.route)
+                                               decide=decide, route=args.route, dialog_rows=dialog_rows)
                 report["baseline"]["init_reason"] = args.init_baseline
         promote = not args.no_latest and report["gate"]["ok"]
         backtest.save_report(report, destination, latest=backtest.reports_dir() / "latest.json" if promote else None)
@@ -228,6 +257,9 @@ def build_parser() -> argparse.ArgumentParser:
     comp.add_argument("--check", action="store_true", help="exit 1 when the committed bundle is stale")
     comp.set_defaults(run=cmd_compile)
     match = sub.add_parser("match", help="print the decision for each utterance")
+    match.add_argument("--context", help="decide inside this dialog context (an id from the grammar's `contexts:`)")
+    match.add_argument("--value", action="append", metavar="NAME=PHRASE",
+                       help="a per-turn value of the context, repeatable (default: the context's sample values)")
     match.add_argument("text", nargs="+")
     match.set_defaults(run=cmd_match)
     bt = sub.add_parser("backtest", help="run the labelled corpora")

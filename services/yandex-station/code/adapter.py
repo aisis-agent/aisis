@@ -153,6 +153,15 @@ async def run_command(command: list[str], payload: dict[str, Any], timeout: floa
         raise
 
 
+def hook_route_extras(body: dict[str, Any]) -> dict[str, Any]:
+    """The optional fields of the quasar hook request that `IntentRouter.route` takes: `rerun`, `noop` and `deviceId` (as `device`)."""
+    noop = body.get("noop")
+    device = body.get("deviceId")
+    return {"rerun": body.get("rerun") is True,
+            "noop": noop if isinstance(noop, dict) else None,
+            "device": device if isinstance(device, str) and 0 < len(device) <= 80 else None}
+
+
 class Adapter:
     def __init__(self, env: dict[str, str] | None = None):
         self.env = env if env is not None else dict(os.environ)
@@ -164,6 +173,10 @@ class Adapter:
         # AISIS_INTENT_GRAMMAR=on|shadow|off (shadow logs the decision, never acts); AISIS_INTENT_CATCHALL=off keeps the
         # catch-all «не расслышал» reprompts away. Any failure leaves calc -> skills -> brain as it was.
         self.intent_mode = self.env.get("AISIS_INTENT_GRAMMAR", "on").lower()
+        # The repair dialog (correction.py, #182): AISIS_CORRECTION=off|shadow|on, default off. shadow decides and traces, never speaks.
+        self.correction_mode = self.env.get("AISIS_CORRECTION", "off").lower()
+        # The latest recognition evidence of the STT gateway's second recogniser (POST /asr/hypotheses), 15 s: the repair dialog's only source.
+        self.hypotheses = hypothesis_store.HypothesisStore()
         self.intents: intent_route.IntentRouter | None = None
         self.timers: timers.TimerBook | None = None
         self.hacli_session: ClientSession | None = None
@@ -215,8 +228,6 @@ class Adapter:
         self.corrector: asr_correct.Corrector | None = None
         self.corrector_http: ClientSession | None = None
         self.warm_task: asyncio.Task | None = None
-        # The latest recognition evidence of the STT gateway's second recogniser (POST /asr/hypotheses), 15 s.
-        self.hypotheses = hypothesis_store.HypothesisStore()
         self.catalog_cache: tuple[float, voice_vocab.Catalog] | None = None
 
     def _build_intents(self) -> intent_route.IntentRouter | None:
@@ -229,7 +240,9 @@ class Adapter:
                 timers.HaAnnouncer(self._ha_post_status, tts_entity, player))
         ha = ha_actions.HaActions(self._ha_get_json, self._ha_post_json) if self.env.get("AISIS_HA_ACTIONS", "on") != "off" else None
         return intent_route.IntentRouter(grammar, self.skills, self.timers, ha,
-                                         catchall=self.env.get("AISIS_INTENT_CATCHALL", "on") != "off")
+                                         catchall=self.env.get("AISIS_INTENT_CATCHALL", "on") != "off",
+                                         hypotheses=self.hypotheses,
+                                         correction_mode=self.correction_mode if self.correction_mode in ("shadow", "on") else "off")
 
     def _hacli(self) -> ClientSession:
         """One short-timeout session for ha-cli calls: a stuck Home Assistant must not stall a voice turn for a minute."""
@@ -368,10 +381,11 @@ class Adapter:
             "intent_grammar": {"mode": self.intent_mode, "loaded": self.intents is not None,
                                "routes": dict(self.intents.stats) if self.intents else {}},
             "hypotheses": self.hypotheses.stats(),
+            "correction": {"mode": self.correction_mode, "active": self.intents is not None and self.intents.correction is not None},
             "jev": {"mode": self.jev_mode, "active": self.jev is not None,
-                    "acting": self.jev is not None and self.jev_mode == "on" and self.jev_settings.acts,
-                    "threshold": self.jev_settings.threshold, "refuse": self.jev_settings.refuse,
-                    "reprompt": self.jev_settings.reprompt, "stats": dict(self.jev.stats) if self.jev else {}}})
+                "acting": self.jev is not None and self.jev_mode == "on" and self.jev_settings.acts,
+                "threshold": self.jev_settings.threshold, "refuse": self.jev_settings.refuse,
+                "reprompt": self.jev_settings.reprompt, "stats": dict(self.jev.stats) if self.jev else {}}})
 
     async def _turn_payload(self, station: str, text: str, turn: str):
         """Build one request while keeping stable persona apart from changing context."""
@@ -391,8 +405,9 @@ class Adapter:
             # question asks for history. claude_primary stores this whole outgoing text in its
             # per-station history, so both blocks are clipped to a few hundred characters each.
             dialog_blocks = await self._dialog_blocks(station, text)
+        question = self.intents.take_question(station) if self.intents is not None else None   # a question the owner's reply did not answer (#182)
         prefix = ("[Системная установка: " + block + "]\n" if inject and not native else "") + dialog_blocks \
-            + (self.memory.format_block(memories) if memories else "")
+            + (self.memory.format_block(memories) if memories else "") + dialog_context.question_block(question)
         outgoing = prefix + "Пользователь: " + text if prefix else text
         if len(outgoing) > 16000:
             outgoing, inject, memories = text, bool(block) and native, []
@@ -1108,7 +1123,7 @@ class Adapter:
                 if verdict is not None:
                     trace.note(**self.intents.trace_fields(verdict))
             else:
-                route = await self.intents.route("quasar", text, phase="pre", via_quasar=True)
+                route = await self.intents.route("quasar", text, phase="pre", via_quasar=True, **hook_route_extras(body))
                 if route.kind != "none":
                     layer = "skill" if route.source == "skill" else "grammar"
                     reply, listen = route.text, route.listen

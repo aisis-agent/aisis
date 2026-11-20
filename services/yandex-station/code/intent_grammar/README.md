@@ -7,6 +7,7 @@ labelled corpora before it ships.
 ```
 python3 -m intent_grammar check                       # validate, run pinned examples/negatives, list conflicting readings
 python3 -m intent_grammar match "громкость на пять"   # the decision for one utterance, as JSON
+python3 -m intent_grammar match --context repair.confirm --value alt="выключи свет" "да"   # ... inside a dialog context
 python3 -m intent_grammar backtest --route combined --gate --misses   # numbers, report file, exit 1 on a gate failure or regression
 python3 -m intent_grammar compile [--check]           # grammar/ru.yaml -> grammar/ru.json
 ```
@@ -89,6 +90,31 @@ Decision rules: **abstain over guess**. Two different intents at the same priori
 turn); a negated utterance never reaches an `execute`/`confirm` intent; a required slot that is missing asks (`clarify`) when `ask`
 is given and otherwise is no match.
 
+### Contexts: replies that mean something only inside a dialog
+
+```yaml
+contexts:                      # top level; an intent joins one or several with `context:`
+  - id: repair.confirm
+    values: [alt, heard]       # names of the per-turn phrases the caller supplies; patterns reference them as {@alt}
+    sample: {alt: ["выключи свет", "выключи"], heard: ["включи свет", "включи"]}   # what `check`, `match --context` and the back-test pass by default
+intents:
+  - id: repair.accept
+    tier: execute
+    context: repair.confirm    # one id or a list; no `priority:` = 900
+    patterns: ["(да|ага|угу)", "{@alt}"]
+    action: {executor: repair.accept}
+```
+
+`Grammar.decide(text, context=ActiveContext("repair.confirm", {"alt": ("выключи свет", "выключи")}))` (or just the id): the intents of that
+context join the normal ones and outrank them (priority 900 unless given; **a context intent can never be given 1000 or more, the emergency
+intent's priority, so `refuse.emergency` wins inside every context and no context argument can suppress it**). Without the argument, and for
+every intent that has no `context`, nothing changes: a context intent is invisible to a plain `decide`, and a normal intent never sees the
+argument. The values are the dialog's turn-specific words, passed by the caller and matched like literal words (by stem, the whole phrase, no
+phrase = no match); the YAML stays static. `{@name}` is allowed only in intents of a context that lists `name` under `values:`. A context
+intent ignores `phase` (a dialog's replies are decided before and after the quasar layer alike), and a compound is split into normal clauses
+only: «да и громче» is never an accept plus a volume change. `check` and `Grammar.self_check` read every example and negative of a context
+intent inside each of its contexts with the context's `sample` values.
+
 ## Route: where the grammar sits
 
 `intent_route.IntentRouter` (code/) is the adapter's route, and what `backtest --route adapter|combined` measures. `classify(text, phase)` is pure:
@@ -103,6 +129,14 @@ station was a question the **brain** asked («Рассказать подроб�
 replies are the brain's (`note_reply(..., brain=True)`); the grammar's own questions («Да?», «На сколько поставить таймер?») never count. A tie between two real
 intents is an abstain, never split into a compound (nine or more clauses, counted by their real boundaries, are never split: the search is quadratic);
 `Grammar.decide` with the default bands does not hand it to the catch-alls either (the router's explicit bands do).
+
+**The repair dialog (`AISIS_CORRECTION=off|shadow|on`, default off; `correction.py`).** Before the classification above, `route()` first reads the utterance as the answer to a
+question the speaker asked and still has open for that device (30 s; the grammar contexts `repair.confirm|choice|repeat` and their `repair.*` executors), then asks the correction
+engine whether this utterance deserves a question (a second opinion the gateway stored, or the quasar layer's no-op cue from the request's `noop`). The request body of
+`/intent/decide` may carry `deviceId`, `rerun: true` and `noop`; the response may carry route `rerun` (`text` = the corrected phrase the overlay runs as if spoken) and `context: true`
+(the dialog is open). An accepted alternative is run here when this adapter owns its executor; handed to the overlay as `rerun` when it announced support and the action is not risky; and
+otherwise asked for again («Скажите ещё раз: выключи свет.»). An unrelated command, an unmatched reply, an emergency phrase and a timeout all leave the dialog and take the normal route
+(the unmatched reply reaches the brain with `[Колонка только что спросила «…»; пользователь отвечает]`). `docs/specs/140-local-voice-speaker.md` has the decision record.
 
 A compound runs only when every clause is something the adapter itself can run (`executable`), checked before the first clause runs: a compound
 that ends in `none` has changed nothing. Without timers configured a timer phrase, alone or in a compound made only of timer clauses, answers «не умею»;
@@ -205,6 +239,17 @@ an intent list derived from the same utterances stays optimistic: new nightly ro
 (`gate.safety`: phrases that must always read as `refuse.emergency`, independent of the corpus and of every coverage number).
 `max_wrong_actions`, `max_false_triggers` and `max_p95_us` are totals over the whole corpus (`all/all`). A `min_coverage` floor fails when its
 split is absent or has nothing addressed.
+
+**Dialog rows (repair contexts, `gate.dialog`).** A row with a `context` field says how a text reads INSIDE an open dialog context
+(`Grammar.decide(text, context=ActiveContext(context, values))`): `{text, context, values?, expect: {intent: <id>|null}}` or
+`expect: {outside: true}` (no reply of the dialog: it leaves the context and takes the normal route); a real-corpus row may say `truth: <intent id>|outside`
+instead. `values` default to the context's `sample`. Dialog rows are **not** part of the real/synthetic/all splits (a reply is meaningless outside its dialog,
+and the coverage numbers must stay comparable), they are reported in a `dialog` block per kind and context and gated as a unit: `gate.dialog: {max_wrong: 0}`
+(every row decided as labelled) plus every `gate.safety` phrase decided as the emergency intent **inside every declared context**. The committed
+`grammar/dialog-ru.jsonl` carries them for the shipped grammar (kind `synthetic`: the generated matrix of every standard reply in every context, with
+paraphrases and negatives; kind `authored`: phrases written from the owner's wording; no recorded real reply to a repair question exists yet, so no row is
+called `real`); any `context` row in the private corpus files joins them with the kind of its file, and is left out of the normal rows. A row of an
+undeclared context fails, it is never skipped. The back-test summary prints `dialog rows n=…` per kind.
 
 **Regression ratchet (every split, held-out included).** Against the previous promoted report the run compares row by row over the rows both
 reports have (same id, same label, same side of the split). A row may get better, never worse: handled → missed/wrong and missed → wrong

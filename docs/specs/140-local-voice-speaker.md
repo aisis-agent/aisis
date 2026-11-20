@@ -82,6 +82,29 @@ The activation word fired on the device before any recognition ran. Whatever the
 - an activation nobody followed with a request ends the turn silently, like an unanswered follow-up window;
 - activation segments are not counted in recognizer-quality numbers (the archive marks them) and the back-test strips the name from every utterance.
 
+## Recognition alternatives and the repair dialog
+
+Decided 2026-11-19 after a clip (owner said «Выключи свет», the speaker's own spotter heard «включи свет», the quasar layer answered «Свет в студии уже включен.», aisis #182): when the recogniser may have heard the opposite word, the speaker asks instead of acting or answering a no-op.
+
+What the live path uses:
+- `stt-lib`: yes for the **hypotheses core** (stt-cli `stt_cli.hypotheses`: n-best model, CTC prefix beam and exact candidate scoring, confusables data, the repair policy `decide`), pinned by tag and commit once released; aisis keeps only the gateway glue, the dialog and the grammar contexts. No percentage is ever read aloud: a percent is the share of probability among the LISTED readings.
+- The second opinion is GigaAM-v3 CTC on the CPU in a warm worker, run beside Whisper on the same audio (no VRAM). Whisper is unchanged and stays the primary text: the wyoming server drops segments and word probabilities, and a CPU Whisper n-best was measured at 6.3–7.4 s and garbage on the clip, so Whisper alternatives are not used.
+- The on-device spotter's text (no audio, no confidence) is the primary for spotter turns; its clip is decoded afterwards for the trace and the Telegram post, and cannot prevent the action. For that case the quasar layer's own no-op («the light is already on») is the cue.
+
+Triggers (the core policy, first hit wins, each recorded in `trace.correction.trigger`): `garbled` (relisten), `contradiction` (a no-op cue plus an opposite reading), `confusable-disagreement` (the second opinion's top is a different ACTION above `ask_floor`; a third plausible action makes it a choice), `low-margin` (two actions close). Not triggered when the readings agree, differ only in non-action words, both map to no action (brain territory), or the alternative is below the floor.
+
+States per device, window 30 s, one retry (`AISIS_CORRECTION=off|shadow|on`, default `off`; `shadow` decides and traces, never speaks):
+- `awaiting_confirm` «Мне послышалось «включи свет». Вы имели в виду «выключи свет»?» — «да» (and synonyms, or the alternative itself) runs the alternative; «нет»/«не то» asks to repeat; the heard verb keeps the original; «повтори» says the question once more; «отмена» ends it.
+- `awaiting_choice` «Включить или выключить?» — a verb picks; «нет» asks to repeat; «повтори»; «отмена».
+- `awaiting_repeat` «Не расслышал. Повторите, пожалуйста.» — only «отмена» is a reply; anything else is a fresh utterance that takes the normal route.
+- A reply the context does not read leaves it and takes its normal route; when that reaches the brain the turn text carries `[Колонка только что спросила «…»; пользователь отвечает]`. A reply is not acted on when the second opinion on ITS audio argues against it: a «да» (or a kept or chosen reading) that the second opinion also hears as an emergency phrase (at any posterior), or at the policy floor as a cancel, the opposite answer or speech to drop; a «нет» it hears as «да». The speaker then hears «Скажите «да» или «нет».» once. A second doubt after the repeat, a second «повтори» or a repeated contradiction ends with «Ладно, не буду.» The same words said again within 4 s of the question count as the owner's answer when they arrive on the channel that asked (the hook or the speaker's own turn) without the quasar no-op probe; the other channel's delivery of the utterance that opened the question, or that probe, only repeats the question.
+
+Evidence source: the dialog reads the adapter's `HypothesisStore` (`/asr/hypotheses`, 15 s, filled by the STT gateway's second opinion), the same instance the gateway endpoint writes; without evidence only the quasar no-op cue can open a question.
+
+Safety: nothing runs from a hypothesis without a spoken yes; the engine never opens a context over an emergency phrase (grammar `refuse.emergency`, priority 1000, above every context intent) or a dropped one, whether it is the primary, a listed hypothesis or the proposed alternative; an action outside the light/volume/media/dialog allowlist (kettle, sockets, TV, climate, timers, locks) is held and asked on ANY disagreement, and its «да» runs only through the normal route (never the overlay's `rerun`); at most one question per utterance; a reply whose audio the second opinion hears as a different selection (another choice, the heard reading for the alternative, a cancel or an opposite answer) runs nothing; a dialog has one retry (a «повтори» or a contradicted reply) and a choice is re-asked with the choice question, never «да/нет»; a hook request without a `deviceId` opens and answers no dialog (every such caller would share one key); a context-less «да»/«нет» does nothing; the whole path is fail-open (any error leaves today's route).
+
+Needs a quasar deploy (prepared and stage-checked by the overlay agent, not part of the adapter): the hook request fields `deviceId`, `rerun: true`, `noop`, the hook route `rerun`, the no-op probe in `executeDeviceIntent`, and the repeat handler deferring to `context: true`. Without the deploy the adapter answers `rerun`-less: «Скажите ещё раз: выключи свет.» and the dialog works from stored second opinions only.
+
 ## Acceptance metrics
 
 Every model or pipeline change is accepted only through benchmarks; numbers are recorded in the repository that owns the component.

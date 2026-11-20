@@ -23,6 +23,16 @@ Record (JSON, all keys optional except v/ts/via/text):
   brain    {"provider", "slot", "model", "attempts": [{"result", "seconds"}], "ms"}
   stages_ms {"grammar": .., "skills": .., "jev": .., "brain": .., "total": ..}
   errors   [short strings]
+  correction  the repair dialog (correction.py, #182), written when the engine had evidence or a dialog was open:
+              {"trigger": the core policy's trigger («garbled», «contradiction», «confusable-disagreement», «low-margin») or null,
+               "reason": why nothing was asked («agree», «vetoed», «below-floor», …) or null, "decision": none|ask|ask-choice|relisten,
+               "heard": the primary reading, "nbest": [{"text", "percent", "source", "engine", "fit"}] (percent is the share among the listed
+               readings, never spoken), "nbest_ms": the second opinion's engine time or null, "cue": [{"kind": "noop", "supports": text}],
+               "shadow": true (only in shadow mode: decided and traced, never spoken),
+               "dialog": {"state": awaiting_confirm|awaiting_choice|awaiting_repeat, "ask": the spoken question, "answer": the reply text or null,
+                          "outcome": accepted|denied|kept|chose:<text>|cancelled|timeout|fallthrough|gave_up|repeat or null while open, "retries": int}}
+              The turn that asks carries the evidence and `dialog` with a null answer and outcome; every later turn that reads or closes the
+              dialog carries the same evidence with its own `answer` and `outcome`.
 """
 from __future__ import annotations
 

@@ -10,6 +10,8 @@ Syntax (tokens are separated by spaces; the whole utterance must be consumed):
     X?           X is optional (a word, a group, or a {reference})
     {name}       a lexicon set (any of its forms) or a declared slot
     {name:type}  a typed slot: number, ordinal, percent, delta, duration, clock, text, word, or a lexicon name
+    {@name}      a per-turn value of the active dialog context: any of the phrases the caller passed under `name`
+                 (by stem, whole phrase); no phrase, no match. Only intents of a context may use it.
     _            exactly one arbitrary token
     ...          zero or more arbitrary tokens
 
@@ -19,7 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Mapping, Sequence
 
 from .normalize import Normalised, edit_distance_le1, fold, phonetic_key, stem
 from .numerals import parse_number, parse_ordinal
@@ -66,7 +68,12 @@ class Slot:
     lexicon: tuple[tuple[str, Alt], ...] = ()   # (canonical key, forms) for a lexicon slot
 
 
-Node = Word | Alt | Opt | Any1 | AnyRun | Slot
+@dataclass(frozen=True)
+class Value:
+    name: str                      # a value of the active dialog context, `{@name}` in a pattern
+
+
+Node = Word | Alt | Opt | Any1 | AnyRun | Slot | Value
 
 _LEX = re.compile(r"\{\s*([^{}:\s]+)\s*(?::\s*([^{}\s]+)\s*)?\}")
 _TOKEN = re.compile(r"\(|\)|\||\?|\{[^{}]*\}|[^\s()|?{}]+")
@@ -146,6 +153,10 @@ def _parse_ref(token: str, resolver: Resolver) -> Node:
     if match is None:
         raise PatternError(f"bad reference {token}")
     name, kind = match.group(1), match.group(2)
+    if name.startswith("@"):
+        if kind is not None or len(name) < 2:
+            raise PatternError(f"bad context value reference {token}")
+        return Value(name[1:])
     if kind is None:
         if name in resolver.slot_types:
             kind = resolver.slot_types[name]
@@ -176,11 +187,13 @@ SlotCheck = Callable[[str, object], bool]
 class Matcher:
     """Matches one compiled pattern against a normalised utterance."""
 
-    def __init__(self, utterance: Normalised, *, fuzzy: bool = False, slot_ok: SlotCheck | None = None):
+    def __init__(self, utterance: Normalised, *, fuzzy: bool = False, slot_ok: SlotCheck | None = None,
+                 values: Mapping[str, Sequence[Normalised]] | None = None):
         self.u = utterance
         self.n = len(utterance.tokens)
         self.fuzzy = fuzzy
         self.slot_ok = slot_ok
+        self.values = values or {}   # per-turn context values: name -> the phrases, already normalised
 
     def full(self, seq: tuple[Node, ...]) -> Iterator[tuple[tuple[Capture, ...], int]]:
         """Readings that consume the whole utterance."""
@@ -222,14 +235,28 @@ class Matcher:
         elif isinstance(node, Opt):
             yield from self._node(node.inner, pos)
             yield pos, (), 0
-        elif isinstance(node, Any1):
-            if pos < self.n:
-                yield pos + 1, (), 0
-        elif isinstance(node, AnyRun):
-            for end in range(self.n, pos - 1, -1):
-                yield end, (), 0
+        elif isinstance(node, (Any1, AnyRun)):
+            yield from self._wildcard(node, pos)
+        elif isinstance(node, Value):
+            yield from self._value(node, pos)
         else:
             yield from self._slot(node, pos)
+
+    def _wildcard(self, node: Any1 | AnyRun, pos: int) -> Iterator[Reading]:
+        """`_`: exactly one arbitrary token; `...`: any run of tokens, the longest first."""
+        if isinstance(node, Any1):
+            if pos < self.n:
+                yield pos + 1, (), 0
+        else:
+            for end in range(self.n, pos - 1, -1):
+                yield end, (), 0
+
+    def _value(self, node: Value, pos: int) -> Iterator[Reading]:
+        """A per-turn context value: any of its phrases, matched by stem; no phrase, no match."""
+        for phrase in self.values.get(node.name, ()):
+            width = len(phrase.stems)
+            if width and self.u.stems[pos:pos + width] == phrase.stems:
+                yield pos + width, (), 2 * width
 
     def _slot(self, node: Slot, pos: int) -> Iterator[Reading]:
         if pos >= self.n:
