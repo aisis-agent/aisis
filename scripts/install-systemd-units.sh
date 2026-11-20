@@ -99,13 +99,16 @@ done
 git_common() { git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true; }
 home_common=$(git_common "$HOME/xp/aisis")
 # Why $deploy_tree cannot serve the units (empty when it can): a worktree root of the ~/xp/aisis repository, on its own
-# branch, holding every entry point.
+# branch, holding every entry point. The LAN proxy entry must also hold the ALLOWED_PEERS allow-list: a retained deploy-main
+# from before it would run the proxy open to the whole LAN (the API behind it has no authentication).
 deploy_problem() {
   local rel
   [ "$(git -C "$deploy_tree" rev-parse --show-toplevel 2>/dev/null || true)" = "$(readlink -f "$deploy_tree")" ] || { echo "not a worktree root"; return; }
   [ "$(git_common "$deploy_tree")" = "$home_common" ] || { echo "a worktree of another repository"; return; }
   [ "$(git -C "$deploy_tree" symbolic-ref --short -q HEAD || true)" = deploy-main ] || { echo "not on branch deploy-main"; return; }
   for rel in "${deploy_entries[@]}"; do [ -f "$deploy_tree/$rel" ] || { echo "missing $rel"; return; }; done
+  grep -q ALLOWED_PEERS "$deploy_tree/services/yandex-station/code/quasar_lan_proxy.py" \
+    || { echo "quasar_lan_proxy.py has no ALLOWED_PEERS allow-list; fast-forward deploy-main to origin/main"; return; }
 }
 
 drift=()
@@ -154,7 +157,7 @@ exec {lock_fd}>"$state_dir/maintenance.lock"
 flock -w "${AISIS_LOCK_WAIT:-120}" "$lock_fd" \
   || { echo "needs manual: a deployment holds $state_dir/maintenance.lock; rerun when it finishes" >&2; exit 10; }
 
-# The deploy-worktree.conf drop-ins run adapter, clipfeed, dashboard and stt from this worktree: it must be a complete worktree
+# The deploy-worktree.conf drop-ins run adapter, clipfeed, dashboard, stt and the LAN proxy from this worktree: it must be a complete worktree
 # of the ~/xp/aisis repository before any drop-in is installed, so a unit never starts with a missing entry point.
 # Anything else stops the run (exit 10) before a unit or drop-in file changes.
 if [ "${#deploy_entries[@]}" -gt 0 ]; then

@@ -69,6 +69,7 @@ class InstallerTest(unittest.TestCase):
         code.mkdir(parents=True, exist_ok=True)
         for name in ("adapter.py", "clipfeed.py", "dashboard.py", "stt_wyoming.py"):
             (code / name).write_text("# entry\n")
+        (code / "quasar_lan_proxy.py").write_text("# entry: reads ALLOWED_PEERS\n")
         for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "init"],
                      ["update-ref", "refs/remotes/origin/main", "HEAD"]):
             self.git(*args)
@@ -252,6 +253,13 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("created:", result.stdout)
         self.assertTrue((self.deploy_tree / "scripts" / SCRIPT.name).is_file())
 
+    def test_lan_proxy_runs_from_the_deploy_worktree_and_needs_its_entry_point_there(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        dropin = (self.dest / "aisis-station-lan-proxy.service.d" / "deploy-worktree.conf").read_text()
+        self.assertIn("/.worktrees/deploy-main/services/yandex-station/code/quasar_lan_proxy.py", dropin)
+        self.assertTrue((self.deploy_tree / "services/yandex-station/code/quasar_lan_proxy.py").is_file())
+
     def test_missing_deploy_worktree_for_an_unrelated_home_stops_before_any_unit_changes(self):
         shutil.rmtree(self.primary)
         self.git("worktree", "prune")
@@ -282,6 +290,15 @@ class InstallerTest(unittest.TestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 10)
         self.assertIn("missing services/yandex-station/code/dashboard.py", result.stderr)
+        self.assertFalse(self.dest.exists())
+
+    def test_deploy_worktree_whose_lan_proxy_predates_the_allow_list_is_refused(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        (self.deploy_tree / "services/yandex-station/code/quasar_lan_proxy.py").write_text("# entry: open proxy\n")
+        shutil.rmtree(self.dest)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 10)
+        self.assertIn("no ALLOWED_PEERS allow-list", result.stderr)
         self.assertFalse(self.dest.exists())
 
     def test_repository_of_another_project_at_the_deploy_path_is_refused(self):
