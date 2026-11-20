@@ -24,9 +24,13 @@ except ImportError:
 
 import stt_wyoming
 import voiceclips
+import voice_vocab
 
 RATE = 16000
 FRAME = RATE // 50                      # 20 ms of samples
+PROMPT_ENV = ('WHISPER_INITIAL_PROMPT="Включи свет на кухне. Выключи люстру. Поставь таймер на десять минут. Разбуди меня в семь тридцать. '
+              'Кондиционер: обогрев, охлаждение, температура двадцать три градуса. Комнаты: гостиная, кухня, спальня, студия, угол, второй этаж, '
+              'прихожая. Устройства: глобус, ультра лампа, кондей 2, гирлянда, люстра, студия. Исполнители: Eminem, Drummatix."\n')   # what refresh-whisper-prompt.sh installs
 
 
 class LoudIsSpeech:
@@ -59,13 +63,16 @@ class GatewayReplay(unittest.TestCase):
         self.db = os.path.join(self.tmp.name, "dialogs.sqlite3")
         self.env = {"AISIS_WYOMING_URI": "tcp://127.0.0.1:1", "AISIS_DIALOGS_DB": self.db, "AISIS_STT_AB_PERCENT": "0", "AISIS_STT_DSP": "0",
                     "AISIS_STT_WAKE_WINDOW": "0",   # these sessions test the text-level strip on a real clock: the audio cut stays out of it
-                    "AISIS_STT_TONE_GUARD": "0"}    # the fake speech is a square wave, which is a tone: tone_guard has its own tests
+                    "AISIS_STT_TONE_GUARD": "0",    # the fake speech is a square wave, which is a tone: tone_guard has its own tests
+                    "AISIS_WHISPER_PROMPT_ENV": os.path.join(self.tmp.name, "whisper-prompt.env")}   # never the developer's own prompt file
         previous = os.environ.get("AISIS_VOICE_ARCHIVE")
         os.environ["AISIS_VOICE_ARCHIVE"] = os.path.join(self.tmp.name, "archive")
         self.addCleanup(lambda: os.environ.pop("AISIS_VOICE_ARCHIVE", None) if previous is None
                         else os.environ.__setitem__("AISIS_VOICE_ARCHIVE", previous))
+        with open(self.env["AISIS_WHISPER_PROMPT_ENV"], "w", encoding="utf-8") as prompt_env:
+            prompt_env.write(PROMPT_ENV)
 
-    def run_session(self, script, heard, finish=True, slow_first=0.0, pause=0.15):
+    def run_session(self, script, heard, finish=True, slow_first=0.0, pause=0.15, domain_catalog=None):
         """Play `script` (bytes, with a pause after each part) into one websocket session. `heard` is what the recognizer
         answers, in order. Returns (messages the gateway sent, recognizer calls, clip rows)."""
         answers = list(heard)
@@ -78,7 +85,7 @@ class GatewayReplay(unittest.TestCase):
             return answers.pop(0)
 
         async def play():
-            gateway = stt_wyoming.STTGateway(env=self.env, vad_factory=LoudIsSpeech, recognizer=recognizer, verifier=object())
+            gateway = stt_wyoming.STTGateway(env=self.env, vad_factory=LoudIsSpeech, recognizer=recognizer, verifier=object(), domain_catalog=domain_catalog)
             messages = []
             async with TestClient(TestServer(gateway.app())) as client:
                 async with client.ws_connect("/") as ws:
@@ -138,6 +145,62 @@ class GatewayReplay(unittest.TestCase):
         with self.assertLogs("aisis.stt", level="INFO") as logs:
             self.run_session([speech(1500) + silence(900)], ["включи свет"])
         self.assertEqual([line for line in logs.output if "stt_tone_shadow" in line], [])
+
+    def hint_echo_lines(self, logs):
+        return [line for line in logs.output if "stt_hint_echo_shadow would_drop" in line]
+
+    def test_hint_echo_is_counted_in_shadow_mode_and_still_sent(self):
+        """Ticket #258: the default mode only logs the prompt read back, the request goes on as before."""
+        with self.assertLogs("aisis.stt", level="INFO") as logs:
+            messages, calls, rows = self.run_session([speech(1500) + silence(900)], ["Комнаты, гирлянда, люстра."])
+        self.assertEqual(len(self.hint_echo_lines(logs)), 1)
+        self.assertEqual(messages, [{"text": "Комнаты, гирлянда, люстра.", "end_of_utt": True}])
+        self.assertEqual(rows, [("sent", None, "Комнаты, гирлянда, люстра.")])
+
+    def test_hint_echo_after_the_name_is_still_an_echo(self):
+        with self.assertLogs("aisis.stt", level="INFO") as logs:
+            self.run_session([speech(1500) + silence(900)], ["Алиса, комнаты, гирлянда, люстра."])
+        self.assertEqual(len(self.hint_echo_lines(logs)), 1)
+
+    def test_hint_echo_is_dropped_in_enforce_mode(self):
+        self.env["AISIS_STT_HINT_ECHO"] = "enforce"
+        messages, calls, rows = self.run_session([speech(1500) + silence(900)], ["Комнаты, гирлянда, люстра."])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(messages, [{"text": "", "end_of_utt": True}])   # no `rejected`: that would bring the reprompt back
+        self.assertEqual(rows, [("blacklist", "hint_echo", "Комнаты, гирлянда, люстра.")])
+
+    def test_hint_echo_guard_off_is_silent(self):
+        self.env["AISIS_STT_HINT_ECHO"] = "0"
+        with self.assertLogs("aisis.stt", level="INFO") as logs:
+            messages, _, rows = self.run_session([speech(1500) + silence(900)], ["Комнаты, гирлянда, люстра."])
+        self.assertEqual(self.hint_echo_lines(logs), [])
+        self.assertEqual(rows, [("sent", None, "Комнаты, гирлянда, люстра.")])
+
+    def test_the_prompts_example_command_is_a_request_even_when_enforcing(self):
+        """The example commands are not list entries: a recogniser that echoes «Включи свет на кухне.» may have heard it, and the on-device spotter says those words."""
+        self.env["AISIS_STT_HINT_ECHO"] = "enforce"
+        messages, _, rows = self.run_session([speech(1500) + silence(900)], ["Включи свет на кухне."])
+        self.assertEqual(messages, [{"text": "Включи свет на кухне.", "end_of_utt": True}])
+        self.assertEqual(rows, [("sent", None, "Включи свет на кухне.")])
+
+    def test_no_prompt_file_means_no_echo_verdict(self):
+        self.env["AISIS_STT_HINT_ECHO"] = "enforce"
+        os.remove(self.env["AISIS_WHISPER_PROMPT_ENV"])
+        _, _, rows = self.run_session([speech(1500) + silence(900)], ["Комнаты, гирлянда, люстра."])
+        self.assertEqual(rows, [("sent", None, "Комнаты, гирлянда, люстра.")])
+
+    def test_the_context_prompt_sent_to_the_recognizer_counts_as_well(self):
+        """An stt-cli recogniser gets its prompt with every request (AISIS_STT_DOMAIN_CONTEXT): its lists are entries too, with no env file at all."""
+        self.env["AISIS_STT_HINT_ECHO"] = "enforce"
+        os.remove(self.env["AISIS_WHISPER_PROMPT_ENV"])
+        catalog = types.SimpleNamespace(get=lambda: voice_vocab.Catalog(areas=["кухня", "спальня"], entities=["гирлянда", "люстра"]))
+        messages, calls, rows = self.run_session([speech(1500) + silence(900)], ["Комнаты, гирлянда, люстра."], domain_catalog=catalog)
+        self.assertEqual(rows, [("blacklist", "hint_echo", "Комнаты, гирлянда, люстра.")])
+        self.assertEqual(messages, [{"text": "", "end_of_utt": True}])
+
+    def test_the_default_is_shadow_and_the_spellings_are_the_tone_guards(self):
+        for raw, mode in ((None, "shadow"), ("enforce", "enforce"), ("1", "enforce"), ("0", "off"), ("nonsense", "shadow")):
+            self.assertEqual(stt_wyoming.Tuning.from_env({} if raw is None else {"AISIS_STT_HINT_ECHO": raw}).hint_echo, mode, raw)
 
     def test_the_real_pair_is_one_request_with_no_question_in_between(self):
         """tg#30176 + tg#30177: a click, «Малис» (the name), a pause, then the request."""

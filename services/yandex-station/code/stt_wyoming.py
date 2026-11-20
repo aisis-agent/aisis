@@ -25,6 +25,7 @@ from urllib.parse import unquote, urlsplit
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
 import dsp_settings
+import hint_echo
 import speech_frontend
 import spotter_clips
 import stt_tuning
@@ -139,9 +140,7 @@ def station_of(request):
     return value[:64] if value and value.isprintable() else None
 
 
-def _fold(text):
-    folded = re.sub(r"[^a-zа-я0-9 ]+", " ", text.lower().replace("ё", "е"))
-    return re.sub(r"\s+", " ", folded).strip()
+_fold = hint_echo.fold   # one folding of transcripts for the gate's filters and the prompt-echo guard
 
 
 def is_silence_hallucination(text):
@@ -238,6 +237,7 @@ class Tuning:
     ab_percent: float = 10.0     # share of utterances also sent to the recognizer UNprocessed, in the background, for the A/B counters
     wake_cut: bool = True        # cut the activation word from the audio before the recognizer (wake_window.py); off: the text-level strip only
     tone_guard: str = tone_guard.DEFAULT_MODE   # a short narrow-band tone (the station's activation chime, an earcon): "enforce" drops it before the recognizer, "shadow" only logs stt_tone_shadow, "off" (tone_guard.py)
+    hint_echo: str = hint_echo.DEFAULT_MODE     # a transcript that is only the recogniser's own prompt lists read back (hint_echo.py): "enforce" drops it, "shadow" only logs stt_hint_echo_shadow, "off"
 
     @classmethod
     def from_env(cls, env):
@@ -259,6 +259,7 @@ class Tuning:
                    highpass_hz=max(0.0, number("AISIS_STT_HIGHPASS_HZ", cls.highpass_hz, float)),
                    wake_cut=bool(number("AISIS_STT_WAKE_WINDOW", int(cls.wake_cut), int)),
                    tone_guard=tone_guard.parse_mode(env.get("AISIS_STT_TONE_GUARD"), cls.tone_guard),
+                   hint_echo=tone_guard.parse_mode(env.get("AISIS_STT_HINT_ECHO"), cls.hint_echo),   # the same off/shadow/enforce spelling
                    ab_percent=min(100.0, max(0.0, number("AISIS_STT_AB_PERCENT", cls.ab_percent, float))))
 
 
@@ -561,6 +562,8 @@ class STTGateway:
         self.adapter_url = self.env.get("AISIS_ADAPTER_URL", "http://127.0.0.1:31117").rstrip("/")
         self.hypothesis_session = None      # aiohttp client of the loopback publish to the adapter; made on first use
         self.hypothesis_background = set()
+        # The prompt a stock wyoming-whisper was started with (its env file; the gateway never sees it on the wire): what a hint echo is compared with.
+        self.prompt_file = hint_echo.PromptFile(self.env.get("AISIS_WHISPER_PROMPT_ENV"))
 
     def live_tuning(self):
         """The startup tuning with the dashboard's end-of-speech wait and level front-end overrides; read per conversation, no restart."""
@@ -602,6 +605,11 @@ class STTGateway:
         if self.domain_catalog is not None:
             extras["context"] = voice_vocab.domain_context(self.domain_catalog.get(), with_hotwords=self.env.get("AISIS_STT_HOTWORDS") == "1")
         return extras
+
+    def prompt_hint(self):
+        """The list labels and items of every prompt the recognizer works with: its own started-with prompt and the `context` prompt sent with each request."""
+        context = self.recognizer_extras().get("context")
+        return hint_echo.Hint.of([self.prompt_file.read(), context["prompt"] if context else ""])
 
     def tv_activation(self):
         """Activation = a spoken turn's websocket just opened (wake word/spotter fired on the station).
@@ -907,6 +915,11 @@ class STTGateway:
         if recognizer_pcm is not utt.speech_pcm and tuning.ab_percent > 0 and random.random() * 100 < tuning.ab_percent:
             self.ab_probe(utt.speech_pcm, rate, out.heard, info["gain_db"], utt.voiced_rms)
         out.rejected, named = judge_transcript(out.heard, utt)
+        if out.rejected is None and tuning.hint_echo != "off" and hint_echo.is_echo(named.clean, self.prompt_hint()):
+            if tuning.hint_echo == "enforce":
+                out.rejected, named = hint_echo.REJECTED, None
+            else:
+                LOG.info("stt_hint_echo_shadow would_drop heard=%r voiced_ms=%d rms=%.1f", out.heard, utt.voiced_ms, utt.voiced_rms)   # counted before enforcing: what a real list-only request would cost
         if out.rejected is None:
             out.text, out.wake_cut = named.clean, named.head
             out.speaker = await self.speaker_result(speaker_task, utt.speaker_pcm, rate, out.text)

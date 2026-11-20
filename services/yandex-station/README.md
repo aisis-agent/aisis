@@ -279,6 +279,20 @@ that was not observed.
   request that is nearly a pure tone would be dropped, so run `shadow` for a while first: each would-drop line is followed by the
   recogniser's `stt_final text=...` for the same cut, which tells a chime caption from a real word (count: `journalctl --user -u aisis-station-stt | grep -c stt_tone_shadow`).
   Python-only: restart `aisis-station-stt`.
+- **Prompt-echo guard** (`code/hint_echo.py`, ticket #258): on room noise Whisper sometimes continues its own initial prompt instead of hearing
+  anything, and the gateway sent that on as a request (clip `20261120T133321-8c9f82`, owner verdict «шум»: «Комнаты, гирлянда, люстра.» ->
+  the adapter's «Не расслышал. Повтори» reprompt and an open microphone). A transcript is a prompt echo when every comma/full-stop piece of
+  it is an entry of the prompt's LISTS (the label «Комнаты» / «Устройства» / «Исполнители», or one room, device or artist), there are at
+  least two pieces, and a label is among them or there are at least three. The example commands and the climate sentence of the prompt are
+  not entries (the recogniser may have heard them, and the on-device spotter transcribes «включи свет» word for word); «кухня, студия» (two
+  rooms) stays a request. The prompt is read from the wyoming-whisper unit's env file (`AISIS_WHISPER_PROMPT_ENV`, default
+  `~/.config/aisis/whisper-prompt.env`, re-read when it changes) plus the `context` prompt sent to an stt-cli recogniser. The audio level is not
+  used: the stored noise clip and the owner's real verdicts have the same rms and contrast.
+  `AISIS_STT_HINT_ECHO` (in `~/.config/aisis/runtime.env`) picks the mode: `shadow` (the default) only logs
+  `stt_hint_echo_shadow would_drop heard=...` and drops nothing; `1` / `enforce` drops it (clip `status='blacklist'`, reason `hint_echo`, the
+  cut is dropped like a caption and the session keeps listening); `0` switches it off. Count a shadow period with
+  `journalctl --user -u aisis-station-stt | grep stt_hint_echo_shadow` and compare each line with the owner's clip verdicts before enforcing.
+  Python-only: restart `aisis-station-stt`.
 - **Whisper prompt**: `aisis-whisper-prompt.timer` regenerates the recognizer's
   initial prompt every 6 h (code/refresh-whisper-prompt.sh -> `voice_vocab.py prompt`).
   It is home vocabulary only (fixed example commands, HA room and device names, library
