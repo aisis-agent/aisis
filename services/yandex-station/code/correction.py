@@ -90,8 +90,7 @@ class Dialog:
     retries: int = 0
     opened_at: float = 0.0                  # when the question was first asked (the duplicate-delivery window counts from here)
     answered: bool = False                  # any reply was read: a later identical utterance is an answer, not a duplicate delivery
-    asked_again: bool = False               # «повтори» is answered once
-    reasked: bool = False                   # the «да»/«нет» that the second opinion contradicted is asked once more
+    retried: bool = False                   # the one retry is used (a «повтори», or a «да»/«нет» that the second opinion contradicted)
     canon: str = ""                         # normalised heard text (duplicate delivery and cooldown)
     via_quasar: bool = False                # the question was asked on the quasar hook (not the speaker's own turn): the channel an immediate repeat is judged against
 
@@ -406,55 +405,61 @@ class Correction:
     def _step(self, dialog: Dialog, intent: str, decision: Decision, text: str, now: float, context: ActiveContext) -> Step:
         if intent == "repair.cancel" or dialog.state == REPEAT:   # the repeat context reads nothing else
             return Step(outcome="cancelled", end=True)
-        if intent != "repair.again" and self._doubted(dialog, intent, text, context, now):
-            return self._ask_once_more(dialog, now)
+        if intent != "repair.again" and self._doubted(dialog, decision, text, context, now):
+            return self._retry(dialog, now, YES_OR_NO_TEXT if dialog.state == CONFIRM else dialog.question)
         if intent == "repair.again":
-            if dialog.asked_again:
-                return Step(outcome="gave_up", say=GIVE_UP_TEXT)
-            dialog.asked_again, dialog.asked_at, dialog.retries = True, now, dialog.retries + 1
-            return Step(say=dialog.question, listen=True)
+            return self._retry(dialog, now, dialog.question)
         if intent == "repair.deny":
             return Step(outcome="denied", say=REPEAT_TEXT, listen=True)
-        if intent == "repair.accept":
-            return Step(outcome="accepted", run=dialog.readings[0].text, risky=dialog.risky)
-        if intent == "repair.keep":
-            return Step(outcome="kept", run=dialog.heard, risky=dialog.risky)
-        pick = (decision.action.get("args") or {}).get("pick") if decision.action else None
-        chosen = dialog.readings[0 if pick == "first" else 1]
-        return Step(outcome=f"chose:{chosen.text}", run=chosen.text, risky=dialog.risky)
+        chosen = self._selected(dialog, decision)
+        outcome = {"repair.accept": "accepted", "repair.keep": "kept"}.get(intent, f"chose:{chosen}")
+        return Step(outcome=outcome, run=chosen, risky=dialog.risky)
 
     @staticmethod
-    def _ask_once_more(dialog: Dialog, now: float) -> Step:
-        """The reply is not acted on: «Скажите «да» или «нет»» once, then a polite end."""
-        if dialog.reasked:
-            return Step(outcome="gave_up", say=GIVE_UP_TEXT)
-        dialog.reasked, dialog.asked_at, dialog.retries = True, now, dialog.retries + 1
-        return Step(say=YES_OR_NO_TEXT, listen=True)
+    def _selected(dialog: Dialog, decision: Decision) -> str | None:
+        """The phrase a reply that runs something selects: the alternative (accept), the heard reading (keep) or the picked one."""
+        if decision.intent == "repair.accept":
+            return dialog.readings[0].text
+        if decision.intent == "repair.keep":
+            return dialog.heard
+        pick = (decision.action.get("args") or {}).get("pick") if decision.action else None
+        return dialog.readings[0 if pick == "first" else 1].text if decision.intent.startswith("repair.choose") else None
 
-    def _doubted(self, dialog: Dialog, intent: str, text: str, context: ActiveContext, now: float) -> bool:
+    @staticmethod
+    def _retry(dialog: Dialog, now: float, say: str) -> Step:
+        """The reply is not acted on or a repeat was asked: say `say` once more. The dialog has ONE retry for both; the next one is a polite end."""
+        if dialog.retried:
+            return Step(outcome="gave_up", say=GIVE_UP_TEXT)
+        dialog.retried, dialog.asked_at, dialog.retries = True, now, dialog.retries + 1
+        return Step(say=say, listen=True)
+
+    def _doubted(self, dialog: Dialog, decision: Decision, text: str, context: ActiveContext, now: float) -> bool:
         """The second opinion on the reply itself argues against acting on it. Any listed hypothesis that the grammar reads as an
-        emergency vetoes a reply that runs something (at any posterior, as for a question); one at the policy floor that reads as
-        speech to drop, a cancel or the opposite answer (Whisper «да», the other model «нет») vetoes the reply too."""
+        emergency vetoes a reply that runs something (at any posterior, as for a question); one at the policy floor that the dialog
+        reads as a different answer (the opposite yes/no, a cancel, the other choice, the heard reading for the alternative) or that is
+        speech to drop vetoes the reply too."""
         nbest, _payload = self.stored(dialog.station, text, now)
         if nbest is None:
             return False
-        runs = intent != "repair.deny"
+        selected = self._selected(dialog, decision)
         for hypothesis in nbest.hypotheses:
             if self._canon(hypothesis.text) == self._canon(text):
                 continue
-            if runs and self._emergency(hypothesis.text):
+            if selected is not None and self._emergency(hypothesis.text):
                 return True
-            if hypothesis.posterior >= self.policy.ask_floor and self._argues_against(hypothesis.text, context, runs):
+            if hypothesis.posterior >= self.policy.ask_floor and self._argues_against(dialog, hypothesis.text, selected, context):
                 return True
         return False
 
-    def _argues_against(self, hypothesis: str, context: ActiveContext, runs: bool) -> bool:
-        """The reading `hypothesis` of the reply's audio contradicts the reply: a cancel or the opposite answer, or (a reading the dialog
-        does not know at all) speech to drop such as a hallucinated caption. A filler the dialog reads as a yes («ага») is no conflict."""
+    def _argues_against(self, dialog: Dialog, hypothesis: str, selected: str | None, context: ActiveContext) -> bool:
+        """The reading `hypothesis` of the reply's audio contradicts the reply (`selected`: the phrase it runs, None for a «нет»): it
+        selects another phrase, stops or repeats instead, or (a reading the dialog does not know at all) is speech to drop such as a
+        hallucinated caption. A filler the dialog reads as the same answer («ага» for «да») is no conflict."""
         other = self.decide_in(hypothesis, context)
-        if other is not None and not other.fuzzy and other.intent.startswith("repair."):
-            return other.intent in (("repair.deny", "repair.cancel") if runs else ("repair.accept",))
-        return runs and self._protected(hypothesis)
+        if other is None or other.fuzzy or not other.intent.startswith("repair."):
+            return selected is not None and self._protected(hypothesis)
+        theirs = self._selected(dialog, other)
+        return theirs is not None if selected is None else self._canon(theirs or "") != self._canon(selected)
 
     def _leave(self, station: str, dialog: Dialog, text: str, outcome: str, now: float) -> None:
         """A text the dialog does not read: close it, keep the question for the brain."""

@@ -42,7 +42,7 @@ request: {"text": string, "dialogActive": boolean, "shadow"?: true,
 ```
 
 The repair dialog (`AISIS_CORRECTION=on`, #182) adds three optional request fields and one route; a caller that sends none of them sees today's contract:
-`deviceId` (the speaker's id; the adapter keeps one dialog per device, without it the hook's own key is used), `rerun: true` (the caller can handle the route
+`deviceId` (the speaker's id; the adapter keeps one dialog per device; a hook without it opens and answers no dialog, because every such caller would share one key), `rerun: true` (the caller can handle the route
 `rerun`), and `noop` (a SECOND call for the same `text`, made from the no-op branch of `executeDeviceIntent`: the device is already in the state the text asks
 for; `desired` is that state, `label` the thing switched, `targets` its entity ids; the adapter treats it as the cue for its question «Свет в студии уже
 включён. Вы хотели выключить?» and does not open a second dialog when the first call already did). `context: true` is in a response while the station's repair

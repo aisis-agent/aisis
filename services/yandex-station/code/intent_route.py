@@ -334,9 +334,11 @@ class IntentRouter:
         for» ({desired, label, targets}). `device`: the speaker's own id when the caller knows it (the repair dialog is kept per device)."""
         started = time.perf_counter_ns()
         decision = None
-        engine, key = self.correction, device or station
+        engine, key = self.correction, device or (None if via_quasar else station)   # a hook that names no device owns no dialog
         try:
             route = await self._dialog_turn(key, text, via_quasar, rerun, noop)
+            if route is not None:
+                self.pending.pop(station, None)   # the dialog took the turn: a clarification asked before is superseded, a bare answer joins nothing
             if route is None:
                 decision = self.classify(text, phase, fallback=not self.asked_a_question(station))
                 decision, text = self._with_joined_answer(station, text, phase, decision)
@@ -356,10 +358,10 @@ class IntentRouter:
         self._trace(decision, route, via_quasar, station)
         return route
 
-    async def _dialog_turn(self, key: str, text: str, via_quasar: bool, rerun: bool, noop: dict[str, Any] | None) -> Route | None:
-        """The repair dialog's route for the turn, or None (no dialog, or it did not take the turn)."""
+    async def _dialog_turn(self, key: str | None, text: str, via_quasar: bool, rerun: bool, noop: dict[str, Any] | None) -> Route | None:
+        """The repair dialog's route for the turn, or None (no dialog, no device to keep one for, or it did not take the turn)."""
         engine = self.correction
-        if engine is None:
+        if engine is None or key is None:
             return None
         try:
             return await self._correct(key, text, via_quasar, rerun, noop)
@@ -384,10 +386,10 @@ class IntentRouter:
             return await self._timer_action_once(station, text, decision, via_quasar)
         return await self._run(station, decision, via_quasar)
 
-    def _mark_open_dialog(self, key: str, route: Route) -> Route:
+    def _mark_open_dialog(self, key: str | None, route: Route) -> Route:
         """A turn answered here is no longer the brain's question to ask; `context`: the repair dialog is still open after it."""
         engine = self.correction
-        if engine is None:
+        if engine is None or key is None:
             return route
         if route.kind != "none":
             engine.drop_hint(key)   # answered: the question is not the brain's business

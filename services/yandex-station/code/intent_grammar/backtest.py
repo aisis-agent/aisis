@@ -196,16 +196,24 @@ def _dialog_row(record: dict[str, Any], kind: str, basis: str, occurrence: int) 
                      kind, None if outside else intent, outside)
 
 
+def _dialog_sources(directory: Path | None, fixture: bool) -> list[tuple[Path, str | None]]:
+    """The files with dialog records: the dialog fixture (when `fixture`; it must exist, or the gate would measure nothing) and the
+    corpus files under `directory`, each with its source (None for the fixture)."""
+    sources: list[tuple[Path, str | None]] = []
+    if fixture:
+        if not DIALOG_FIXTURE.exists():
+            raise FileNotFoundError(f"the dialog fixture {DIALOG_FIXTURE} is missing: the dialog gate would measure nothing")
+        sources.append((DIALOG_FIXTURE, None))
+    if directory is not None:
+        sources += [(path, corpus_source(path.name)) for path in sorted(directory.glob("*.jsonl")) if corpus_source(path.name)]
+    return sources
+
+
 def _dialog_records(directory: Path | None, fixture: bool) -> Iterator[tuple[Path, str | None, dict[str, Any]]]:
     """Every `context` record of the dialog fixture (when `fixture`) and of the corpus files under `directory`, with its file and
     that file's source (None for the fixture)."""
-    sources: list[tuple[Path, str | None]] = [(DIALOG_FIXTURE, None)] if fixture else []
-    if directory is not None:
-        sources += [(path, corpus_source(path.name)) for path in sorted(directory.glob("*.jsonl")) if corpus_source(path.name)]
-    for path, source in sources:
-        if not path.exists():
-            continue
-        for record in _jsonl_records(path.read_text(encoding="utf-8")):
+    for path, source in _dialog_sources(directory, fixture):
+        for record in _jsonl_records(path.read_text(encoding="utf-8")) if path.exists() else ():
             if "context" in record:
                 yield path, source, record
 
@@ -715,7 +723,7 @@ def _dialog_failures(block: dict[str, Any] | None, rule: dict[str, Any] | None) 
     A grammar that asks for the rule and a report without the dialog block fails: a run that skipped them proved nothing."""
     if rule is None:
         return []
-    if block is None:
+    if block is None or not block["rows"]:
         return ["dialog: the report has no dialog rows (the gate measures the repair contexts)"]
     failures: list[str] = []
     if len(block["failures"]) > rule.get("max_wrong", 0):

@@ -272,6 +272,7 @@ class OfferTests(Setup):
         for path in PATHS:
             self.setUp()
             await self.open_confirm(path)
+            self.store.put("st1", "включи свет", ("включи свет", 0.9), ("выключи свет", 0.1))   # the gateway's evidence for THIS audio replaces the question's
             route = await (self.hook if path == "hook" else self.turn)("включи свет")
             self.assertEqual(route.intent, "repair.rerun" if path == "hook" else "repair.say_again", path)
             self.assertIsNone(self.state(), path)
@@ -677,6 +678,14 @@ class ConfirmFlowTests(Setup):
         route = await self.hook("нет")
         self.assertEqual(route.text, "Скажите «да» или «нет».")
 
+    async def test_a_keep_the_second_opinion_hears_as_the_alternative_is_not_run_and_the_reverse(self):
+        for reply, other in (("включи", "выключи"), ("выключи", "включи")):
+            self.setUp()
+            await self.open_confirm()
+            self.store.put("st1", reply, (other, 0.8), (reply, 0.2))
+            route = await self.hook(reply)
+            self.assertEqual((route.kind, route.text, self.state()), ("reply", "Скажите «да» или «нет».", "awaiting_confirm"), reply)
+
     async def test_a_protected_reading_of_the_reply_vetoes_a_yes(self):
         """The reply text says «да»; the second opinion on the same audio hears an emergency, a cancel or speech to drop: nothing runs."""
         protected = (("вызови скорую", 0.8), ("помогите", 0.2), ("не надо ничего", 0.9), ("отмена", 0.6), ("Продолжение следует", 0.5))
@@ -775,10 +784,68 @@ class ChoiceFlowTests(Setup):
         for path, kind in (("hook", "rerun"), ("turn", "reply")):
             self.setUp()
             await self.open_choice(path)
+            self.store.put("st1", "включи свет", ("включи свет", 0.9), ("выключи свет", 0.1))   # the gateway's evidence for THIS audio replaces the question's
             route = await (self.hook if path == "hook" else self.turn)("включи свет")
             self.assertEqual(route.kind, kind, path)
             self.assertEqual(route.text if path == "hook" else route.intent, "включи свет" if path == "hook" else "repair.say_again", path)
             self.assertIsNone(self.state(), path)
+
+    async def test_a_reply_the_second_opinion_hears_as_the_other_reading_is_not_run(self):
+        for reply, other in (("включи", "выключи"), ("выключи", "включи")):
+            self.setUp()
+            await self.open_choice()
+            self.store.put("st1", reply, (other, 0.8), (reply, 0.2))
+            route = await self.hook(reply)
+            self.assertEqual((route.kind, route.text, self.state()), ("reply", "Включить или выключить?", "awaiting_choice"), reply)
+            second = await self.hook(reply)
+            self.assertEqual((second.text, self.state(), self.ha.calls), ("Ладно, не буду.", None, []), reply)
+
+    async def test_two_replies_the_second_opinion_hears_alike_still_run(self):
+        await self.open_choice()
+        self.store.put("st1", "выключи", ("выключить", 0.8), ("выключи", 0.2))
+        self.assertEqual((await self.hook("выключи")).text, "выключи свет")
+
+
+class RetryBudgetTests(Setup):
+    async def test_the_repeat_request_and_the_contradiction_share_one_retry(self):
+        await self.open_confirm()
+        await self.hook("повтори")
+        self.store.put("st1", "да", ("нет", 0.8), ("да", 0.2))
+        self.assertEqual((await self.hook("да")).text, "Ладно, не буду.")
+        self.assertIsNone(self.state())
+        self.setUp()
+        await self.open_confirm()
+        self.store.put("st1", "да", ("нет", 0.8), ("да", 0.2))
+        self.assertEqual((await self.hook("да")).text, "Скажите «да» или «нет».")
+        self.assertEqual((await self.hook("повтори")).text, "Ладно, не буду.")
+        self.assertEqual((self.state(), self.ha.calls), (None, []))
+
+
+class StationlessHookTests(Setup):
+    async def test_a_hook_without_a_device_id_opens_and_answers_no_dialog(self):
+        """Every stationless hook shares the key «quasar»: another speaker's «да» must never confirm this one's question."""
+        self.store.put("quasar", "включи свет", ("выключи свет", 0.7), ("включи свет", 0.3))
+        route = await self.router.route("quasar", "включи свет", phase="pre", via_quasar=True, rerun=True)
+        self.assertEqual(route.kind, "none")
+        self.assertEqual(self.engine.dialogs, {})
+        route = await self.router.route("quasar", "да", phase="pre", via_quasar=True, rerun=True)
+        self.assertNotEqual(route.kind, "rerun")
+
+    async def test_a_dialog_opened_by_a_device_is_not_answered_by_a_stationless_hook(self):
+        await self.open_confirm()
+        route = await self.router.route("quasar", "да", phase="pre", via_quasar=True, rerun=True)
+        self.assertNotEqual(route.kind, "rerun")
+        self.assertEqual(self.state(), "awaiting_confirm")
+
+
+class ClarificationTests(Setup):
+    async def test_a_repair_turn_supersedes_a_pending_timer_clarification(self):
+        route = await self.turn("поставь таймер")
+        self.assertIn("st1", self.router.pending)
+        self.light()
+        route = await self.turn("включи свет")
+        self.assertEqual(route.intent, "repair.ask")
+        self.assertNotIn("st1", self.router.pending)
 
 
 class RepeatFlowTests(Setup):

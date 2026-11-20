@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from intent_grammar import ActiveContext, backtest, load
 
@@ -159,6 +160,17 @@ class DialogBacktestTests(unittest.TestCase):
         full = backtest.build_report(self.g, [row], [], dialog_rows=backtest.load_dialog_rows(None))
         self.assertFalse(any("dialog" in line for line in full["gate"]["failures"]), full["gate"]["failures"])
         self.assertIn("dialog", full)
+
+    def test_an_empty_dialog_block_proves_nothing_and_fails_the_gate(self):
+        row = backtest.Row("x", "включи свет", "LIGHT_CMD", "real", "dev")
+        report = backtest.build_report(self.g, [row], [], dialog_rows=[])
+        self.assertTrue(any("no dialog rows" in line for line in report["gate"]["failures"]), report["gate"]["failures"])
+
+    def test_a_missing_fixture_is_an_error_not_an_empty_dataset(self):
+        with mock.patch.object(backtest, "DIALOG_FIXTURE", Path("/nonexistent/dialog-ru.jsonl")):
+            with self.assertRaises(FileNotFoundError):
+                backtest.load_dialog_rows(None)
+            self.assertEqual(backtest.load_dialog_rows(None, fixture=False), [])
 
     def test_a_context_context_emergency_miss_fails_the_gate(self):
         broken = copy.deepcopy(self.g)
