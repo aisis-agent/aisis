@@ -304,12 +304,28 @@ def activation_of(conn: sqlite3.Connection, clip: dict) -> dict | None:
     return dict(row) if row else None
 
 
-def processing_lines(conn: sqlite3.Connection, clip: dict, end: float, dialog: dict | None = None) -> list[tuple[int, str]]:
-    """How the adapter processed the clip, as ranked caption lines. Diagnostics must never keep a clip from the owner: a failure shows as a line."""
+def evidence_of(db: str, clip: dict) -> dict | None:
+    """The second opinion stored for the clip (voiceclips.hypotheses_of), or None. A failing lookup must not keep the clip from the owner."""
+    try:
+        return voiceclips.hypotheses_of(db, clip["id"])
+    except Exception as exc:
+        LOG.warning("clip_feed_hypotheses_failed clip=%s class=%s", clip["id"], type(exc).__name__)
+        return None
+
+
+def evidence_caption_lines(evidence: dict | None, traces: list[dict]) -> list[tuple[int, str]]:
+    """The alternatives of the stored second opinion, labelled with the engine that said them (trace_view.evidence_lines)."""
+    return trace_view.evidence_lines(evidence, traces)
+
+
+def processing_lines(conn: sqlite3.Connection, clip: dict, end: float, dialog: dict | None = None,
+                     evidence: dict | None = None) -> list[tuple[int, str]]:
+    """How the adapter processed the clip, as ranked caption lines, then the stored second opinion when no trace carries the alternatives.
+    Diagnostics must never keep a clip from the owner: a failure shows as a line."""
     try:
         traces = dialogstore.traces_between(conn, clip["ts"] - trace_view.MATCH_BEFORE_S, end + trace_view.MATCH_AFTER_S)
         mine = trace_view.traces_of_clip(clip, traces, end)
-        lines = trace_caption_lines(clip, mine, dialog, end)
+        lines = trace_caption_lines(clip, mine, dialog, end) + evidence_caption_lines(evidence, mine)
         if clip["status"] == "sent" and (clip.get("transcript") or "").strip():
             # What ha-cli verified for the phrase (the quasar layer's own Home Assistant calls are not in the adapter's trace; the
             # adapter's calls are, by journal id) and how Home Assistant was doing meanwhile.
@@ -321,16 +337,16 @@ def processing_lines(conn: sqlite3.Connection, clip: dict, end: float, dialog: d
         return [(1, "⚠ диагностика обработки недоступна (%s)" % type(exc).__name__)]
 
 
-def post_context(conn: sqlite3.Connection, clip: dict) -> tuple[str, list[tuple[int, str]], str]:
+def post_context(conn: sqlite3.Connection, clip: dict, db: str) -> tuple[str, list[tuple[int, str]], str]:
     """(result line, processing lines, session link line) of an archived clip: all a post says besides the clip's own facts. Marks the clip
-    with what the caption needs (`first_in_dialog`, `activation`)."""
+    with what the caption needs (`first_in_dialog`, `activation`). `db`: the archive the second opinion is read from."""
     clip["first_in_dialog"] = bool(clip.get("dialog_id")) and conn.execute(
         "SELECT 1 FROM voice_clips WHERE dialog_id=? AND ts<? LIMIT 1", (clip["dialog_id"], clip["ts"])).fetchone() is None
     end = window_end(conn, clip)
     dialog = load_dialog(conn, clip.get("dialog_id"))
     result = describe_result(clip, dialog, end)
     clip["activation"] = activation_of(conn, clip)
-    return result, processing_lines(conn, clip, end, dialog), link_line(clip, session_links.base_url())
+    return result, processing_lines(conn, clip, end, dialog, evidence_of(db, clip)), link_line(clip, session_links.base_url())
 
 
 def build_caption(clip: dict, result: str, gain: int, test: bool = False, footer: str = REPLY_FOOTER,
@@ -540,7 +556,7 @@ class Feed:
         if path is None:
             self._record(conn, clip["id"], "skipped", "nofile")
             return False
-        result, diag, link = post_context(conn, clip)
+        result, diag, link = post_context(conn, clip, self.db)
         try:
             via, msg, caption = send_clip(settings, clip, path, result, send=self.send, bot=self.bot, diag=diag, link=link)
         except Exception as exc:
@@ -682,7 +698,7 @@ def send_replay(db: str, clip_id: str) -> int:
         if clip is None or path is None:
             print("клип %s не найден в архиве" % clip_id, file=sys.stderr)
             return 1
-        result, diag, link = post_context(conn, clip)
+        result, diag, link = post_context(conn, clip, db)
     finally:
         conn.close()
     via, msg, _ = send_clip(load_settings(), clip, path, result, test=True, bot=clipbot.BotService(db), diag=diag, link=link)

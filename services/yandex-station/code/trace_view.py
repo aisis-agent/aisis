@@ -4,6 +4,7 @@ Shared by the Telegram clip feed (compact lines) and the dashboard session page 
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -13,6 +14,20 @@ LAYERS = {"grammar": "грамматика", "skill": "навык", "calc": "к�
 VIA = {"turn": "ход колонки", "hook": "хук квазара", "hook-shadow": "хук квазара (теневой)"}
 ASKED = {"clarify": "уточнение", "reprompt": "переспрос", "brain": "вопрос ИИ"}
 SPOTTER_RAN_IT = "команду выполнила сама колонка, серверу пришла только запись"   # a spotter clip («громче», «пауза»): no text turn, no adapter call
+DECISIONS = {"ask": "уточнение", "ask-choice": "выбор из двух", "relisten": "переспрос", "none": "без вопроса"}
+TRIGGERS = {"garbled": "фразу не разобрать", "contradiction": "подозрение на противоположную команду",
+            "confusable-disagreement": "второе мнение слышит другую команду", "low-margin": "варианты почти равноценны"}
+NO_QUESTION = {"agree": "оба распознавания согласны", "vetoed": "экстренная фраза, не вмешиваюсь", "long": "фраза слишком длинная",
+               "no-evidence": "второго мнения нет", "below-floor": "альтернатива слишком слаба",
+               "same-action": "варианты значат одно и то же", "no-action": "команды в варианте нет",
+               "no-wording": "для этого сомнения нет формулировки вопроса"}
+DIALOG_STATES = {"awaiting_confirm": "ждём «да» или «нет»", "awaiting_choice": "ждём выбор", "awaiting_repeat": "ждём повтор фразы",
+                 "closed": "диалог закрыт"}
+OUTCOMES = {"accepted": "принято", "denied": "отклонено", "kept": "оставлено как услышано", "cancelled": "отменено",
+            "timeout": "ответа не было", "fallthrough": "ответ ушёл обычным путём", "gave_up": "сдались после повтора", "repeat": "вопрос повторён"}
+CUES = {"noop": "команда ничего не меняет", "contradiction": "противоречит состоянию устройства", "state": "состояние устройства"}
+ENGINES = {"gigaam-v3-ctc": "GigaAM", "faster-whisper": "Whisper", "yandex-spotter": "споттер колонки"}
+EVIDENCE_SOURCES = {"spotter": "споттер колонки", "primary": "основное распознавание"}
 WAKE_STATUS = "activation"
 MATCH_AFTER_S = 20.0    # a clip's call starts within this long after the archived clip
 MATCH_BEFORE_S = 3.0
@@ -251,6 +266,7 @@ def ranked_lines(trace: dict, compact: bool = False, answered: str | None = None
     stages = stages_line(trace.get("stages_ms"))
     if stages:
         out.append((4, stages))
+    out.extend(correction_lines(trace.get("correction")))
     for error in trace.get("errors") or []:
         out.append((1, f"⚠ {error}"))
     return out
@@ -258,3 +274,128 @@ def ranked_lines(trace: dict, compact: bool = False, answered: str | None = None
 
 def lines(trace: dict, compact: bool = False, answered: str | None = None) -> list[str]:
     return [text for _, text in ranked_lines(trace, compact, answered)]
+
+
+# ── the correction engine's record (#182) ────────────────────────────────────
+# Everything below reads data that other components wrote: every field is optional and any shape may arrive, so nothing raises.
+def mapping(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def mappings(value: Any) -> list[dict]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def word(table: dict[str, str], key: Any) -> str:
+    return table.get(key, str(key)) if isinstance(key, str) else ""
+
+
+def percent(item: dict) -> int | None:
+    for key, scale in (("percent", 1), ("posterior", 100)):
+        value = item.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value * scale):
+            return round(value * scale)
+    return None
+
+
+def _variant(item: dict) -> str:
+    share = percent(item)
+    return f"«{item.get('text', '')}»" + (f" {share}%" if share is not None else "")
+
+
+def alternatives_lines(items: list[dict]) -> list[tuple[int, str]]:
+    """The two leading alternatives (rank 1) and the rest (rank 2), with their percentages: the share among the LISTED readings.
+    Percentages exist for diagnostics only; the speaker never says one."""
+    items = [i for i in items if isinstance(i.get("text"), str) and i["text"]]
+    out = []
+    if items:
+        out.append((1, "варианты: " + " · ".join(_variant(i) for i in items[:2])))
+    if items[2:]:
+        out.append((2, "ещё варианты: " + " · ".join(_variant(i) for i in items[2:])))
+    return out
+
+
+def outcome_text(outcome: str) -> str:
+    return f"выбрано «{outcome[len('chose:'):]}»" if outcome.startswith("chose:") else word(OUTCOMES, outcome)
+
+
+def dialog_line(dialog: dict) -> str:
+    """The question, the owner's answer and how it ended, or that the question is still open."""
+    ask, answer, outcome, state = (dialog.get(k) for k in ("ask", "answer", "outcome", "state"))
+    if not isinstance(ask, str) or not ask:
+        return ""
+    line = f"❓ «{ask}»"
+    if isinstance(answer, str) and answer:
+        line += f" → «{answer}»"
+    if isinstance(outcome, str) and outcome:
+        line += ": " + outcome_text(outcome)
+    elif state != "closed" and isinstance(state, str):
+        line += " · " + word(DIALOG_STATES, state)
+    return line
+
+
+def _decision_line(c: dict) -> list[tuple[int, str]]:
+    decision, trigger, reason = c.get("decision"), c.get("trigger"), c.get("reason")
+    if decision == "none":
+        return [(3, "🔎 без вопроса" + (": " + word(NO_QUESTION, reason) if reason else ""))]
+    if isinstance(decision, str) and decision:
+        return [(1, f"🔎 {word(DECISIONS, decision)}" + (f": {word(TRIGGERS, trigger)}" if trigger else ""))]
+    return []
+
+
+def _cue_lines(c: dict) -> list[tuple[int, str]]:
+    out: list[tuple[int, str]] = []
+    for cue in mappings(c.get("cue")):
+        kind, supports = cue.get("kind"), cue.get("supports")
+        if isinstance(kind, str) and kind:
+            out.append((2, f"улика: {word(CUES, kind)}" + (f" (в пользу «{supports}»)" if isinstance(supports, str) and supports else "")))
+    return out
+
+
+def correction_lines(correction: Any) -> list[tuple[int, str]]:
+    """Ranked lines of `trace.correction`: decision and trigger, alternatives, the question with the answer, cues, the second opinion's time."""
+    c = mapping(correction)
+    out = _decision_line(c)
+    out.extend(alternatives_lines(mappings(c.get("nbest"))))
+    line = dialog_line(mapping(c.get("dialog")))
+    if line:
+        out.append((1, line))
+    out.extend(_cue_lines(c))
+    out.extend(ms_line(c.get("nbest_ms")))
+    return out
+
+
+def ms_line(ms: Any) -> list[tuple[int, str]]:
+    return [(4, f"⏱ второе мнение: {ms} мс")] if isinstance(ms, (int, float)) and not isinstance(ms, bool) else []
+
+
+def engine_label(engine: Any) -> str:
+    return word(ENGINES, engine) or "?"
+
+
+def _traces_list_alternatives(traces: list[dict]) -> bool:
+    return any(mappings(mapping(t.get("correction")).get("nbest")) for t in traces if isinstance(t, dict))
+
+
+def _primary_line(evidence: Any) -> list[tuple[int, str]]:
+    primary = mapping(evidence).get("primary_text")
+    if not (isinstance(primary, str) and primary):
+        return []
+    return [(2, f"основное распознавание ({word(EVIDENCE_SOURCES, mapping(evidence).get('source')) or '?'}): «{primary}»")]
+
+
+def evidence_lines(evidence: Any, traces: list[dict]) -> list[tuple[int, str]]:
+    """Lines for the second opinion stored for a clip (`voiceclips.hypotheses_of`), for a clip whose trace carries no alternatives itself
+    (a spotter clip the engine never saw). When a trace's correction lists them, they are not repeated."""
+    if _traces_list_alternatives(traces):
+        return []
+    nbest = mapping(mapping(evidence).get("nbest"))
+    items = [i for i in mappings(nbest.get("hypotheses")) if isinstance(i.get("text"), str) and i["text"]]
+    if not items:
+        return []
+    out = [(1, f"🔎 второе мнение ({engine_label(nbest.get('engine'))}): " + " · ".join(_variant(i) for i in items[:2]))]
+    if items[2:]:
+        out.append((2, "ещё варианты: " + " · ".join(_variant(i) for i in items[2:])))
+    out.extend(_primary_line(evidence))
+    out.extend(ms_line(nbest.get("ms")))
+    return out
