@@ -54,8 +54,8 @@ patched `backend/grammar-hook.ts` MUST ship in the same overlay directory**: its
 `grammarContextOpen` from it.
 
 ```
-./run_check.sh        # builds from the active colour, runs check_ha_verify_wording.mts in a scratch container, no network: ИТОГ 50/50;
-                      # then the same check without the overlay, which must fail (20/50: the old wording)
+./run_check.sh        # builds from the active colour, runs check_ha_verify_wording.mts in a scratch container, no network: ИТОГ 51/51;
+                      # then the same check without the overlay, which must fail (20/51: the old wording)
 ./run_check.sh --ha-intents CORRECTION_HOOK_OUT/backend/ha-intents.ts --grammar-hook CORRECTION_HOOK_OUT/backend/grammar-hook.ts
                       # the same for the second accepted input (the correction-hook variant) with its grammar-hook.ts
 python3 -m unittest discover -s . -p "test_*.py"      # AISIS_QUASAR_BASELINE_DIR=<dir with ha-intents.ts> adds the real-file hash test
