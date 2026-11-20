@@ -92,7 +92,8 @@ class Reading(unittest.TestCase):
         line = trace_view.route_line({"layer": "grammar", "intent": "climate.set", "tier": "execute", "priority": 4, "conf": 0.8, "fuzzy": True})
         self.assertEqual(line, "грамматика → climate.set · execute · p4 · 0.80 fuzzy")
         self.assertEqual(trace_view.route_line({"layer": "brain", "brain": {"provider": "claude", "model": "m", "slot": "a"}}), "ИИ → claude m a")
-        self.assertEqual(trace_view.route_line({"layer": "none"}), "не обработано адаптером")
+        self.assertEqual(trace_view.route_line({"layer": "none"}),
+                         "грамматика не знает эту фразу → дальше решал квазар (быстрый интент или ИИ)")
 
     def test_lines_cover_clarification_calls_jev_brain_stages_and_errors(self):
         trace = {"layer": "grammar", "intent": "volume.slotless", "tier": "clarify", "asked": "clarify", "reply": "Какую громкость?", "listen": True,
@@ -115,6 +116,79 @@ class Reading(unittest.TestCase):
         self.assertLess(ranks["грамматика → x"], ranks["⏱ всего 3 мс"])
         self.assertEqual(ranks["⚠ e"], 1)
 
+    def test_a_phrase_handed_on_to_the_quasar_layer_is_not_written_like_an_error(self):
+        """«не обработано адаптером» read as a failure; it means the grammar abstained or declined and the quasar layers decided."""
+        abstain = {"via": "hook", "layer": "none"}
+        self.assertEqual(trace_view.route_line(abstain), "грамматика не знает эту фразу → дальше решал квазар (быстрый интент или ИИ)")
+        declined = {"via": "hook", "layer": "none", "intent": "volume.up", "tier": "execute", "priority": 4, "conf": 1.0,
+                    "declined": "volume change is run by the quasar layer"}
+        self.assertEqual(trace_view.route_line(declined), "грамматика узнала фразу (volume.up · execute · p4 · 1.00), но не выполнила её "
+                                                         "→ дальше решал квазар (быстрый интент или ИИ)")
+        self.assertIn("↷ грамматика не выполнила: громкость меняет сам квазар", trace_view.lines(declined))
+        self.assertNotIn("не обработано адаптером", " ".join(trace_view.lines(declined) + trace_view.lines(abstain)))
+
+    def test_a_shadow_call_says_it_executed_nothing(self):
+        known = {"via": "hook-shadow", "layer": "none", "intent": "reminder.in", "tier": "execute", "priority": 0, "conf": 1.0}
+        self.assertEqual(trace_view.route_line(known), "грамматика узнала фразу (reminder.in · execute · p0 · 1.00); пробный прогон, ничего не выполнялось")
+        self.assertEqual(trace_view.route_line({"via": "hook-shadow", "layer": "none"}),
+                         "грамматика не знает эту фразу; пробный прогон, ничего не выполнялось")
+
+    def test_the_reason_a_phrase_was_declined_is_plain_russian(self):
+        reasons = {"reprompt cooldown: one «не расслышал» a minute per station": "переспрос не чаще раза в минуту",
+                   "compound: a clause is not run by the adapter": "составная команда: часть исполняет квазар",
+                   "fuzzy guess: needs the owner's «да»": "нечёткое совпадение: нужно подтверждение «да»",
+                   "volume change is run by the quasar layer": "громкость меняет сам квазар",
+                   "volume arguments break the contract": "параметры громкости не подходят адаптеру",
+                   "executor light.turn_on belongs to the quasar layer": "действие light.turn_on исполняет квазар",
+                   "timers are not configured": "таймеры не настроены", "Home Assistant actions are off": "действия Home Assistant выключены",
+                   "nothing to repeat": "повторять нечего", "executor timer.start gave no answer": "действие timer.start не дало ответа",
+                   "something new": "something new"}
+        for reason, expected in reasons.items():
+            self.assertEqual(trace_view.declined_text(reason), expected)
+
+    def test_a_handed_on_phrase_names_who_answered_when_it_is_known(self):
+        hook = {"via": "hook", "layer": "none", "text": "Какая влажность на улице?"}
+        quasar = [{"kind": "запрос", "text": "какая влажность на улице", "res": "Влажность на улице 100 процентов. (listen=false)"}]
+        self.assertEqual(trace_view.answered_by(hook["text"], [hook], quasar, []), "быстрый интент квазара → «Влажность на улице 100 процентов.»")
+        turn = {"via": "turn", "layer": "brain", "text": "Какая влажность на улице"}
+        self.assertEqual(trace_view.answered_by(hook["text"], [hook, turn], quasar, []), "ИИ (ход колонки)", "the adapter's own record is the better witness")
+        self.assertEqual(trace_view.answered_by(hook["text"], [hook], [], [{"prompt": "какая влажность на улице", "answer": "а"}]), "ИИ")
+        self.assertIsNone(trace_view.answered_by(hook["text"], [hook], [{"kind": "запрос", "text": "другое", "res": "x"}], []))
+        line = trace_view.route_line(hook, answered="ИИ")
+        self.assertEqual(line, "грамматика не знает эту фразу → ответ: ИИ")
+
+    def test_a_null_fast_intent_result_is_no_answer_for_every_reader(self):
+        """clipfeed.describe_result moves on from a `null` result to the brain; the trace wording must read it the same way."""
+        hook = {"via": "hook", "layer": "none", "text": "Какая погода?"}
+        null = [{"kind": "запрос", "text": "какая погода", "res": "null"}, {"kind": "запрос", "text": "какая погода", "res": ""}]
+        brain = [{"prompt": "какая погода", "answer": "Солнечно"}]
+        self.assertIsNone(trace_view.quasar_answer("какая погода", null))
+        self.assertEqual(trace_view.answered_by(hook["text"], [hook], null, brain), "ИИ")
+        self.assertIsNone(trace_view.answered_by(hook["text"], [hook], null, []))
+        clip = {"transcript": "Какая погода?"}
+        self.assertEqual(trace_view.untraced_reason(clip, {"actions": null, "brain": brain}), "записи вызова адаптера нет, но в диалоге есть ответ ИИ")
+        silent = [{"kind": "запрос", "text": "какая погода", "res": "(silent)"}]
+        self.assertEqual(trace_view.quasar_answer("какая погода", silent), "", "a silent answer is an answer without words")
+
+    def test_a_crashed_adapter_routing_is_not_reported_as_an_unknown_phrase(self):
+        crashed = {"via": "hook", "layer": "none", "text": "Включи свет", "errors": ["route: TypeError"]}
+        self.assertEqual(trace_view.route_line(crashed), "адаптер не смог разобрать фразу (ошибка ниже) → " + trace_view.HANDED_ON)
+
+    def test_a_phrase_with_no_adapter_record_says_why_when_it_can(self):
+        clip = {"transcript": "Какая влажность на улице?"}
+        asked = [{"kind": "запрос", "text": "какая влажность на улице", "res": "Влажность на улице 100 процентов."}]
+        self.assertEqual(trace_view.untraced_reason(clip, {"actions": asked, "brain": []}),
+                         "записи вызова адаптера нет: фразу обработал сам квазар (быстрый интент → «Влажность на улице 100 процентов.»)")
+        self.assertEqual(trace_view.untraced_reason(clip, {"actions": [], "brain": [{"prompt": "какая влажность на улице", "answer": "а"}]}),
+                         "записи вызова адаптера нет, но в диалоге есть ответ ИИ")
+        self.assertEqual(trace_view.untraced_reason(clip, {"actions": [], "brain": []}),
+                         "записи вызова адаптера нет, и ответа квазара в диалоге нет: возможно, фраза не дошла до разбора "
+                         "(или квазар разбирал исправленный текст)")
+        self.assertEqual(trace_view.untraced_reason(clip, None), "записи вызова адаптера нет и диалога квазара нет: возможно, фраза не дошла до разбора")
+        self.assertEqual(trace_view.untraced_reason({"status": "gate", "transcript": ""}, None),
+                         "записи вызова адаптера нет: запись отброшена до разбора (не речь или галлюцинация), адаптер её не видел")
+        self.assertEqual(trace_view.untraced_reason({"status": "sent", "transcript": ""}, None), "записи вызова адаптера нет: текста нет, разбирать нечего")
+
     def test_a_clip_gets_only_the_calls_with_its_text(self):
         clip = {"ts": 100.0, "transcript": "Который час?"}
         calls = [{"id": 1, "ts": 90.0, "text": "который час"},    # before the clip window
@@ -124,6 +198,20 @@ class Reading(unittest.TestCase):
         self.assertEqual(trace_view.traces_of_clip(unrelated, [{"id": 5, "ts": 108.0, "text": "поставь кондиционер на 24"}]), [],
                          "a neighbour's call is not this clip's")
         self.assertEqual([t["id"] for t in trace_view.traces_of_clip(clip, calls, until=100.5)], [])
+
+    def test_neighbouring_clips_never_share_an_answer(self):
+        first, second = {"ts": 100.0}, {"ts": 102.0}
+        answers = [{"at": 101.5, "text": "Первый"}, {"at": 102.5, "text": "Второй"}]
+        self.assertEqual([a["text"] for a in trace_view.evidence_of_clip(first, answers, "at", until=102.0)], ["Первый"])
+        self.assertEqual([a["text"] for a in trace_view.evidence_of_clip(second, answers, "at", first=False)], ["Второй"])
+        on_boundary = [{"at": 102.0, "text": "Второй"}]      # exactly the next clip's time: the next clip's, not both
+        self.assertEqual(trace_view.evidence_of_clip(first, on_boundary, "at", until=102.0), [])
+        self.assertEqual(len(trace_view.evidence_of_clip(second, on_boundary, "at", first=False)), 1)
+
+    def test_the_last_clip_is_answerable_for_the_feeds_whole_deadline(self):
+        clip = {"ts": 100.0}
+        late = [{"at": 125.0, "text": "поздно"}, {"at": 150.0, "text": "слишком"}]
+        self.assertEqual([a["text"] for a in trace_view.evidence_of_clip(clip, late, "at")], ["поздно"])
 
 
 class Links(unittest.TestCase):

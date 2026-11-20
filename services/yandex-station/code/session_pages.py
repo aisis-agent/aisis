@@ -18,8 +18,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import dialogstore
 import session_links
 import trace_view
+import voiceclips
 
 STYLE = """
 :root{color-scheme:dark light;--bg:#0f1115;--card:#181b22;--fg:#e6e8ee;--dim:#8d93a3;--line:#2a2f3a;--accent:#6aa9ff;--ok:#4cc38a;--warn:#f0b429;--bad:#ef6461}
@@ -138,7 +140,7 @@ def render_intents() -> str:
 
 
 # ── session page ─────────────────────────────────────────────────────────────
-def _clip_block(clip: dict, traces: list[dict], focus: str | None) -> str:
+def _clip_block(clip: dict, traces: list[dict], focus: str | None, dialog: dict | None = None, until: float | None = None, first: bool = True) -> str:
     status = clip.get("status")
     text = clip.get("transcript") or ""
     chips = [f"<span class=chip>{e(clip.get('engine') or 'ASR ?')}</span>"]
@@ -161,17 +163,25 @@ def _clip_block(clip: dict, traces: list[dict], focus: str | None) -> str:
         verdict += f"<div>ваш вердикт: <b>{e(clip['truth'])}</b></div>"
     mark = " style='border-color:var(--accent)'" if focus and focus == clip.get("id") else ""
     audio = f"<audio controls preload=none src='{CLIP_AUDIO}{e(clip['id'])}'></audio>" if clip.get("id") else ""
-    traces_html = "".join(_trace_block(t, len(traces) > 1) for t in traces) or \
-        "<div class=dim>Запись адаптера об этой фразе не найдена: её обработал квазар сам (быстрый интент) или фраза не дошла до адаптера.</div>"
+    actions = trace_view.evidence_of_clip(clip, (dialog or {}).get("reqs"), "at", until, first)
+    brain = trace_view.evidence_of_clip(clip, (dialog or {}).get("brain"), "ts", until, first)
+    answered = trace_view.answered_by(text, traces, actions, brain)
+    if traces:
+        untraced = ""
+    elif clip.get("trigger") == voiceclips.SPOTTER_TRIGGER and not (actions or brain):   # a linked text dialog with server-side evidence says that instead
+        untraced = trace_view.SPOTTER_RAN_IT
+    else:
+        untraced = trace_view.untraced_reason(clip, {"actions": actions, "brain": brain} if dialog else None)
+    traces_html = "".join(_trace_block(t, len(traces) > 1, answered) for t in traces) or f"<div class=dim>{e(untraced[:1].upper() + untraced[1:])}.</div>"
     return (f"<div class=card{mark}><h2>🎙 {hms(clip.get('ts'))} · {e(text) if text else '— текста нет —'}</h2>{audio}{''.join(chips)}"
             f"<table>{''.join(f'<tr><td class=dim>{e(k)}</td><td>{e(v)}</td></tr>' for k, v in facts)}</table>{verdict}{traces_html}</div>")
 
 
-def _trace_block(trace: dict, several: bool) -> str:
+def _trace_block(trace: dict, several: bool, answered: str | None = None) -> str:
     via = f"<span class=chip>{e(trace_view.VIA.get(trace.get('via'), trace.get('via')))}</span>" if several or trace.get("via") != "turn" else ""
     items = []
-    head = trace_view.route_line(trace)
-    for line in trace_view.lines(trace)[1:]:
+    head = trace_view.route_line(trace, answered)
+    for line in trace_view.lines(trace, answered=answered)[1:]:
         items.append(f"<li>{e(line)}</li>")
     link = intent_link(trace.get("intent"))
     intent_html = f" · определение интента: {link}" if link.startswith("<a") else ""
@@ -190,7 +200,16 @@ def _turn_lines(dialog: dict) -> str:
                        + (f" → {e(turn['res'])}" if turn.get("res") else "") + "</li>")
         elif turn["role"] == "assistant":
             out.append(f"<li><span class=dim>{e(turn.get('t'))}</span> 🔊 {e(turn['text'])}</li>")
+    for at, note in dialogstore.log_notes(dialog.get("raw") or []):   # a helper that failed open: the turn went on without it
+        out.append(f"<li class=dim><span class=dim>{e(at)}</span> {e(note)}</li>")
+    closes = dialogstore.normal_close_count(dialog.get("raw") or [])
+    if closes:   # one line, not one error per close: the speaker ends a connection after every exchange and every wake word
+        out.append(f"<li class=dim>соединение колонки закрывалось {closes} {_times(closes)}: штатно, не ошибка</li>")
     return "<div class=card><h2>Журнал квазара</h2><ul>" + "".join(out) + "</ul></div>" if out else ""
+
+
+def _times(count: int) -> str:
+    return "раз" if count % 100 in range(11, 15) or count % 10 not in (2, 3, 4) else "раза"
 
 
 def render_session(dialog: dict | None, clips: list[dict], traces: list[dict], focus_clip: str | None = None, key: str = "") -> str:
@@ -222,7 +241,7 @@ def render_session(dialog: dict | None, clips: list[dict], traces: list[dict], f
         until = ordered[n + 1]["ts"] if n + 1 < len(ordered) else None
         mine = [t for t in trace_view.traces_of_clip(clip, traces, until) if t["id"] not in used]
         used.update(t["id"] for t in mine)
-        body.append(_clip_block(clip, mine, focus_clip))
+        body.append(_clip_block(clip, mine, focus_clip, dialog, until, n == 0))
     if dialog and not ordered:
         heard = "".join(f"<li>{e(h)}</li>" for h in dialog.get("heard") or [])
         if heard:

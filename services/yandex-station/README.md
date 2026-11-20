@@ -197,6 +197,18 @@ query string, which `weather.get_forecasts?return_response` needs.
   `/grammar#intent-<id>`. The wake word alone is an activation (`voice_clips.status='activation'`): it is never a post of
   its own, the next request's post and the session page show it. `clipfeed.py test --clip <id>` posts an archived clip
   the way the feed would (labelled TEST, not entered in the ledger).
+  `layer: none` is not a failure: it is the quasar hook's call that the adapter handed back (the grammar did not know the
+  phrase, or knew it and the adapter does not run it: the `declined` reason says why), after which the quasar's own fast
+  intent or the brain decided. The post and the session page say that in plain Russian and name who answered when the data
+  shows it (the adapter's own `turn` record, else the quasar fast intent of the dialog, else the brain turn);
+  a phrase with no adapter record at all says why as far as the dialog tells (`trace_view.untraced_reason`).
+- **Which quasar log lines are failures**: `dialogstore.is_failure`. A WARN/ERROR line that falls into an open dialog used to
+  be that dialog's error. A normal WebSocket close is not (the speaker ends a connection after every exchange and every wake
+  word, the deploy smoke checks end theirs): `UniProxy WebSocket closed`, `… (normal): code=…`; `… abnormally: code=…` and every
+  other WARN/ERROR still is. The session page shows normal closes as one dim counter line in the quasar log, not as errors.
+  The quasar side of the same change is `overlays/uniproxy-close-log` (the close code in the line, INFO for a normal close);
+  the parser reads the old and the new text, so it does not wait for that deploy. After a change of the rule the ingester
+  re-derives the docker dialogs from `raw_log` once at start (`reclassify_failures`, meta `log_failures_v1`).
 - Containers keep their historical names (`aisis-yandex-postgres-1`,
   `aisis-yandex-network-{tls-voice,dns-relay}-1`, compose project `aisis-yandex`
   for postgres) — do not recreate them just to rename.
