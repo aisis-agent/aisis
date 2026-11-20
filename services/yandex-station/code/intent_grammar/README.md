@@ -116,6 +116,16 @@ Nothing else is deduplicated: Home Assistant actions and queries run every time.
 that heard it (the HA area of the station's `media_player`, the way the overlay's speaker-room layer reads it); a speaker whose room Home Assistant does
 not tell is asked for the room, never given the living room. Area names reach the Home Assistant template only as an escaped string literal.
 
+An air conditioner that is **off** is switched on by every climate command that reaches the adapter (`ha.climate`, `ha.climate_delta`; ticket
+195): a mode phrase sets that mode, a setpoint or «теплее»/«холоднее» starts the unit first (heat or cool by where the setpoint sits against the
+room temperature when that is a degree or more away, else the mode the unit reports as `last_hvac_mode`, else automatic), and «включи кондиционер»
+without a mode or temperature starts it in its last mode (a unit that already runs gets no call and the answer says so). The unit is read before
+the command (the cached list of states may be a minute old) and read back after it: the answer is spoken from the state read back («Кондиционер
+включён на обогрев, 23 градуса.»), a unit that does not show the command is «команду отправил, но не вижу, чтобы устройство её выполнило», an
+unreadable one «не получилось проверить». These intents are `phase: post`: the quasar container answers its own AC phrases first («включи
+кондиционер …» in cool mode, a bare «кондиционер» with its fixed question) and the pre-phase hook has a 250 ms budget, too short for a Home
+Assistant call, so the rule applies to the phrases the container leaves alone.
+
 Replies: `Grammar.say(decision, pick, values=None)` / `render_reply`. A template whose placeholder nobody filled (`Громкость {level}.`
 without a level) gives `None`, never the literal text; the executor passes what it measured as `values={"level": 5}` (they win over
 matched slots).

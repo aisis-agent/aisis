@@ -6,9 +6,15 @@ A command without a room is about the room of the speaker that heard it. That ro
 the quasar overlay's speaker-room layer reads it (overlays/speaker-room): the area of the station's `media_player`
 entity, whose id ends in the station id; the adapter keeps no station table of its own. A station whose room Home
 Assistant does not tell is asked for the room, never guessed (the living room is no default).
+
+An air conditioner that is off and is asked for a mode, a setpoint, a change of temperature or just «включи» is switched on (the
+owner, tg#31285: if it is off, it has to be turned on): the mode is the one asked for, else heat or cool by where the setpoint sits
+against the room temperature, else the one the unit ran last, else automatic. The answer is spoken from the state read back after the
+call, never from what was asked: a unit that does not show the command is not reported as switched on.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -40,6 +46,9 @@ HVAC_MODES = {"heat": "heat", "cool": "cool", "dry": "dry", "fan": "fan_only", "
 MODE_NAMES = {"heat": "обогрев", "cool": "охлаждение", "dry": "осушение", "fan": "вентиляция", "auto": "авто"}
 MODE_VERBS = {"heat": "Включаю обогрев.", "cool": "Включаю охлаждение.", "dry": "Включаю осушение.",
               "fan": "Включаю вентиляцию.", "auto": "Включаю автоматический режим."}
+# What a climate entity reports as its state, by the mode keys above, and how a mode is said after «включён».
+STATE_MODES = {**{state: key for key, state in HVAC_MODES.items()}, "heat_cool": "auto"}
+MODE_STATES = {"heat": "на обогрев", "cool": "на охлаждение", "dry": "на осушение", "fan": "на вентиляцию", "auto": "в автоматическом режиме"}
 
 COLOR_NAMES = {"white": "белый", "red": "красный", "blue": "синий", "green": "зелёный", "yellow": "жёлтый",
                "orange": "оранжевый", "purple": "фиолетовый", "pink": "розовый", "warm": "тёплый", "cold": "холодный"}
@@ -66,6 +75,11 @@ REPLY_WARMER = "Делаю теплее, {temp}."
 REPLY_COOLER = "Делаю прохладнее, {temp}."
 REPLY_COLOR = "{color} свет."
 REPLY_BRIGHTNESS = "Яркость {percent}."
+# After a climate command the unit's state is read back: it takes a moment to report (an IR unit is optimistic, a cloud one lags).
+CONFIRM_READS = 4
+CONFIRM_PAUSE_S = 0.5
+REPLY_NOT_CONFIRMED = "Команду отправил, но не вижу, чтобы устройство её выполнило."
+REPLY_UNVERIFIED = "Не получилось проверить ответ Home Assistant."
 
 _UNAVAILABLE = ("unavailable", "unknown")
 
@@ -110,6 +124,13 @@ class _Command:
         self.queued = False
 
 
+class _Plan:
+    """One unit of a climate command: whether it was off, and what was sent to it (`mode`, `temp`; `sent` False: nothing, it already runs)."""
+
+    def __init__(self, entity: dict, was_off: bool, mode: str | None, temp: float | None, sent: bool = True) -> None:
+        self.entity, self.was_off, self.mode, self.temp, self.sent = entity, was_off, mode, temp, sent
+
+
 def _registry(body: Any) -> dict[str, str]:
     """entity id -> area name from the tab-separated registry (`REGISTRY_TEMPLATE`); entities without an area are left out."""
     if not isinstance(body, str):
@@ -142,14 +163,17 @@ def speaker_area(areas: dict[str, str], station: str | None) -> str | None:
 class HaActions:
     def __init__(self, get_json: Callable[[str], Awaitable[Any]],
                  post_json: Callable[[str, dict], Awaitable[tuple[int, Any]]],
-                 ttl: float = 60.0, clock: Callable[[], float] = time.monotonic) -> None:
+                 ttl: float = 60.0, clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         self._get = get_json
         self._post = post_json
         self._ttl = ttl
         self._clock = clock
+        self._sleep = sleep
         self._states: tuple[float, dict[str, dict]] | None = None
         self._areas: dict[str, tuple[float, list[str]]] = {}
         self._registry: tuple[float, dict[str, str]] | None = None
+        self._climate_turn = asyncio.Lock()      # one climate command at a time: a «теплее» reads, sends and confirms before the next reads
 
     async def run(self, executor: str, args: dict, station: str | None = None) -> str:
         """`station`: the speaker that heard the command, for a command that names no room."""
@@ -165,7 +189,11 @@ class HaActions:
         try:
             area = await self._room(args.get("room"), station)
             utterance_trace.note(room=area)
-            reply = await handler(area, args, command)
+            if executor.startswith("ha.climate"):
+                async with self._climate_turn:
+                    reply = await handler(area, args, command)
+            else:
+                reply = await handler(area, args, command)
         except _Outcome as out:
             utterance_trace.note(outcome=out.reply)
             return out.reply
@@ -262,10 +290,33 @@ class HaActions:
         found = await self._in_area(area, "climate")
         if not found:
             raise _Outcome(REPLY_NO_CLIMATE.format(area=area))
-        live = [c for c in found if c.get("state") not in _UNAVAILABLE]
+        live = [c for c in [await self._fresh(c) for c in found] if c.get("state") not in _UNAVAILABLE]
         if not live:
             raise _Outcome(REPLY_CLIMATE_UNAVAILABLE)
         return live
+
+    async def _fresh(self, entity: dict) -> dict:
+        """The entity as Home Assistant reports it now. The list of states is cached for `ttl`: a unit switched off a moment ago by hand must
+        not be taken for running. The cached dict is updated in place, so the next command starts from what was read. A read that fails
+        marks the entity `_unread` (its state is a guess). While Home Assistant is down hacli serves its old cache with `_stale` set: that
+        is no reading either, and the entity keeps the setpoint of the command still waiting in the queue (a second «теплее» adds to it)."""
+        try:
+            seen = await self._get("/api/states/" + entity["entity_id"])
+        except Exception:
+            entity["_unread"] = True
+            return entity
+        if isinstance(seen, dict) and seen.get("_stale"):
+            entity["_unread"] = True
+            return entity
+        if isinstance(seen, dict) and seen.get("entity_id") == entity["entity_id"]:
+            entity.clear()
+            entity.update(seen)
+        return entity
+
+    @staticmethod
+    def _is_off(entity: dict) -> bool:
+        """Off, or not known to run: a state that could not be read is not proof that the unit runs."""
+        return entity.get("state") == "off" or "_unread" in entity
 
     @staticmethod
     def _clamp(entity: dict, temp: float) -> float:
@@ -278,24 +329,92 @@ class HaActions:
         return temp
 
     @staticmethod
-    def _wake_mode(entity: dict, temp: float) -> str | None:
-        """The mode to switch an `off` unit to before a setpoint: heat/cool by where the setpoint sits."""
+    def _wake_mode(entity: dict, temp: float | None) -> str | None:
+        """The mode to switch an `off` unit to when the command names none: heat or cool by where the setpoint sits against the room
+        temperature (when it is known and a degree or more away), else the mode the unit reports it ran last, else automatic, else the
+        first it has."""
         attrs = entity.get("attributes") or {}
         modes = [m for m in attrs.get("hvac_modes") or [] if isinstance(m, str) and m != "off"]
         if not modes:
             return None
         current = _num(attrs.get("current_temperature"))
-        if current is not None:
+        if temp is not None and current is not None and abs(temp - current) >= 1:
             preferred = "heat" if temp > current else "cool"
             if preferred in modes:
                 return preferred
+        last = attrs.get("last_hvac_mode")
+        if last in modes:
+            return last
+        for mode in ("auto", "heat_cool"):
+            if mode in modes:
+                return mode
         return modes[0]
 
-    async def _set_temperature(self, command: _Command, entity: dict, temp: float, force_mode: str | None = None) -> float:
+    @staticmethod
+    def _shows(entity: dict, mode: str | None, temp: float | None) -> bool:
+        """Whether the unit reports what the command asked for: the mode (a running unit when none was asked) and, when a setpoint was
+        asked, that setpoint (a unit that reports none, as in dry or fan mode, confirms nothing)."""
+        state = entity.get("state")
+        if mode is not None and state != mode:
+            return False
+        if mode is None and (state == "off" or state in _UNAVAILABLE):
+            return False
+        got = _num((entity.get("attributes") or {}).get("temperature"))
+        return temp is None or (got is not None and abs(got - temp) < 0.3)      # an unreported setpoint confirms no setpoint
+
+    async def _confirm(self, entity_id: str, mode: str | None, temp: float | None) -> dict:
+        """The unit once it shows the command, read back a few times; the answer to speak (as an _Outcome) when it never does or cannot be read."""
+        seen = None
+        for attempt in range(CONFIRM_READS):
+            if attempt:
+                await self._sleep(CONFIRM_PAUSE_S)
+            try:
+                got = await self._get("/api/states/" + entity_id)
+            except Exception:
+                break      # an unreadable Home Assistant is not asked four times in a voice turn
+            if isinstance(got, dict) and got.get("_stale"):
+                break      # hacli's old cache is not what the unit reports
+            if isinstance(got, dict):
+                seen = got
+                if self._shows(got, mode, temp):
+                    utterance_trace.call("ha", service="climate.read_back", entity=entity_id, ok=True, attempts=attempt + 1, state=got.get("state"))
+                    return got
+        utterance_trace.call("ha", service="climate.read_back", entity=entity_id, ok=False, attempts=CONFIRM_READS,
+                             state=None if seen is None else seen.get("state"))
+        if seen is None:
+            raise _Outcome(REPLY_UNVERIFIED)
+        if seen.get("state") in _UNAVAILABLE:
+            raise _Outcome(REPLY_CLIMATE_UNAVAILABLE)
+        raise _Outcome(REPLY_NOT_CONFIRMED)
+
+    async def _settle(self, command: _Command, plans: list["_Plan"]) -> list[dict]:
+        """What each unit reports after the command. Nothing is read for a queued command (Home Assistant is down) or for a unit that got none."""
+        if command.queued:
+            return []
+        return [await self._confirm(p.entity["entity_id"], p.mode, p.temp) if p.sent else p.entity for p in plans]
+
+    @staticmethod
+    def _observed(entity: dict) -> tuple[str | None, float | None]:
+        return STATE_MODES.get(entity.get("state")), _num((entity.get("attributes") or {}).get("temperature"))
+
+    def _reply_switched_on(self, entity: dict) -> str:
+        key, temp = self._observed(entity)
+        head = "Кондиционер включён" + (" " + MODE_STATES[key] if key else "")
+        return head + (", " + _degrees(temp) if temp is not None else "") + "."
+
+    def _reply_already_on(self, entity: dict) -> str:
+        key, temp = self._observed(entity)
+        detail = [MODE_NAMES[key]] if key else []
+        if temp is not None:
+            detail.append(_degrees(temp))
+        return "Кондиционер уже включён" + (": " + ", ".join(detail) if detail else "") + "."
+
+    async def _set_temperature(self, command: _Command, entity: dict, temp: float, force_mode: str | None = None) -> tuple[float, str | None]:
+        """Set the setpoint of one unit, starting it first when it is off. Returns the setpoint sent and the mode sent (None: kept)."""
         entity_id = entity["entity_id"]
         temp = self._clamp(entity, temp)
         mode = force_mode
-        if mode is None and entity.get("state") == "off":
+        if mode is None and self._is_off(entity):
             mode = self._wake_mode(entity, temp)
         if mode is not None:
             await self._service(command, "climate", "set_hvac_mode", {"entity_id": entity_id, "hvac_mode": mode})
@@ -304,14 +423,12 @@ class HaActions:
                             {"entity_id": entity_id, "temperature": int(temp) if temp.is_integer() else temp})
         # States are cached for `ttl`; a repeated «теплее» inside it must start from the setpoint just sent.
         entity.setdefault("attributes", {})["temperature"] = temp
-        return temp
+        return temp, mode
 
     async def _climate(self, area: str, args: dict, command: _Command) -> str:
         mode_key = args.get("mode")
         temperature = _num(args.get("temperature"))
         if mode_key is not None and mode_key not in HVAC_MODES:
-            return REPLY_UNKNOWN_COMMAND
-        if mode_key is None and temperature is None:
             return REPLY_UNKNOWN_COMMAND
         entities = await self._climates(area)
         hvac = HVAC_MODES.get(mode_key) if mode_key else None
@@ -321,15 +438,35 @@ class HaActions:
             if not supported:
                 return REPLY_MODE_UNSUPPORTED
             entities = supported
-        spoken = temperature
+        plans: list[_Plan] = []
         for entity in entities:
-            if temperature is None:
+            was_off = self._is_off(entity)
+            if temperature is None and hvac is None:
+                # «включи кондиционер»: the grammar gives neither mode nor setpoint only for an on-verb. A unit that runs is left alone.
+                mode = self._wake_mode(entity, None) if was_off else None
+                if was_off and mode is None:
+                    return REPLY_MODE_UNSUPPORTED
+                if mode is not None:
+                    await self._service(command, "climate", "set_hvac_mode", {"entity_id": entity["entity_id"], "hvac_mode": mode})
+                plans.append(_Plan(entity, was_off, mode, None, sent=mode is not None))
+            elif temperature is None:
                 await self._service(command, "climate", "set_hvac_mode", {"entity_id": entity["entity_id"], "hvac_mode": hvac})
                 entity["state"] = hvac
+                plans.append(_Plan(entity, was_off, hvac, None))
             else:
-                spoken = await self._set_temperature(command, entity, temperature, hvac)
+                spoken, mode = await self._set_temperature(command, entity, temperature, hvac)
+                plans.append(_Plan(entity, was_off, mode, spoken))
+        seen = await self._settle(command, plans)
+        if command.queued:
+            return REPLY_QUEUED
+        if not any(p.sent for p in plans):
+            return self._reply_already_on(seen[0])
+        woken = [state for p, state in zip(plans, seen) if p.was_off]
+        if woken:
+            return self._reply_switched_on(woken[0])
         if temperature is None:
             return MODE_VERBS[mode_key]
+        spoken = plans[0].temp
         if mode_key is None:
             return REPLY_TEMPERATURE.format(temp=_degrees(spoken))
         return REPLY_MODE_TEMPERATURE.format(mode=MODE_NAMES[mode_key].capitalize(), temp=_degrees(spoken))
@@ -347,7 +484,7 @@ class HaActions:
                 return REPLY_BAD_DELTA
             amount = amount_value
         entities = await self._climates(area)
-        spoken: float | None = None
+        plans: list[_Plan] = []
         for entity in entities:
             attrs = entity.get("attributes") or {}
             base = _num(attrs.get("temperature"))
@@ -357,13 +494,19 @@ class HaActions:
                 if len(entities) == 1:
                     return REPLY_NO_CURRENT_TEMP
                 continue
-            result = await self._set_temperature(command, entity, base + direction * amount)
-            if spoken is None:
-                spoken = result
-        if spoken is None:
+            was_off = self._is_off(entity)
+            result, mode = await self._set_temperature(command, entity, base + direction * amount)
+            plans.append(_Plan(entity, was_off, mode, result))
+        if not plans:
             return REPLY_NO_CURRENT_TEMP
+        seen = await self._settle(command, plans)
+        if command.queued:
+            return REPLY_QUEUED
+        woken = [state for p, state in zip(plans, seen) if p.was_off]
+        if woken:
+            return self._reply_switched_on(woken[0])
         template = REPLY_WARMER if direction > 0 else REPLY_COOLER
-        return template.format(temp=_degrees(spoken))
+        return template.format(temp=_degrees(plans[0].temp))
 
     # -- light ----------------------------------------------------------------------------------------------------
 
