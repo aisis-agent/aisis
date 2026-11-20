@@ -319,17 +319,19 @@ def outcome_text(outcome: str) -> str:
     return f"выбрано «{outcome[len('chose:'):]}»" if outcome.startswith("chose:") else word(OUTCOMES, outcome)
 
 
-def dialog_line(dialog: dict) -> str:
-    """The question, the owner's answer and how it ended, or that the question is still open."""
+def dialog_line(dialog: dict, shadow: bool = False) -> str:
+    """The question, the owner's answer and how it ended, or that the question is still open. A shadow question was only decided, never asked."""
     ask, answer, outcome, state = (dialog.get(k) for k in ("ask", "answer", "outcome", "state"))
     if not isinstance(ask, str) or not ask:
         return ""
+    if shadow:
+        return f"❓ вопрос не задан (теневой режим): «{ask}»"
     line = f"❓ «{ask}»"
     if isinstance(answer, str) and answer:
         line += f" → «{answer}»"
     if isinstance(outcome, str) and outcome:
-        line += ": " + outcome_text(outcome)
-    elif state != "closed" and isinstance(state, str):
+        line += ": " + outcome_text(outcome)      # the state of a finished dialog is the one it last had, not worth showing
+    elif isinstance(state, str):
         line += " · " + word(DIALOG_STATES, state)
     return line
 
@@ -357,7 +359,7 @@ def correction_lines(correction: Any) -> list[tuple[int, str]]:
     c = mapping(correction)
     out = _decision_line(c)
     out.extend(alternatives_lines(mappings(c.get("nbest"))))
-    line = dialog_line(mapping(c.get("dialog")))
+    line = dialog_line(mapping(c.get("dialog")), shadow=c.get("shadow") is True)
     if line:
         out.append((1, line))
     out.extend(_cue_lines(c))
@@ -373,8 +375,12 @@ def engine_label(engine: Any) -> str:
     return word(ENGINES, engine) or "?"
 
 
-def _traces_list_alternatives(traces: list[dict]) -> bool:
-    return any(mappings(mapping(t.get("correction")).get("nbest")) for t in traces if isinstance(t, dict))
+def _traces_list_alternatives(traces: list[dict], primary: Any) -> bool:
+    """A trace's correction lists the alternatives of THIS clip when it heard the clip's own primary reading; the correction a reply trace
+    inherits from the question describes another clip."""
+    return isinstance(primary, str) and bool(primary) and any(
+        mapping(t.get("correction")).get("heard") == primary and mappings(mapping(t.get("correction")).get("nbest"))
+        for t in traces if isinstance(t, dict))
 
 
 def _primary_line(evidence: Any) -> list[tuple[int, str]]:
@@ -387,7 +393,7 @@ def _primary_line(evidence: Any) -> list[tuple[int, str]]:
 def evidence_lines(evidence: Any, traces: list[dict]) -> list[tuple[int, str]]:
     """Lines for the second opinion stored for a clip (`voiceclips.hypotheses_of`), for a clip whose trace carries no alternatives itself
     (a spotter clip the engine never saw). When a trace's correction lists them, they are not repeated."""
-    if _traces_list_alternatives(traces):
+    if _traces_list_alternatives(traces, mapping(evidence).get("primary_text")):
         return []
     nbest = mapping(mapping(evidence).get("nbest"))
     items = [i for i in mappings(nbest.get("hypotheses")) if isinstance(i.get("text"), str) and i["text"]]
@@ -397,5 +403,5 @@ def evidence_lines(evidence: Any, traces: list[dict]) -> list[tuple[int, str]]:
     if items[2:]:
         out.append((2, "ещё варианты: " + " · ".join(_variant(i) for i in items[2:])))
     out.extend(_primary_line(evidence))
-    out.extend(ms_line(nbest.get("ms")))
+    out.extend(ms_line(mapping(evidence).get("ms")))
     return out

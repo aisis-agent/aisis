@@ -213,10 +213,11 @@ def _evidence_html(clip: dict, traces: list[dict]) -> str:
     evidence = trace_view.evidence_lines(clip.get("hypotheses"), traces)
     if not evidence:
         return ""
-    nbest = trace_view.mapping(trace_view.mapping(clip.get("hypotheses")).get("nbest"))
+    hypotheses = trace_view.mapping(clip.get("hypotheses"))
+    nbest = trace_view.mapping(hypotheses.get("nbest"))
     return ("<div style='border-top:1px solid var(--line);margin-top:8px;padding-top:6px'><ul>"
             + "".join(f"<li>{e(line)}</li>" for _, line in evidence) + "</ul>"
-            + _nbest_table(nbest.get("hypotheses"), nbest.get("ms"))
+            + _nbest_table(nbest.get("hypotheses"), hypotheses.get("ms"))
             + "</div>")
 
 
@@ -251,20 +252,27 @@ def _nbest_table(items: Any, ms: Any = None) -> str:
                if isinstance(ms, (int, float)) and not isinstance(ms, bool) else ""))
 
 
+def _dialog_steps(dialog: dict, shadow: bool) -> list[tuple[str, Any]]:
+    """The question, the answer, how it ended or what it waits for. A shadow question was never asked: it has no answer, outcome or state."""
+    ask, answer = dialog.get("ask"), dialog.get("answer")
+    if shadow:
+        return [("вопрос не задан (теневой режим)", ask)] if isinstance(ask, str) and ask else []
+    steps = [(label, value) for label, value in (("вопрос", ask), ("ответ", answer)) if isinstance(value, str) and value]
+    outcome, state = dialog.get("outcome"), dialog.get("state")
+    if isinstance(outcome, str) and outcome:
+        steps.append(("итог диалога", trace_view.outcome_text(outcome)))      # a finished dialog keeps its last state: not shown beside the outcome
+    elif isinstance(state, str) and state:
+        steps.append(("состояние", trace_view.word(trace_view.DIALOG_STATES, state)))
+    if isinstance(dialog.get("retries"), int) and dialog["retries"]:
+        steps.append(("повторов вопроса", str(dialog["retries"])))
+    return steps
+
+
 def _correction_details(correction: Any) -> str:
     """The details of trace.correction below its lines: the full alternatives table and the repair dialog as a transcript."""
     c = trace_view.mapping(correction)
     out = _nbest_table(c.get("nbest"), c.get("nbest_ms"))
-    dialog = trace_view.mapping(c.get("dialog"))
-    steps = [(label, dialog.get(key)) for label, key in (("вопрос", "ask"), ("ответ", "answer")) if isinstance(dialog.get(key), str) and dialog.get(key)]
-    outcome = dialog.get("outcome")
-    if isinstance(outcome, str) and outcome:
-        steps.append(("итог диалога", trace_view.outcome_text(outcome)))
-    state = dialog.get("state")
-    if isinstance(state, str) and state:
-        steps.append(("состояние", trace_view.word(trace_view.DIALOG_STATES, state)))
-    if isinstance(dialog.get("retries"), int) and dialog["retries"]:
-        steps.append(("повторов вопроса", str(dialog["retries"])))
+    steps = _dialog_steps(trace_view.mapping(c.get("dialog")), c.get("shadow") is True)
     if steps:
         out += "<div class=dim>диалог уточнения</div><ul>" + "".join(f"<li>{e(k)}: {e(v)}</li>" for k, v in steps) + "</ul>"
     return f"<details open><summary>уточнение</summary>{out}</details>" if out else ""

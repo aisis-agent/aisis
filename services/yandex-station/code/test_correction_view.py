@@ -21,7 +21,7 @@ CORRECTION = {
               {"text": "включи свет", "percent": 5, "source": "primary", "engine": "yandex-spotter", "fit": None},
               {"text": "включи свет в студии", "percent": 1, "source": "beam", "engine": "gigaam-v3-ctc", "fit": 0.4}],
     "nbest_ms": 120, "cue": [{"kind": "noop", "supports": "выключи свет"}],
-    "dialog": {"state": "closed", "ask": "Мне послышалось «включи свет». Вы имели в виду «выключи свет»?", "answer": "да",
+    "dialog": {"state": "awaiting_confirm", "ask": "Мне послышалось «включи свет». Вы имели в виду «выключи свет»?", "answer": "да",
                "outcome": "accepted", "retries": 0},
 }
 
@@ -61,10 +61,22 @@ class CorrectionLines(unittest.TestCase):
 
     def test_a_choice_outcome_names_the_chosen_phrase_and_an_open_question_says_it_waits(self):
         choice = dict(CORRECTION, decision="ask-choice", trigger="low-margin",
-                      dialog={"state": "closed", "ask": "Включить или выключить?", "answer": "выключить", "outcome": "chose:выключи свет"})
+                      dialog={"state": "awaiting_choice", "ask": "Включить или выключить?", "answer": "выключить", "outcome": "chose:выключи свет"})
         self.assertIn((1, "❓ «Включить или выключить?» → «выключить»: выбрано «выключи свет»"), self.lines(choice))
         open_ = dict(CORRECTION, dialog={"state": "awaiting_confirm", "ask": "Вы имели в виду «выключи свет»?"})
         self.assertIn((1, "❓ «Вы имели в виду «выключи свет»?» · ждём «да» или «нет»"), self.lines(open_))
+
+    def test_a_finished_dialog_never_says_it_is_still_waiting(self):
+        got = " ".join(text for _, text in self.lines(CORRECTION))     # the producer keeps the state it last had: awaiting_confirm
+        self.assertIn("принято", got)
+        self.assertNotIn("ждём", got)
+
+    def test_a_shadow_question_is_labelled_as_never_asked(self):
+        shadow = dict(CORRECTION, shadow=True, dialog={"state": "awaiting_confirm", "ask": "Вы имели в виду «выключи свет»?",
+                                                       "answer": None, "outcome": None, "retries": 0})
+        got = self.lines(shadow)
+        self.assertIn((1, "❓ вопрос не задан (теневой режим): «Вы имели в виду «выключи свет»?»"), got)
+        self.assertNotIn("ждём", " ".join(text for _, text in got))
 
     def test_a_decision_without_a_question_is_a_low_rank_note(self):
         got = self.lines({"decision": "none", "reason": "agree", "nbest": CORRECTION["nbest"][:1]})
@@ -107,7 +119,11 @@ class EvidenceLines(unittest.TestCase):
         got = trace_view.evidence_lines(EVIDENCE, [SPOTTER_TRACE])
         self.assertEqual(got[0], (1, "🔎 второе мнение (GigaAM): «выключи свет» 94% · «включи свет» 5%"))
         self.assertIn((2, "основное распознавание (споттер колонки): «включи свет»"), got)
-        self.assertIn((4, "⏱ второе мнение: 120 мс"), got)
+        self.assertIn((4, "⏱ второе мнение: 140 мс"), got)       # nbest.ms 120 is the scoring alone; the evidence's own ms is the whole time
+
+    def test_the_reply_clip_keeps_its_own_evidence_when_the_trace_alternatives_belong_to_the_question(self):
+        question_trace = {"correction": dict(CORRECTION, heard="включи свет")}      # a reply trace inherits the question's record
+        self.assertTrue(trace_view.evidence_lines(dict(EVIDENCE, primary_text="да"), [question_trace]))
 
     def test_the_trace_correction_already_carries_the_alternatives_so_they_are_not_repeated(self):
         self.assertEqual(trace_view.evidence_lines(EVIDENCE, [{"correction": CORRECTION}]), [])
@@ -286,6 +302,21 @@ class SessionPage(unittest.TestCase):
                      correction={"decision": "ask", "dialog": {"ask": "<script>x</script>", "answer": "<b>"}})
         page = self.render([trace], None)
         self.assertNotIn("<script>x</script>", page)
+
+    def test_a_shadow_question_and_a_finished_dialog_read_truthfully_on_the_page(self):
+        shadow = dict(CORRECTION, shadow=True, dialog={"state": "awaiting_confirm", "ask": "Вы имели в виду «выключи свет»?",
+                                                       "answer": None, "outcome": None, "retries": 0})
+        page = self.render([dict(SPOTTER_TRACE, id=1, ts=OWNER_CLIP["ts"] + 1, correction=shadow)], None)
+        self.assertIn("теневой режим", page)
+        self.assertNotIn("ждём", page)
+        done = self.render([dict(SPOTTER_TRACE, id=1, ts=OWNER_CLIP["ts"] + 1, correction=CORRECTION)], None)
+        self.assertIn("итог диалога: принято", done)
+        self.assertNotIn("ждём", done)
+
+    def test_the_stored_second_opinion_shows_its_whole_time(self):
+        page = self.render([], EVIDENCE)
+        self.assertIn("140 мс", page)
+        self.assertNotIn("120 мс", page)
 
 
 if __name__ == "__main__":
