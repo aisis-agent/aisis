@@ -48,8 +48,8 @@ FIXTURES = {
     "check_reminder_layers.py": "7a3e1a4ad8721ae5a76d799d6cb168786924bfb5de033dbeaf9ddadcfc2d597a",
 }
 MAINTAINED_RUNNERS = {"run_corpus.mts", "expected_kind.mjs", "check_reminder_layers.py"}
-ADAPTER_REVISION = {"source_commit": "e859a37b495fca29321c089f79825051bd8bff57",
-                    "source_tree": "2782f4d64d88255dd04cfced076e9b26fe2e7f07"}
+ADAPTER_REVISION = {"source_commit": "eb004189e17337317ab570288669a81f000f0bb4",
+                    "source_tree": "3dcf94785fe4d8a1587f4f78e2b9c15bd210abb0"}
 ADAPTER_FILES = {
     "intent_grammar/__init__.py": "514aa739e2cdacc10f684a2c9669a453988322cab8f46a4ecfa0b1120bf110cb",
     "intent_grammar/grammar.py": "d1ad216b7760f54d6717e208321d50ec072c7e2f63f011f248963b56a02113ba",

@@ -135,6 +135,26 @@ class AdapterLayerTests(unittest.TestCase):
                          **gate.ADAPTER_REVISION, "files": files},
                          "inventory": {"source_files": [], "packages": [], "links": []}, "fixtures": []}
 
+    def test_pinned_revision_matches_current_adapter_files(self):
+        # ADAPTER_REVISION names the commit whose tree the manifest must come from; if the
+        # adapter files change (new grammar bundle) without a re-pin, the pinned commit no
+        # longer contains the bytes in ADAPTER_FILES.
+        commit = gate.ADAPTER_REVISION["source_commit"]
+        root = HERE.parents[2]
+        probe = subprocess.run(["git", "cat-file", "-e", commit + "^{commit}"], cwd=root,
+                               capture_output=True)
+        self.assertEqual(probe.returncode, 0, "pinned adapter commit is missing; fetch full history")
+        tree = subprocess.run(["git", "rev-parse", commit + "^{tree}"], cwd=root, check=True,
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(tree, gate.ADAPTER_REVISION["source_tree"])
+        for name, checksum in gate.ADAPTER_FILES.items():
+            data = subprocess.run(
+                ["git", "show", commit + ":services/yandex-station/code/" + name], cwd=root,
+                check=True, capture_output=True).stdout
+            with self.subTest(name=name):
+                self.assertEqual(hashlib.sha256(data).hexdigest(), checksum)
+                self.assertEqual((self.source / name).read_bytes(), data)
+
     def test_reviewed_adapter_files_are_not_claimed_as_quasar_image_files(self):
         gate.validate_adapter_layer(self.manifest)
         self.assertEqual(gate.inventory_entries(self.manifest, include_fixtures=False), {})
