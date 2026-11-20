@@ -8,6 +8,7 @@ catch-all answered «Не расслышал. Повтори», and the real req
 """
 import array
 import asyncio
+import math
 import os
 import sys
 import tempfile
@@ -57,7 +58,8 @@ class GatewayReplay(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.db = os.path.join(self.tmp.name, "dialogs.sqlite3")
         self.env = {"AISIS_WYOMING_URI": "tcp://127.0.0.1:1", "AISIS_DIALOGS_DB": self.db, "AISIS_STT_AB_PERCENT": "0", "AISIS_STT_DSP": "0",
-                    "AISIS_STT_WAKE_WINDOW": "0"}   # these sessions test the text-level strip on a real clock: the audio cut stays out of it
+                    "AISIS_STT_WAKE_WINDOW": "0",   # these sessions test the text-level strip on a real clock: the audio cut stays out of it
+                    "AISIS_STT_TONE_GUARD": "0"}    # the fake speech is a square wave, which is a tone: tone_guard has its own tests
         previous = os.environ.get("AISIS_VOICE_ARCHIVE")
         os.environ["AISIS_VOICE_ARCHIVE"] = os.path.join(self.tmp.name, "archive")
         self.addCleanup(lambda: os.environ.pop("AISIS_VOICE_ARCHIVE", None) if previous is None
@@ -111,6 +113,31 @@ class GatewayReplay(unittest.TestCase):
             return conn.execute("SELECT status, reason, transcript FROM voice_clips ORDER BY ts, id").fetchall()
         finally:
             conn.close()
+
+    def test_the_activation_chime_never_reaches_the_recognizer(self):
+        """Ticket #158: the station's own 313 Hz chime in its microphone is a gate reject, not a request for the recognizer."""
+        self.env["AISIS_STT_TONE_GUARD"] = "1"
+        chime = array.array("h", (int(3000 * math.sin(2 * math.pi * 313 * n / RATE)) for n in range(RATE * 3 // 10))).tobytes()
+        messages, calls, rows = self.run_session([chime + silence(900)], [])
+        self.assertEqual(calls, [])
+        self.assertEqual(rows, [("gate", "tone", None)])
+        self.assertEqual([message["text"] for message in messages if message.get("text")], [])
+
+    def test_shadow_mode_counts_the_chime_and_still_recognizes_it(self):
+        """Before enforcing, the guard only logs what it would drop: the cut still goes to the recognizer, so a lost request costs nothing."""
+        self.env["AISIS_STT_TONE_GUARD"] = "shadow"
+        chime = array.array("h", (int(3000 * math.sin(2 * math.pi * 313 * n / RATE)) for n in range(RATE * 3 // 10))).tobytes()
+        with self.assertLogs("aisis.stt", level="INFO") as logs:
+            messages, calls, rows = self.run_session([chime + silence(900)], ["Громкость."])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([row[0] for row in rows], ["sent"])
+        self.assertEqual(len([line for line in logs.output if "stt_tone_shadow would_drop" in line]), 1)
+
+    def test_shadow_mode_is_silent_for_speech(self):
+        self.env["AISIS_STT_TONE_GUARD"] = "shadow"
+        with self.assertLogs("aisis.stt", level="INFO") as logs:
+            self.run_session([speech(1500) + silence(900)], ["включи свет"])
+        self.assertEqual([line for line in logs.output if "stt_tone_shadow" in line], [])
 
     def test_the_real_pair_is_one_request_with_no_question_in_between(self):
         """tg#30176 + tg#30177: a click, «Малис» (the name), a pause, then the request."""

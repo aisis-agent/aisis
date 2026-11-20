@@ -28,6 +28,7 @@ import dsp_settings
 import speech_frontend
 import spotter_clips
 import stt_tuning
+import tone_guard
 import voice_vocab
 import voiceclips
 import wake_window
@@ -223,6 +224,7 @@ class Tuning:
     highpass_hz: float = 0.0
     ab_percent: float = 10.0     # share of utterances also sent to the recognizer UNprocessed, in the background, for the A/B counters
     wake_cut: bool = True        # cut the activation word from the audio before the recognizer (wake_window.py); off: the text-level strip only
+    tone_guard: str = tone_guard.DEFAULT_MODE   # a short narrow-band tone (the station's activation chime, an earcon): "enforce" drops it before the recognizer, "shadow" only logs stt_tone_shadow, "off" (tone_guard.py)
 
     @classmethod
     def from_env(cls, env):
@@ -243,6 +245,7 @@ class Tuning:
                    compressor=bool(number("AISIS_STT_COMPRESSOR", int(cls.compressor), int)),
                    highpass_hz=max(0.0, number("AISIS_STT_HIGHPASS_HZ", cls.highpass_hz, float)),
                    wake_cut=bool(number("AISIS_STT_WAKE_WINDOW", int(cls.wake_cut), int)),
+                   tone_guard=tone_guard.parse_mode(env.get("AISIS_STT_TONE_GUARD"), cls.tone_guard),
                    ab_percent=min(100.0, max(0.0, number("AISIS_STT_AB_PERCENT", cls.ab_percent, float))))
 
 
@@ -296,6 +299,14 @@ def activation_utterance(pcm, rate, voiced_ms):
                      peak=max(map(abs, samples), default=0), voiced_rms=0.0, floor_rms=None)
 
 
+TONE_HANGOVER_MS = 200   # the VAD keeps calling a cut speech up to five frames after the sound ends, and the cut rounds to frames: voiced_ms of a chime can exceed its audible length
+
+
+def tone_found(utt):
+    """True when the cut is a short narrow-band tone (tone_guard.py): cheap length test first (with room for the VAD's hangover), the spectrum only for a chime-sized cut."""
+    return utt.voiced_ms <= tone_guard.MAX_TONE_MS + TONE_HANGOVER_MS and tone_guard.is_tone(utt.speech_pcm, utt.rate)
+
+
 def judge(utt, tuning):
     """Reason this utterance must NOT reach the recognizer, or None. Whisper invents text on non-speech."""
     if utt.voiced_ms + utt.lead_voiced_ms < tuning.min_voiced_ms:   # a one-word request after a cut name is as long as the pair was before the cut
@@ -306,6 +317,8 @@ def judge(utt, tuning):
         return "flat_noise"
     if utt.voiced_ms >= STEADY_AFTER_MS and utt.swing < tuning.min_swing:
         return "steady_noise"
+    if tuning.tone_guard == "enforce" and tone_found(utt):
+        return "tone"
     return None
 
 
@@ -882,6 +895,8 @@ class STTGateway:
                 if judge(led, tuning) is None:
                     utt, name_lead = led, None
             rejected = judge(utt, tuning) if utt else None
+            if rejected is None and utt and tuning.tone_guard == "shadow" and tone_found(utt):
+                LOG.info("stt_tone_shadow would_drop reason=%s voiced_ms=%d rms=%.1f", reason, utt.voiced_ms, utt.voiced_rms)   # counted before enforcing: what a real near-tone request would cost
             if reason == "vad" and rejected and not eof:   # noise: dropped now, never queued (it must not push a request out of `held`)
                 LOG.info("stt_gate reason=%s voiced_ms=%d rms=%.1f", rejected, utt.voiced_ms, utt.voiced_rms)
                 self.archive(utt, {"trigger": reason, "status": "gate", "reason": rejected})
