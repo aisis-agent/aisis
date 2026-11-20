@@ -318,6 +318,29 @@ class UnitCompanionTests(unittest.TestCase):
         self.assertFalse((self.app / "hypothesis_store.py").exists())
         self.assertEqual(self.restarts()[-1], {"entry": self.old, "modules": {}})
 
+    def test_adapter_ships_the_laya_route_it_imports(self):
+        adapter = "import laya_route\nVERSION = 'new'\n"
+        result = self.deploy_unit("adapter", "adapter.py", adapter, **{"laya_route.py": "ROUTE = 'new'\n"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.app / "laya_route.py").read_text(), "ROUTE = 'new'\n")
+        (restart,) = self.restarts()
+        self.assertEqual((restart["entry"], restart["modules"]["laya_route.py"]), (adapter, "ROUTE = 'new'\n"))
+
+    def test_adapter_without_its_laya_route_beside_it_is_refused_untouched(self):
+        result = self.deploy_unit("adapter", "adapter.py", "import laya_route\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("laya_route.py must accompany", result.stderr)
+        self.assertEqual((self.app / "adapter.py").read_text(), self.old)
+        self.assertFalse(self.trace.exists())
+
+    def test_failed_health_removes_the_laya_route_the_old_adapter_never_had(self):
+        self.env["TEST_HEALTH_EXIT"] = "22"
+        result = self.deploy_unit("adapter", "adapter.py", "import laya_route\n", **{"laya_route.py": "ROUTE = 'new'\n"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.app / "adapter.py").read_text(), self.old)
+        self.assertFalse((self.app / "laya_route.py").exists())
+        self.assertEqual(self.restarts()[-1], {"entry": self.old, "modules": {}})
+
     def test_stale_bytecode_of_a_shipped_module_is_dropped_and_other_caches_stay(self):
         cache = self.app / "__pycache__"
         cache.mkdir()

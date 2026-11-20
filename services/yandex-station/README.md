@@ -500,6 +500,35 @@ and `~/.local/share/aisis/venv/bin/python -c "import stt_cli.hypotheses"`. Then 
 environment and restart `aisis-station-stt.service` (the adapter needs this version first so that `/asr/hypotheses` exists; until
 then the POST is a logged, swallowed 404).
 
+## Laya: the `/laya` proxy for the semantic shadow
+
+`POST /laya` (bearer token, like every adapter route) proxies one classification to the local Laya classify server of task-cli
+(`code/laya_route.py`, protocol version 2). The quasar container's semantic shadow calls it and only logs the verdict; the endpoint
+never actuates anything. The socket is `LAYA_SOCKET` or the newest `laya-<version>.sock` under the task-cli state directory.
+
+Request JSON: `message` (required string, up to 2000 characters), `questions` (object, default `{}`) and three optional fields.
+`model` is `english` or `multilingual` and is forwarded as is. `max_len` is an integer from 512 to 2048 and is forwarded as is.
+`language` is a hint (`ru`, `en-US`, …) that is turned into a `model` and not forwarded, because the Laya protocol has no such field.
+Every request is sent with an explicit `model`: the caller's `model`; else, for an English hint (`en`, `en-US`) on text without Cyrillic
+letters, the English checkpoint; else the multilingual one. That includes any other language, an unknown or missing hint, mixed Russian
+and English text and an English hint on Cyrillic text (ambiguous). The script is never a reason for English: Serbian in Latin letters,
+German or transliterated Russian stay multilingual. The reply is Laya's own, unchanged: its `meta` names the checkpoint really used,
+`max_len` and whether the input was truncated. A reply that does not confirm the requested model is refused, so an older Laya that
+ignores the field can never pass for the multilingual one.
+
+Failures are JSON `{"ok": false, "error": <code>, …}`; the proxy never answers in a different model's place and never invents a
+verdict, so the caller keeps its own deterministic decision:
+
+| Status | `error` | Meaning |
+|---|---|---|
+| 400 | `invalid_request` (+ `field`) | The request or a field is invalid, or Laya itself refused a field. Nothing was sent. |
+| 503 | `laya_socket_missing` / `laya_socket_refused` | No socket file, or only abandoned socket files nobody listens on. |
+| 503 | `laya_model_unavailable` (+ `reason`) | The model is `loading` (with `Retry-After: 1`; ask again) or its load failed (`load_failed`, `dependency_missing`, `path_shadow`). |
+| 504 | `laya_connect_timeout` / `laya_timeout` | The socket did not accept in 5 s, or Laya did not answer in 30 s. |
+| 502 | `laya_empty_response`, `laya_bad_response`, `laya_connection_lost`, `laya_model_not_confirmed`, `laya_route_unsupported`, `laya_upstream_error` | The upstream answered nothing, nonsense, no model confirmation, or an error of its own. |
+
+Tests: `code/test_adapter_laya.py` (CI). Rollback: restart the adapter on the previous commit.
+
 ## Jev: an advisory classifier for the turns that go to the brain
 
 Off by default. Jev (TypeSafe's decision model through the Vercel AI Gateway, `code/jev.py`) is asked only about a turn the

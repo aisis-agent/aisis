@@ -31,6 +31,7 @@ import ha_actions
 import hypothesis_store
 import intent_route
 import jev
+import laya_route
 import led_animation
 import reply_guard
 import user_prompt
@@ -967,37 +968,57 @@ class Adapter:
         return ogg
 
     async def laya(self, request):
-        """Proxy one JSON request line to the local laya classify-server unix socket.
+        """Proxy one classification to the local laya classify-server unix socket (protocol rules: laya_route).
 
         Read-only inference endpoint for the semantic-intents shadow layer in the
         quasar container; the private socket itself never crosses the boundary.
         """
         self.authorize(request)
-        body = await request.json()
-        message = body.get("message")
-        if not isinstance(message, str) or not message.strip() or len(message) > 2000:
-            raise web.HTTPBadRequest(text="invalid laya message")
+        try:
+            try:
+                body = await request.json()
+            except ValueError:
+                raise laya_route.LayaProblem(400, "invalid_request", field="body", detail="a JSON object") from None
+            line, model = laya_route.build_request(body)
+            text = laya_route.check_reply(await self._laya_exchange(line), model)
+        except laya_route.LayaProblem as problem:
+            LOG.warning("laya request refused or failed: %s (%d)", problem.code, problem.status)
+            headers = {"Retry-After": "1"} if problem.fields.get("reason") == "loading" else None
+            return web.json_response(problem.body(), status=problem.status, headers=headers)
+        return web.Response(text=text, content_type="application/json")
+
+    async def _laya_exchange(self, line: dict) -> bytes:
+        """Send one request line to the first Laya socket that accepts and return the reply line; raises a `LayaProblem`."""
         reader = writer = None
+        errors = []
         for sock_path in laya_sockets(self.env):
             try:
-                reader, writer = await asyncio.open_unix_connection(str(sock_path))
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_unix_connection(str(sock_path), limit=laya_route.READ_LIMIT_BYTES), laya_route.CONNECT_TIMEOUT_S)
                 break
-            except OSError:
-                continue  # an abandoned socket file of a newer version must not mask a live older server
+            except (OSError, asyncio.TimeoutError) as exc:
+                errors.append(exc)  # an abandoned socket file of a newer version must not mask a live older server
         if writer is None:
-            raise web.HTTPServiceUnavailable(text="laya socket unavailable")
-        try:
-            req = json.dumps({"op": "predict", "message": message,
-                "questions": body.get("questions", {})}, ensure_ascii=False)
-            writer.write(req.encode() + b"\n")
+            if any(isinstance(exc, asyncio.TimeoutError) for exc in errors):
+                raise laya_route.LayaProblem(504, "laya_connect_timeout")
+            if all(isinstance(exc, FileNotFoundError) for exc in errors):  # also true for no socket file at all
+                raise laya_route.LayaProblem(503, "laya_socket_missing")
+            raise laya_route.LayaProblem(503, "laya_socket_refused")
+        async def converse():
+            writer.write(json.dumps(line, ensure_ascii=False).encode() + b"\n")
             await writer.drain()
-            line = await asyncio.wait_for(reader.readline(), 30)
+            return await reader.readline()
+
+        try:
+            return await asyncio.wait_for(converse(), laya_route.EXCHANGE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            raise laya_route.LayaProblem(504, "laya_timeout") from None
+        except OSError:
+            raise laya_route.LayaProblem(502, "laya_connection_lost") from None
+        except ValueError:  # a reply line longer than the stream limit
+            raise laya_route.LayaProblem(502, "laya_bad_response") from None
         finally:
-            writer.close()
-            await writer.wait_closed()
-        if not line:
-            raise web.HTTPBadGateway(text="laya empty response")
-        return web.Response(text=line.decode(), content_type="application/json")
+            writer.transport.abort()  # the reply is read or the exchange is given up: never wait for a peer that stopped reading
 
     def _claude_module(self):
         """claude_primary, imported from the brain's directory; None when it is not installed beside the adapter."""
