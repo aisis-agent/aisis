@@ -129,11 +129,18 @@ class EvidenceLines(unittest.TestCase):
     def test_the_reply_clip_keeps_its_own_evidence_when_the_trace_alternatives_belong_to_the_question(self):
         question_trace = {"correction": dict(CORRECTION, heard="включи свет")}      # a reply trace inherits the question's record
         self.assertTrue(trace_view.evidence_lines(dict(EVIDENCE, primary_text="да"), [question_trace]))
-        stored = dict(EVIDENCE, primary_text="Включи свет.")      # the gateway keeps the primary as it said it, the hook's `heard` is normalised
-        self.assertEqual(trace_view.evidence_lines(stored, [{"correction": CORRECTION}]), [])
+        # the owner repeats the phrase to keep it: the same words, other hypotheses of its own
+        repeat = dict(EVIDENCE, primary_text="Включи свет.")
+        self.assertTrue(trace_view.evidence_lines(repeat, [{"correction": CORRECTION}]))
 
-    def test_the_trace_correction_already_carries_the_alternatives_so_they_are_not_repeated(self):
-        self.assertEqual(trace_view.evidence_lines(EVIDENCE, [{"correction": CORRECTION}]), [])
+    def test_the_trace_of_the_question_already_carries_the_alternatives_so_they_are_not_repeated(self):
+        asked = dict(CORRECTION, dialog={"state": "awaiting_confirm", "ask": "Вы имели в виду «выключи свет»?", "answer": None,
+                                         "outcome": None, "retries": 0})
+        self.assertEqual(trace_view.evidence_lines(EVIDENCE, [{"correction": asked}]), [])
+        stored = dict(EVIDENCE, primary_text="Включи свет.")      # the gateway keeps the primary as it said it, the hook's `heard` is normalised
+        self.assertEqual(trace_view.evidence_lines(stored, [{"correction": asked}]), [])
+        expired = dict(CORRECTION, dialog={"state": "awaiting_confirm", "ask": "?", "answer": None, "outcome": "timeout", "retries": 0})
+        self.assertTrue(trace_view.evidence_lines(EVIDENCE, [{"correction": expired}]))      # the unrelated next utterance
 
     def test_a_correction_without_alternatives_does_not_hide_the_evidence(self):
         self.assertTrue(trace_view.evidence_lines(EVIDENCE, [{"correction": {"decision": "none", "reason": "no-evidence"}}]))
@@ -169,7 +176,8 @@ class OwnerClipCaption(unittest.TestCase):
         self.assertNotIn("xxxx", text)
 
     def test_a_trace_with_a_correction_and_the_same_evidence_shows_the_variants_once(self):
-        trace = dict(SPOTTER_TRACE, correction=CORRECTION)
+        trace = dict(SPOTTER_TRACE, correction=dict(CORRECTION, dialog={"state": "awaiting_confirm", "ask": "Вы имели в виду «выключи свет»?",
+                                                                          "answer": None, "outcome": None, "retries": 0}))
         text = self.caption(traces=[trace])
         self.assertEqual(sum(l.startswith("варианты:") for l in text.splitlines()), 1)
         self.assertNotIn("второе мнение (GigaAM)", text)

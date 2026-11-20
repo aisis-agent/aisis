@@ -381,14 +381,19 @@ def engine_label(engine: Any) -> str:
     return word(ENGINES, engine) or "?"
 
 
+def _own_record(correction: dict) -> bool:
+    """The correction was decided on this very utterance. A later turn of the dialog (the answer, or the expiry of the question) carries the
+    question's `heard` and `nbest` again, with the answer or the timeout beside them: they describe another clip."""
+    dialog = mapping(correction.get("dialog"))
+    return not (isinstance(dialog.get("answer"), str) and dialog["answer"]) and dialog.get("outcome") != "timeout"
+
+
 def _traces_list_alternatives(traces: list[dict], primary: Any) -> bool:
-    """A trace's correction lists the alternatives of THIS clip when it heard the clip's own primary reading; the correction a reply trace
-    inherits from the question describes another clip."""
+    """A trace's correction lists the alternatives of THIS clip when it was decided on the clip's own primary reading."""
     wanted = norm(primary) if isinstance(primary, str) else ""
+    corrections = [mapping(t.get("correction")) for t in traces if isinstance(t, dict)]
     return bool(wanted) and any(
-        isinstance(heard := mapping(t.get("correction")).get("heard"), str) and norm(heard) == wanted
-        and mappings(mapping(t.get("correction")).get("nbest"))
-        for t in traces if isinstance(t, dict))
+        isinstance(c.get("heard"), str) and norm(c["heard"]) == wanted and mappings(c.get("nbest")) and _own_record(c) for c in corrections)
 
 
 def _primary_line(evidence: Any) -> list[tuple[int, str]]:
