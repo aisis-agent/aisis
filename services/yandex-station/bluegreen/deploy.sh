@@ -18,6 +18,7 @@ set -euo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 state_dir=${AISIS_BG_STATE:-$HOME/.local/share/aisis/bluegreen-state}
 app_dir=${AISIS_CODE_DIR:-$HOME/xp/aisis/services/yandex-station/code}
+code_dir_overridden=${AISIS_CODE_DIR:+1}
 corpus_dir=${AISIS_CORPUS_DIR:-$HOME/.local/share/aisis/corpus}
 runner_dir=$here/../corpus-runner   # the versioned corpus runner; the private corpus_dir only holds the data and dialog runner
 corpus_receipt=${AISIS_CORPUS_RECEIPT:-}
@@ -349,7 +350,6 @@ cmd_unit() {
     *) die "unknown unit $name (adapter|stt|ha-cli|pm)" ;;
   esac
   local -a files=("$file")
-  [[ -f $app_dir/$file ]] || die "installed file missing: $file"
   if [[ -n $newfile ]]; then
     python3 -m py_compile "$newfile" || die "$newfile does not compile"
     if [[ $name == adapter ]]; then
@@ -363,6 +363,23 @@ cmd_unit() {
     fi
   fi
   maintenance_on
+  # Resolved only while the maintenance lock is held (the installer takes the same lock around drop-in install + daemon-reload),
+  # so the unit cannot migrate between this lookup and the restart. Without an explicit AISIS_CODE_DIR the adapter's files go where
+  # systemd actually runs it (its effective ExecStart: primary checkout or the deploy-main worktree), never where a directory
+  # merely exists: a restart must run the code just installed.
+  if [[ $name == adapter && -z $code_dir_overridden ]]; then
+    local exec_start exec_path argv adapter_path
+    exec_start=$(systemctl --user show -p ExecStart --value "$unit") || die "cannot read ExecStart of $unit"
+    # systemd prints `{ path=P ; argv[]=P ARG... ; ignore_errors=... }` with no quoting: split on the field separators, not on
+    # spaces, so a home directory containing spaces survives. argv[0] is the executable path P; the rest must be adapter.py alone.
+    exec_path=${exec_start#*path=}; exec_path=${exec_path%% ; argv\[\]=*}
+    argv=${exec_start#*argv\[\]=}; argv=${argv%% ; ignore_errors=*}
+    [[ -n $exec_path && $argv == "$exec_path "* ]] || die "cannot parse the effective ExecStart of $unit; refusing to guess the install target"
+    adapter_path=${argv#"$exec_path "}
+    [[ $adapter_path == /*/adapter.py ]] || die "$unit has no lone /…/adapter.py argument in its effective ExecStart; refusing to guess the install target"
+    app_dir=${adapter_path%/adapter.py}
+  fi
+  [[ -f $app_dir/$file ]] || die "installed file missing: $file"
   mkdir -p "$state_dir/unit-backups"
   backup_dir=$(mktemp -d "$state_dir/unit-backups/$name.XXXXXX")
   for file in "${files[@]}"; do
