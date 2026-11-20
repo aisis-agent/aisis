@@ -23,7 +23,7 @@ from pathlib import Path
 # (aisis-quasar:volume-zero-e859a37b: speaker-room, weather-via-cli, intent-grammar applied) and the same file after the
 # correction-hook overlay (its blocks do not overlap these).
 HA_INTENTS_PATCHED_SHA256 = {
-    "f4ab25c368fc5d6a39d280dcfa298eb3a11e261261fc9dae3dd7d82f36a494c3": "e1abf5e53eeab464892646705e28ecbbd0b83305d1c6b1c78a62b288b7a40f46",
+    "f4ab25c368fc5d6a39d280dcfa298eb3a11e261261fc9dae3dd7d82f36a494c3": "58a2aa0b34cded2284669e2b288fb4fffe21c5f9db3edddaa11b31a027a1cd48",
     "7a70be745f4f766e322377d17fa9f20707730d3e3285a5018b5a90abfbb9bc9c": "8065b4b5bf2990d6dbf3cd52e456eacaefe3cad823820ceb69c751109238d9e2",
 }
 
