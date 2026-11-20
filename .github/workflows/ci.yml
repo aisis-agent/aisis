@@ -60,6 +60,8 @@ jobs:
         run: python3 -m unittest test_quasar_lan_proxy
       - name: ac-defer-to-adapter overlay patch applier tests
         run: python3 -m unittest discover -s services/yandex-station/overlays/ac-defer-to-adapter
+      - name: resource-bounds overlay patch applier tests
+        run: python3 -m unittest discover -s services/yandex-station/overlays/resource-bounds
       - name: weather skill tests (adapter parser, runner and the quasar hand-over list)
         working-directory: services/yandex-station/code
         run: python3 -m unittest test_weather_skills

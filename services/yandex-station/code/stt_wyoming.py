@@ -22,7 +22,7 @@ import time
 import random
 from urllib.parse import unquote, urlsplit
 
-from aiohttp import WSMsgType, web
+from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
 import dsp_settings
 import speech_frontend
@@ -33,6 +33,7 @@ import voice_vocab
 import voiceclips
 import wake_window
 import wake_word
+from second_opinion import Opinion, SecondOpinion
 
 LOG = logging.getLogger("aisis.stt")
 FRAME_MS = 20
@@ -124,6 +125,18 @@ async def whisper_ctl_status(env):
             and isinstance(reply.get("leases", []), list)):
         return None    # a reply of the wrong shape is no status at all: the probe runs as it always did
     return reply
+
+
+HYP_PUBLISH_TIMEOUT_S = 0.15   # the loopback POST of the evidence to the adapter: total, connect to last byte; a final waits for it at most this long
+HYP_LATE_WAIT_MS = 5000        # how long an opinion that missed its final is still waited for (to record it); never delays anything
+HYP_GUARD_S = 0.05             # a second opinion (or a POST) that ignores its own bound is cut this long after it
+
+
+def station_of(request):
+    """The station a websocket or upload belongs to when it says so (header x-aisis-station or query ?station=), else None: the
+    quasar STT client sends neither today, and the adapter's store then serves the evidence to any station."""
+    value = (request.headers.get("x-aisis-station") or request.query.get("station") or "").strip()
+    return value[:64] if value and value.isprintable() else None
 
 
 def _fold(text):
@@ -460,13 +473,71 @@ class Endpoint:
             swing=voiced_rms[len(voiced_rms) * 9 // 10] / max(voiced_rms[len(voiced_rms) // 10], 1.0) if voiced_rms else 0.0)
 
 
+def judge_transcript(heard, utt):
+    """(rejected, named): why what the recognizer heard is no request (None = it is one; "empty" counts as one, the final says nothing),
+    and the activation word split off it (wake_word.split) when it is judged."""
+    rejected = distrust(heard, utt)
+    if rejected == "empty":
+        rejected = None
+    named = wake_word.split(heard) if rejected is None else None
+    if named is not None and named.only:
+        rejected = WAKE_ONLY
+    return rejected, named
+
+
+@dataclass
+class Outcome:
+    """What one utterance became between the gate and the final: the verdict, what Whisper heard, the text that goes on, the speaker
+    check, the recogniser's time and the second opinion (second_opinion.py) with the text it is about."""
+    rejected: str | None = None
+    heard: str = ""
+    text: str = ""
+    wake_cut: str = ""
+    speaker: dict | None = None
+    asr_ms: int | None = None
+    opinion: Opinion | None = None
+    opinion_task: asyncio.Future | None = None
+    pending: bool = False
+    publishable: bool = False
+    primary: str = ""
+
+
+def archive_meta(utt, trigger, out):
+    """What became of the utterance, as the archive keeps it."""
+    activation = out.rejected == WAKE_ONLY
+    return {"trigger": trigger, "status": voiceclips.ACTIVATION if activation else "sent" if out.rejected is None else ("gate" if out.asr_ms is None else "blacklist"),
+            "reason": "wake" if activation else "wake_cut:" + out.wake_cut if out.wake_cut else out.rejected,
+            "transcript": out.text if out.rejected is None else out.heard, "asr_ms": out.asr_ms,
+            "final_ms": None if out.asr_ms is None else utt.trailing_ms + out.asr_ms}
+
+
+def foreign_enforced(speaker):
+    """Did the speaker check reject this voice (enforce mode, verdict foreign)? The final is then the empty `foreign_voice` one."""
+    return bool(speaker) and speaker["mode"] == "enforce" and speaker["verdict"] == "foreign"
+
+
+def final_reply(out, unclear):
+    """The final's JSON for an utterance. `unclear` is why an earlier cut was dropped (see finish())."""
+    reply = {"text": out.text, "end_of_utt": True}
+    if out.rejected:
+        reply["rejected"] = out.rejected
+    elif not out.text and unclear:
+        # The station's end-of-stream final of an utterance dropped earlier: the owner DID speak
+        # («да» heard as a lone «Спасибо.»), so the caller may ask again instead of ending the dialog.
+        reply["rejected"] = unclear
+    if foreign_enforced(out.speaker):
+        reply = {"text": "", "end_of_utt": True, "rejected": "foreign_voice", "score": out.speaker["score"]}
+    return reply
+
+
 class STTGateway:
     SLOTS = 2   # recognitions in flight at once (live utterances; /healthz/asr runs only when none is)
     # How long, after the recognizer returned, enforce mode waits for a slower speaker check before failing open.
     SPEAKER_GRACE = 2.0
     SPEAKER_RETRY_AFTER = 60.0
 
-    def __init__(self, env=None, vad_factory=None, recognizer=transcribe, verifier=None, tv=None, archive=True, domain_catalog=None, clock=time.monotonic):
+    def __init__(self, env=None, vad_factory=None, recognizer=transcribe, verifier=None, tv=None, archive=True, domain_catalog=None, clock=time.monotonic,
+                 second_opinion=None):
         self.env = dict(os.environ) if env is None else env
         self.tuning = Tuning.from_env(self.env)
         self.clock = clock            # the stream's age (wake_window.Gate); a test owns it
@@ -485,6 +556,11 @@ class STTGateway:
         self.pruned_at = 0.0
         self.speaker_disabled_until = 0.0
         self.speaker_background = set()
+        # Recognition alternatives (second_opinion.py): off unless AISIS_HYP_ENABLED; `second_opinion` is injectable for tests.
+        self.second = second_opinion if second_opinion is not None else SecondOpinion(self.env)
+        self.adapter_url = self.env.get("AISIS_ADAPTER_URL", "http://127.0.0.1:31117").rstrip("/")
+        self.hypothesis_session = None      # aiohttp client of the loopback publish to the adapter; made on first use
+        self.hypothesis_background = set()
 
     def live_tuning(self):
         """The startup tuning with the dashboard's end-of-speech wait and level front-end overrides; read per conversation, no restart."""
@@ -552,19 +628,22 @@ class STTGateway:
             voiceclips.prune(self.db_path())
 
     def archive(self, utt, meta):
-        """Keep the utterance and what became of it (voiceclips). Off the event loop; never delays or fails a turn."""
+        """Keep the utterance and what became of it (voiceclips). Off the event loop; never delays or fails a turn.
+        Returns the job (it yields the clip id, None when the save failed), or None when archiving is off."""
         if not self.archive_enabled:
-            return
+            return None
         meta = dict(meta, ts=time.time(), rms=utt.rms, peak=utt.peak, voiced_ms=utt.voiced_ms, silence_ms=utt.trailing_ms,
                     floor_rms=None if utt.floor_rms is None else round(utt.floor_rms, 1),
                     contrast=None if utt.contrast is None else round(utt.contrast, 2),
                     engine=self.env.get("AISIS_STT_ENGINE", "faster-whisper large-v3-turbo (wyoming)"))
         def work():
-            voiceclips.save(self.db_path(), utt.speech_pcm, utt.rate, meta)
+            clip_id = voiceclips.save(self.db_path(), utt.speech_pcm, utt.rate, meta)
             self.prune_archive()
+            return clip_id
         job = asyncio.get_running_loop().run_in_executor(None, work)
         self.speaker_background.add(job)
         job.add_done_callback(self.speaker_done)
+        return job
 
     def speaker_failed(self, exc):
         # One warning per outage; transcription carries on exactly as before.
@@ -645,6 +724,230 @@ class STTGateway:
         if not job.cancelled() and job.exception() is not None:
             LOG.warning("stt_speaker_record_failed class=%s", type(job.exception()).__name__)
 
+    # --- recognition alternatives: a second recogniser beside Whisper (second_opinion.py) -------------------------------------------
+    # Everything here is fail-open: a failure leaves the turn exactly as it was without the feature.
+
+    def second_health(self):
+        """{enabled, state, model, last_ms} of the second recogniser for the health answers; a probe must never fail because of it."""
+        try:
+            return self.second.health()
+        except Exception as exc:
+            return {"enabled": False, "state": "error:" + type(exc).__name__, "model": None, "last_ms": None}
+
+    def hypothesis_spawn(self, coroutine):
+        task = asyncio.ensure_future(coroutine)
+        self.hypothesis_background.add(task)
+        task.add_done_callback(self.hypothesis_background.discard)
+        return task
+
+    def hypothesis_begin(self, pcm, rate):
+        """Start the second recogniser on `pcm` (the very audio Whisper gets). None when it is off or failed to start."""
+        try:
+            return self.second.begin(pcm, rate)
+        except Exception as exc:
+            LOG.warning("stt_hyp_failed stage=begin class=%s", type(exc).__name__)
+            return None
+
+    async def hypothesis_resolve(self, task, primary, wait_ms):
+        """The opinion about `primary`, or None; bounded by `wait_ms` plus a guard whatever the second opinion does."""
+        try:
+            return await asyncio.wait_for(self.second.resolve(task, primary, wait_ms), wait_ms / 1000 + HYP_GUARD_S)
+        except Exception as exc:   # includes the guard's timeout: a second opinion that does not keep its contract is simply absent
+            LOG.warning("stt_hyp_failed stage=resolve class=%s", type(exc).__name__)
+            return None
+
+    async def hypothesis_collect(self, task, primary, final_waits):
+        """(opinion, pending) for the final of an utterance Whisper read as `primary`. The opinion is returned only when it is ready:
+        immediately for a command-shaped phrase with a confusable word (the final waits for it, at most AISIS_HYP_WAIT_MS), never for
+        anything else. `pending` asks for a late resolve after the final (a slow opinion is still recorded)."""
+        began = time.monotonic()
+        try:
+            waits = final_waits and bool(self.second.waits_for(primary))
+        except Exception as exc:
+            LOG.warning("stt_hyp_failed stage=waits_for class=%s", type(exc).__name__)
+            waits = False
+        if not waits:
+            return None, True
+        opinion = await self.hypothesis_resolve(task, primary, self.second.wait_ms)
+        LOG.info("stt_hyp status=%s ms=%s waited_ms=%d", "guard" if opinion is None else opinion.status,
+                 None if opinion is None else opinion.ms, (time.monotonic() - began) * 1000)
+        if opinion is not None and opinion.status == "ok":
+            return opinion, False
+        return None, opinion is not None and opinion.status == "timeout"
+
+    def hypothesis_late(self, task, primary, station, clip, publish):
+        """The final is gone: record the opinion when it arrives (and, for a command, still publish it for whoever asks next)."""
+        async def run():
+            opinion = await self.hypothesis_resolve(task, primary, HYP_LATE_WAIT_MS)
+            if opinion is None or opinion.status != "ok":
+                LOG.info("stt_hyp late status=%s", "guard" if opinion is None else opinion.status)
+                return
+            LOG.info("stt_hyp late status=ok ms=%s", opinion.ms)
+            if publish:
+                self.publish_hypotheses(station, primary, "whisper", opinion.nbest, opinion.ms)
+            await self.keep_hypotheses(clip, "whisper", primary, opinion.nbest, opinion.ms)
+        self.hypothesis_spawn(run())
+
+    def publish_hypotheses(self, station, text, source, nbest, ms):
+        """Hand the adapter's /asr/hypotheses (hypothesis_store.py) what the audio behind `text` also sounded like. Returns the POST's task
+        (None when it could not even be made); a caller that does not need the outcome lets it run."""
+        try:
+            return self.hypothesis_spawn(self.post_hypotheses({"station": station, "text": text, "source": source, "nbest": nbest.as_dict(), "ms": ms}))
+        except Exception as exc:
+            LOG.warning("stt_hyp_publish_failed class=%s", type(exc).__name__)
+            return None
+
+    async def post_hypotheses(self, payload):
+        """POST the evidence; its outcome as a status: ok, http:<code>, timeout or error:<class>. Never raises (a cancellation excepted)."""
+        try:
+            if self.hypothesis_session is None:
+                self.hypothesis_session = ClientSession(timeout=ClientTimeout(total=HYP_PUBLISH_TIMEOUT_S))
+            token = self.env.get("AISIS_ADAPTER_TOKEN")
+            async with self.hypothesis_session.post(self.adapter_url + "/asr/hypotheses", json=payload,
+                                                    headers={"Authorization": "Bearer " + token} if token else {}) as response:
+                status = "ok" if response.status < 300 else "http:%d" % response.status
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            status = "timeout"
+        except Exception as exc:
+            status = "error:" + type(exc).__name__
+        if status != "ok":
+            LOG.warning("stt_hyp_publish_failed status=%s", status)
+        return status
+
+    def persist_hypotheses(self, clip, source, primary, nbest, ms):
+        self.hypothesis_spawn(self.keep_hypotheses(clip, source, primary, nbest, ms))
+
+    async def keep_hypotheses(self, clip, source, primary, nbest, ms):
+        """Store the opinion with its clip (voiceclips.clip_hypotheses). `clip` is the clip id, or the archive job that yields it."""
+        try:
+            clip_id = clip if clip is None or isinstance(clip, str) else await clip
+            if clip_id:
+                await asyncio.get_running_loop().run_in_executor(None, voiceclips.save_hypotheses, self.db_path(), clip_id, source,
+                                                                 primary, nbest.as_dict(), ms)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOG.warning("stt_hyp_keep_failed class=%s", type(exc).__name__)
+
+    def spotter_opinion(self, clip_id, pcm, transcript, station):
+        """The same decode for the audio the station uploaded after its on-device spotter already acted on its own reading: it cannot
+        prevent that action, it is evidence for diagnostics and the next layer. Runs after the upload was answered."""
+        try:
+            if not self.second.enabled:
+                return
+        except Exception as exc:
+            LOG.warning("stt_hyp_failed stage=spotter class=%s", type(exc).__name__)
+            return
+        async def run():
+            try:
+                lifted = pcm
+                try:   # the same level lift the live utterances get: the uplink is quiet
+                    lifted, _ = await asyncio.get_running_loop().run_in_executor(None, frontend_for_recognizer, pcm,
+                                                                                float(spotter_clips.levels(pcm)[0]), self.live_tuning())
+                except Exception as exc:
+                    LOG.warning("stt_hyp_failed stage=spotter_lift class=%s", type(exc).__name__)
+                task = self.hypothesis_begin(lifted, spotter_clips.RATE)
+                opinion = None if task is None else await self.hypothesis_resolve(task, transcript, HYP_LATE_WAIT_MS)
+                if opinion is None or opinion.status != "ok":
+                    LOG.info("stt_hyp spotter status=%s", "none" if opinion is None else opinion.status)
+                    return
+                LOG.info("stt_hyp spotter status=ok ms=%s", opinion.ms)
+                self.publish_hypotheses(station, transcript, "spotter", opinion.nbest, opinion.ms)
+                await self.keep_hypotheses(clip_id, "spotter", transcript, opinion.nbest, opinion.ms)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOG.warning("stt_hyp_failed stage=spotter class=%s", type(exc).__name__)
+        self.hypothesis_spawn(run())
+
+    async def warm_hypotheses(self, app):
+        """Start the worker off the request path (the model takes seconds to load); a failure is the feature's state, not the gateway's."""
+        async def warm():
+            try:
+                await self.second.warm()
+            except Exception as exc:
+                LOG.warning("stt_hyp_failed stage=warm class=%s", type(exc).__name__)
+        self.hypothesis_spawn(warm())
+
+    async def close_hypotheses(self, app):
+        tasks = list(self.hypothesis_background)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await self.second.close()
+        except Exception as exc:
+            LOG.warning("stt_hyp_failed stage=close class=%s", type(exc).__name__)
+        if self.hypothesis_session is not None:
+            await self.hypothesis_session.close()
+
+    async def recognize(self, utt, rejected, tuning):
+        """One utterance through the recognizer: the gate's verdict `rejected` (None = send it), what was heard, the verdict on it, the
+        speaker check and the second opinion, as an Outcome. Nothing is archived or sent here."""
+        out = Outcome(rejected=rejected)
+        if utt is None or rejected is not None:
+            return out
+        rate = utt.rate
+        # Speaker check runs in a worker thread beside the recognizer, so it adds no latency.
+        speaker_task = asyncio.ensure_future(self.speaker_check(utt.speaker_pcm, rate))
+        recognizer_pcm, info = frontend_for_recognizer(utt.speech_pcm, utt.voiced_rms, tuning)
+        if recognizer_pcm is not utt.speech_pcm:
+            LOG.info("stt_norm gain_db=%.1f voiced_rms=%.1f out_rms=%.1f out_peak=%d compressed=%s", info["gain_db"], utt.voiced_rms,
+                     info["out_rms"], info["out_peak"], info["compressed"])
+        began = time.monotonic()
+        out.opinion_task = self.hypothesis_begin(recognizer_pcm, rate)
+        try:
+            out.heard = await self.recognize_audio(recognizer_pcm, rate)
+        except BaseException:
+            speaker_task.cancel()
+            raise
+        out.asr_ms = int((time.monotonic() - began) * 1000)
+        if recognizer_pcm is not utt.speech_pcm and tuning.ab_percent > 0 and random.random() * 100 < tuning.ab_percent:
+            self.ab_probe(utt.speech_pcm, rate, out.heard, info["gain_db"], utt.voiced_rms)
+        out.rejected, named = judge_transcript(out.heard, utt)
+        if out.rejected is None:
+            out.text, out.wake_cut = named.clean, named.head
+            out.speaker = await self.speaker_result(speaker_task, utt.speaker_pcm, rate, out.text)
+        else:
+            speaker_task.cancel()
+        if out.opinion_task is not None and not out.wake_cut:
+            await self.collect_opinion(out)
+        return out
+
+    async def recognize_audio(self, pcm, rate):
+        async with self.slots:
+            return await asyncio.wait_for(self.recognizer(self.env["AISIS_WYOMING_URI"], pcm, rate,
+                self.env.get("AISIS_STT_LANGUAGE", "ru"), **self.recognizer_extras()), 35)
+
+    async def collect_opinion(self, out):
+        # A name left in the text means the audio holds words the text lacks: the opinion would be about another text. A voice the speaker
+        # check rejects gets the empty `foreign_voice` final: nothing about its words is published, and its final does not wait for them.
+        out.primary = out.heard if out.rejected else out.text
+        out.publishable = out.rejected is None and bool(out.text) and not foreign_enforced(out.speaker)
+        out.opinion, out.pending = await self.hypothesis_collect(out.opinion_task, out.primary, out.publishable)
+
+    def archive_outcome(self, utt, trigger, out, request):
+        """Keep the utterance with what became of it, and with the second opinion (now, or when it arrives)."""
+        archive_job = self.archive(utt, archive_meta(utt, trigger, out))
+        if out.opinion is not None:
+            self.persist_hypotheses(archive_job, "whisper", out.primary, out.opinion.nbest, out.opinion.ms)
+        elif out.pending:
+            self.hypothesis_late(out.opinion_task, out.primary, station_of(request), archive_job, out.publishable)
+
+    async def publish_before_final(self, out, request):
+        """Before the final leaves: hand the evidence to the adapter (hypothesis_store.py) and wait for its answer, so that it is stored when
+        quasar asks about this phrase right after the final. The wait is the POST's own bound, never more than the wait budget
+        AISIS_HYP_WAIT_MS (0 never waits); a POST still running at the bound is left to finish. Its status is logged either way."""
+        if out.opinion is None or not out.publishable:
+            return
+        post = self.publish_hypotheses(station_of(request), out.primary, "whisper", out.opinion.nbest, out.opinion.ms)
+        if post is None:
+            return
+        done, _ = await asyncio.wait({post}, timeout=min(HYP_PUBLISH_TIMEOUT_S + HYP_GUARD_S, self.second.wait_ms / 1000))
+        LOG.info("stt_hyp publish status=%s", post.result() if post in done and not post.cancelled() else "timeout")
+
     async def warm_speaker(self, app):
         """Load the model off the request path so the first utterance is not slow; failures are non-fatal."""
         async def warm():
@@ -663,7 +966,8 @@ class STTGateway:
         task.add_done_callback(self.speaker_background.discard)
 
     async def health(self, request):
-        return web.json_response({"service": "aisis-wyoming-stt", "configured": bool(self.env.get("AISIS_WYOMING_URI")), "model_downloads": False})
+        return web.json_response({"service": "aisis-wyoming-stt", "configured": bool(self.env.get("AISIS_WYOMING_URI")), "model_downloads": False,
+                                  "second_opinion": self.second_health()})
 
     async def health_asr(self, request):
         """200 only when the recognizer really transcribed a half second of silence. The tcp port answering (or a Describe)
@@ -712,7 +1016,7 @@ class STTGateway:
             return web.json_response({"error": type(exc).__name__}, status=504)
         finally:
             self.slots.release()
-        return web.json_response({"ok": True, "seconds": round(time.monotonic() - started, 2)})
+        return web.json_response({"ok": True, "seconds": round(time.monotonic() - started, 2), "second_opinion": self.second_health()})
 
     async def spotter_clip(self, request):
         """A command the speaker recognised on the device: quasar posts the audio the station uploaded for it (spotter_clips.py)."""
@@ -722,19 +1026,20 @@ class STTGateway:
         transcript = unquote(request.headers.get("x-aisis-transcript", ""))
         station, sent_at = request.headers.get("x-aisis-station"), request.headers.get("x-aisis-ts")
         def work():
-            saved = spotter_clips.archive(self.db_path(), audio, transcript, station, sent_at)
+            saved, pcm = spotter_clips.archive_decoded(self.db_path(), audio, transcript, station, sent_at)
             try:
                 self.prune_archive()
             except Exception as exc:  # the clip is saved; retention retries on the next one
                 LOG.warning("spotter_clip_prune_failed class=%s", type(exc).__name__)
-            return saved
+            return saved, pcm
         try:
-            saved = await asyncio.get_running_loop().run_in_executor(None, work)
+            saved, pcm = await asyncio.get_running_loop().run_in_executor(None, work)
         except spotter_clips.Rejected as rejected:
             LOG.info("spotter_clip_rejected reason=%s station=%s bytes=%d", rejected.reason, request.headers.get("x-aisis-station", "-"), len(audio))
             return web.json_response({"error": rejected.reason}, status=422)
         LOG.info("spotter_clip_archived station=%s source=%s frames=%s", request.headers.get("x-aisis-station", "-"),
                  request.headers.get("x-aisis-source", "-"), request.headers.get("x-aisis-frames", "-"))
+        self.spotter_opinion(saved["clip"], pcm, transcript.strip(), station)
         return web.json_response(saved, status=201)
 
     async def websocket(self, request):
@@ -797,50 +1102,14 @@ class STTGateway:
             """One utterance -> one final. `rejected` is the gate's verdict (None = send it to the recognizer)."""
             nonlocal final_sent, recognition, unclear
             try:
-                text = heard = wake_cut = ""
-                speaker = None
-                asr_ms = None
-                if utt is not None and rejected is None:
-                    rate = utt.rate
-                    # Speaker check runs in a worker thread beside the recognizer, so it adds no latency.
-                    speaker_task = asyncio.ensure_future(self.speaker_check(utt.speaker_pcm, rate))
-                    recognizer_pcm, info = frontend_for_recognizer(utt.speech_pcm, utt.voiced_rms, tuning)
-                    gain_db = info["gain_db"]
-                    if recognizer_pcm is not utt.speech_pcm:
-                        LOG.info("stt_norm gain_db=%.1f voiced_rms=%.1f out_rms=%.1f out_peak=%d compressed=%s", gain_db, utt.voiced_rms,
-                                 info["out_rms"], info["out_peak"], info["compressed"])
-                    began = time.monotonic()
-                    try:
-                        async with self.slots:
-                            heard = await asyncio.wait_for(self.recognizer(self.env["AISIS_WYOMING_URI"], recognizer_pcm, rate,
-                                self.env.get("AISIS_STT_LANGUAGE", "ru"), **self.recognizer_extras()), 35)
-                    except BaseException:
-                        speaker_task.cancel()
-                        raise
-                    asr_ms = int((time.monotonic() - began) * 1000)
-                    if recognizer_pcm is not utt.speech_pcm and tuning.ab_percent > 0 and random.random() * 100 < tuning.ab_percent:
-                        self.ab_probe(utt.speech_pcm, rate, heard, gain_db, utt.voiced_rms)
-                    rejected = distrust(heard, utt)
-                    if rejected == "empty":
-                        rejected = None
-                    named = wake_word.split(heard) if rejected is None else None
-                    if named is not None and named.only:
-                        rejected = WAKE_ONLY
-                    if rejected is None:
-                        text, wake_cut = named.clean, named.head
-                        speaker = await self.speaker_result(speaker_task, utt.speaker_pcm, rate, text)
-                    else:
-                        speaker_task.cancel()
+                out = await self.recognize(utt, rejected, tuning)
+                rejected, text, speaker, asr_ms = out.rejected, out.text, out.speaker, out.asr_ms
                 if rejected:
-                    LOG.info("stt_rejected reason=%s trigger=%s heard=%r", rejected, trigger, heard)
-                if wake_cut:
-                    LOG.info("stt_wake cut=%r heard=%r", wake_cut, heard)
+                    LOG.info("stt_rejected reason=%s trigger=%s heard=%r", rejected, trigger, out.heard)
+                if out.wake_cut:
+                    LOG.info("stt_wake cut=%r heard=%r", out.wake_cut, out.heard)
                 if utt is not None:
-                    activation = rejected == WAKE_ONLY
-                    self.archive(utt, {"trigger": trigger, "status": voiceclips.ACTIVATION if activation else "sent" if rejected is None else ("gate" if asr_ms is None else "blacklist"),
-                        "reason": "wake" if activation else "wake_cut:" + wake_cut if wake_cut else rejected,
-                        "transcript": text if rejected is None else heard, "asr_ms": asr_ms,
-                        "final_ms": None if asr_ms is None else utt.trailing_ms + asr_ms})
+                    self.archive_outcome(utt, trigger, out, request)
                 dropped = rejected and (trigger == "vad" or trigger == "idle" and rejected == WAKE_ONLY) and not eof
                 if (dropped or held and not text) and not ws.closed and not cancelled:
                     # Noise/caption/activation word mid-stream: the station may still be waiting for the real command. Drop it,
@@ -855,15 +1124,8 @@ class STTGateway:
                     held.clear()
                     LOG.info("stt_final pcm=%dB text=%r asr_ms=%s end_to_final_ms=%s", len(utt.pcm) if utt else 0, text, asr_ms,
                              None if asr_ms is None else utt.trailing_ms + asr_ms)
-                    reply = {"text": text, "end_of_utt": True}
-                    if rejected:
-                        reply["rejected"] = rejected
-                    elif not text and unclear:
-                        # The station's end-of-stream final of an utterance dropped earlier: the owner DID speak
-                        # («да» heard as a lone «Спасибо.»), so the caller may ask again instead of ending the dialog.
-                        reply["rejected"] = unclear
-                    if speaker and speaker["mode"] == "enforce" and speaker["verdict"] == "foreign":
-                        reply = {"text": "", "end_of_utt": True, "rejected": "foreign_voice", "score": speaker["score"]}
+                    reply = final_reply(out, unclear)
+                    await self.publish_before_final(out, request)
                     await ws.send_json(reply)
                 if speaker:
                     self.speaker_record(utt.speaker_pcm, utt.rate, text, speaker)
@@ -984,6 +1246,8 @@ class STTGateway:
     def app(self):
         app = web.Application()
         app.on_startup.append(self.warm_speaker)
+        app.on_startup.append(self.warm_hypotheses)
+        app.on_cleanup.append(self.close_hypotheses)
         app.router.add_get("/", self.websocket)
         app.router.add_get("/healthz", self.health)
         app.router.add_get("/healthz/asr", self.health_asr)
