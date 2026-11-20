@@ -41,12 +41,17 @@ support services: aisis-station-kit :18080 (eQuasar sync server, ~/lite-kit),
 | 8795  | Home Assistant CLI proxy | aisis-ha-cli.service |
 | 8781  | dashboard | aisis-dashboard.service |
 | 31119 | postgres (loopback) | aisis-yandex-postgres-1 |
-| 31115/31116/31114 | quasar switch (uniproxy/API/f-state) | aisis-switch-prod |
+| 31115/31116/31114 | quasar switch (uniproxy+HTTP/API/f-state): 31115 and 31114 listen on all interfaces, 31116 on loopback | aisis-switch-prod |
 | 31215…/31315… | quasar blue/green prod colors | aisis-quasar-prod-{blue,green} |
 | 31415… | stage switch + colors | aisis-switch-stage, aisis-quasar-stage-* |
 | 18080 | station kit sync server | aisis-station-kit.service |
-| 31116 (LAN) | quasar LAN proxy | aisis-station-lan-proxy.service |
+| 31116 (LAN) | quasar LAN proxy, only for `ALLOWED_PEERS` (Home Assistant) | aisis-station-lan-proxy.service |
 | 10300 | Wyoming faster-whisper (tailnet) | wyoming-whisper.service |
+
+**Who may connect.** Nothing in the quasar server authenticates a speaker: any client that reaches `:31115` (or a colour's own port) can send text turns to the Home Assistant
+fast-intent layer, mint glagol tokens and read every speaker's private key, and the API behind the LAN proxy can make the speakers say anything. The quasar layer therefore
+admits only this host and `AISIS_ALLOWED_CLIENTS` (the voice front), binds a colour to loopback and checks the station id (`overlays/quasar-admission`, with the firewall rules to
+apply today and the steps before the flip); the LAN proxy forwards only for `ALLOWED_PEERS` (`~/.config/aisis/lan-proxy.env`). Ticket [#202](https://github.com/alex-mextner/aisis/issues/202).
 
 ## Who answers what
 

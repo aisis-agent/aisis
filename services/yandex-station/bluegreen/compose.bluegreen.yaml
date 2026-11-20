@@ -45,6 +45,14 @@ x-prod-env: &prod-env
   # The fast-intent layer asks the adapter's intent grammar first (overlays/intent-grammar): on|shadow|off, anything else
   # is off. A container reads its environment once: switching it means recreating the active color with the new value.
   GRAMMAR_HOOK: ${GRAMMAR_HOOK-on}
+  # Who may reach the quasar HTTP/WebSocket surface through the switch (src/admission.ts of the aisis-quasar fork,
+  # overlays/quasar-admission): the address of the voice front the speakers connect through, comma separated IPs or CIDRs.
+  # This host is always admitted. Required: without it every other client is refused, so a missing value must stop the
+  # deploy here, not silence the speakers after the flip. Images without that overlay ignore it.
+  AISIS_ALLOWED_CLIENTS: ${AISIS_ALLOWED_CLIENTS:?set the voice front address in runtime.env}
+  # Compose reads runtime.env only for interpolation: every admission setting has to be forwarded explicitly.
+  AISIS_ADMISSION: ${AISIS_ADMISSION:-enforce}
+  AISIS_EDGE_TOKEN: ${AISIS_EDGE_TOKEN:-}
 
 # Stage never reaches the real adapter, STT or Home Assistant: processor, TTS,
 # music and STT point at loopback ports nobody listens on, HA goes to the dry-run
@@ -64,6 +72,8 @@ x-stage-env: &stage-env
   # /intent/decide EXECUTES timers on the adapter it reaches, and with host networking the default URL is the real adapter:
   # stage makes no grammar call at all.
   GRAMMAR_HOOK: "off"
+  # Stage is reached from this host only: nothing but loopback is admitted.
+  AISIS_ALLOWED_CLIENTS: ""
 
 x-switch: &switch
   image: ${AISIS_SWITCH_IMAGE:-aisis-yandex-https:3b902d6}
