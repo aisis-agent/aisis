@@ -182,8 +182,12 @@ the ones at `aisis-pre-weather-20261117`.
   reads the history from the arrival times of the frames, finds the pause behind the name in the frame levels of the history
   and hands the Endpoint (VAD, recognizer) only what follows it. The cut audio becomes a clip with `status='activation'`,
   `reason='wake_window'` and no transcript (it was never recognised); the stream's final, if nothing else is said, is the
-  empty one with `rejected: wake_word`. When the name cannot be told from the request (no pause behind it, speech running
-  through the whole window, a quiet history, a stream that ends before the decision) nothing is cut and the text-level strip
+  empty one with `rejected: wake_word`. The end of the history is only known while the burst holds nothing but the history: a
+  lead of more than 2.45 s ahead of the clock (the longest history measured is 2.43 s) has live speech inside it (the station
+  opened its socket late, ticket 156: 3.65 s arrived within 0.18 s and the window sat on the request's first word), so such a
+  stream is never cut (`skipped=burst`). When the name cannot be told from the request (no pause behind it, speech running
+  through the whole window, a quiet history, a
+  stream that ends before the decision) nothing is cut and the text-level strip
   below is the fallback (`stt_wake_window skipped=<reason>` in the gateway log). `AISIS_STT_WAKE_WINDOW=0` switches the cut off.
   The text-level strip: the STT gateway cuts the name from the head of a transcript before the final goes to quasar
   (`wake_cut:<name>` in the clip's `reason`; the clip's `transcript` is the cleaned text, the one the dialog log and the
