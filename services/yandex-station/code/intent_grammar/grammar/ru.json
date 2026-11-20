@@ -14,7 +14,50 @@
     "HALLUCINATION": "drop"
    }
   },
+  "contexts": [
+   {
+    "id": "repair.confirm",
+    "sample": {
+     "alt": [
+      "выключи свет",
+      "выключи"
+     ],
+     "heard": [
+      "включи свет",
+      "включи"
+     ]
+    },
+    "values": [
+     "alt",
+     "heard"
+    ]
+   },
+   {
+    "id": "repair.choice",
+    "sample": {
+     "first": [
+      "включи свет",
+      "включи"
+     ],
+     "second": [
+      "выключи свет",
+      "выключи"
+     ]
+    },
+    "values": [
+     "first",
+     "second"
+    ]
+   },
+   {
+    "id": "repair.repeat",
+    "values": []
+   }
+  ],
   "gate": {
+   "dialog": {
+    "max_wrong": 0
+   },
    "goal": {
     "correct": 0.9,
     "coverage": 0.9,
@@ -2202,6 +2245,279 @@
      ]
     },
     "tier": "canned"
+   },
+   {
+    "action": {
+     "executor": "repair.accept"
+    },
+    "context": "repair.confirm",
+    "examples": [
+     "да",
+     "Ага",
+     "угу",
+     "конечно",
+     "именно",
+     "верно",
+     "точно",
+     "так",
+     "давай",
+     "правильно",
+     "да, конечно",
+     "все верно",
+     "выключи",
+     "выключить свет",
+     "выключи свет",
+     "нет, выключи свет",
+     "я хотел выключить"
+    ],
+    "id": "repair.accept",
+    "labels": [
+     "REPAIR_REPLY"
+    ],
+    "max_tokens": 6,
+    "negatives": [
+     "нет",
+     "не то",
+     "включи свет",
+     "да и громче",
+     "да, выключи свет в спальне",
+     "не выключай свет",
+     "выключи чайник",
+     "расскажи анекдот"
+    ],
+    "note": "«Да» (and its synonyms), or the proposed alternative itself, with or without its object, with or without «да»/«нет» before it («нет, выключи свет» says the alternative).",
+    "patterns": [
+     "(да|ага|угу|конечно|именно|верно|точно|так|давай|правильно|согласен|согласна)",
+     "(да|ага|угу|конечно|именно) (да|ага|конечно|именно|верно|точно|правильно|так|давай)",
+     "(все|совершенно|абсолютно) (верно|правильно|точно)",
+     "(да|нет|конечно|именно)? {@alt}",
+     "(я|мы) (хотел|хотела|хотели|сказал|сказала|говорил|говорила|имел в виду|имела в виду) {@alt}",
+     "(мне)? (нужно|надо|хочу) {@alt}"
+    ],
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "executor": "repair.keep"
+    },
+    "context": "repair.confirm",
+    "examples": [
+     "включи",
+     "включи свет",
+     "включить свет",
+     "нет, включи свет",
+     "я так и сказал",
+     "я хотела включить"
+    ],
+    "id": "repair.keep",
+    "labels": [
+     "REPAIR_REPLY"
+    ],
+    "max_tokens": 6,
+    "negatives": [
+     "да",
+     "выключи свет",
+     "не включай свет",
+     "включи чайник"
+    ],
+    "note": "The heard reading stands. The verb alone or with its object; «нет, включи свет» too.",
+    "patterns": [
+     "(да|нет|конечно|именно)? {@heard}",
+     "(я|мы) (хотел|хотела|хотели|сказал|сказала|говорил|говорила|имел в виду|имела в виду) {@heard}",
+     "(мне)? (нужно|надо|хочу) {@heard}",
+     "я так и (сказал|сказала)"
+    ],
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "pick": "first"
+     },
+     "executor": "repair.choose"
+    },
+    "context": "repair.choice",
+    "examples": [
+     "включи",
+     "включить",
+     "включи свет",
+     "первое",
+     "я хотел включить"
+    ],
+    "id": "repair.choose_first",
+    "labels": [
+     "REPAIR_REPLY"
+    ],
+    "max_tokens": 6,
+    "negatives": [
+     "выключи",
+     "второе",
+     "да",
+     "включи чайник"
+    ],
+    "patterns": [
+     "(да)? {@first}",
+     "(первое|первый|первую|первая)",
+     "(я|мы) (хотел|хотела|хотели|сказал|сказала) {@first}",
+     "(мне)? (нужно|надо|хочу) {@first}"
+    ],
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "args": {
+      "pick": "second"
+     },
+     "executor": "repair.choose"
+    },
+    "context": "repair.choice",
+    "examples": [
+     "выключи",
+     "выключить",
+     "выключи свет",
+     "второе",
+     "я хотел выключить"
+    ],
+    "id": "repair.choose_second",
+    "labels": [
+     "REPAIR_REPLY"
+    ],
+    "max_tokens": 6,
+    "negatives": [
+     "включи",
+     "первое",
+     "да",
+     "выключи чайник"
+    ],
+    "patterns": [
+     "(да)? {@second}",
+     "(второе|второй|вторую|вторая)",
+     "(я|мы) (хотел|хотела|хотели|сказал|сказала) {@second}",
+     "(мне)? (нужно|надо|хочу) {@second}"
+    ],
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "executor": "repair.deny"
+    },
+    "allow_negation": true,
+    "context": [
+     "repair.confirm",
+     "repair.choice"
+    ],
+    "examples": [
+     "нет",
+     "неа",
+     "не то",
+     "не так",
+     "неверно",
+     "не надо",
+     "нет, не то",
+     "совсем не то",
+     "нет нет"
+    ],
+    "id": "repair.deny",
+    "labels": [
+     "REPAIR_REPLY"
+    ],
+    "max_tokens": 4,
+    "negatives": [
+     "да",
+     "не включай свет",
+     "не надо ничего",
+     "не надо включать свет",
+     "выключи"
+    ],
+    "note": "Not what was meant, listen again. «Не надо» is the owner's wording for it too; «не надо ничего» is the cancel.",
+    "patterns": [
+     "(нет|неа|не-а|нее|неверно|неправильно|ошибка|ошибаешься|ошибаетесь)",
+     "(нет|совсем|вовсе|абсолютно|это)? не (то|надо|нужно)?",
+     "нет (нет|неверно|неправильно)",
+     "ни то ни другое"
+    ],
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "executor": "repair.again"
+    },
+    "context": [
+     "repair.confirm",
+     "repair.choice"
+    ],
+    "examples": [
+     "повтори",
+     "повтори ещё раз",
+     "ещё раз",
+     "что?",
+     "как",
+     "что ты сказала",
+     "повторите вопрос"
+    ],
+    "id": "repair.again",
+    "labels": [
+     "REPAIR_REPLY"
+    ],
+    "max_tokens": 5,
+    "negatives": [
+     "да",
+     "нет",
+     "что такое фотосинтез",
+     "как дела",
+     "повтори за мной привет"
+    ],
+    "note": "Say the question again (the router does it at most once per dialog).",
+    "patterns": [
+     "(повтори|повторить|повторите) (еще раз)? (вопрос)?",
+     "еще раз",
+     "(что|чего|как)",
+     "что ты (сказал|сказала|говорил|говорила|спросил|спросила)"
+    ],
+    "tier": "execute"
+   },
+   {
+    "action": {
+     "executor": "repair.cancel"
+    },
+    "allow_negation": true,
+    "context": [
+     "repair.confirm",
+     "repair.choice",
+     "repair.repeat"
+    ],
+    "examples": [
+     "отмена",
+     "забудь",
+     "стоп",
+     "оставь",
+     "не надо ничего",
+     "отбой",
+     "ничего не надо",
+     "оставь как есть",
+     "ладно, забудь"
+    ],
+    "id": "repair.cancel",
+    "labels": [
+     "REPAIR_REPLY"
+    ],
+    "max_tokens": 5,
+    "negatives": [
+     "да",
+     "нет",
+     "не надо",
+     "включи свет",
+     "отмени таймер"
+    ],
+    "note": "Leave the dialog, nothing happens.",
+    "patterns": [
+     "(отмена|отмени|отменить|отбой|отставить|забудь|забыли|стоп|стой|хватит|оставь|оставить|проехали|ничего)",
+     "(не надо|не нужно) ничего",
+     "ничего (не надо|не нужно)",
+     "(оставь|оставить) (как есть|это|все)",
+     "(ладно|ну ладно)? (забудь|отмена|проехали)"
+    ],
+    "tier": "execute"
    }
   ],
   "lexicon": {
@@ -2571,5 +2887,5 @@
   "locale": "ru",
   "version": 1
  },
- "source_sha256": "abb2e1a3f98b849b239e46dbb875e1741f4ac583dc37775b3df399b9973c7e4b"
+ "source_sha256": "3e326c4a22f8b8b730da71419b74434f857a544388b1161a98f6f5fbd4cb1947"
 }

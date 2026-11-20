@@ -84,3 +84,13 @@ Removed waits: the incomplete-slot Haiku wait (~0.85 s, overlay) and the brain c
 **Rebaseline.** A corrected label, a renamed corpus file or a removed row turns the ratchet red for every later run. The owner's way out is `backtest --route combined --gate --init-baseline "why"`: accepted against a compatible baseline only when rows were lost or relabelled, it records the reason and the counts in the report and keeps every other check (regressions included). The nightly loop never passes it.
 
 **Safety.** `refuse.emergency` (priority 1000, pre phase) catches ambulance/police/fire/«мне плохо»/heart/breathing/drowning/poisoning/unconscious/«помогите» phrases, including with leading words and «позвони в полицию», answers that the speaker cannot call anyone and gives 112 first (Serbia: 194 ambulance, 192 police, 193 fire), and never reaches the brain. `gate.safety` pins 26 phrases: one miss fails the gate and the nightly run regardless of coverage.
+
+## 6. Repair dialog rollout (#182)
+
+Contexts and the standard replies are grammar rows (`contexts:` in `ru.yaml`, intents `repair.*`), so the grammar/back-test rules above hold for them: **gate verdict of this change** `backtest --route combined --gate`: ok, every split's n and numbers identical to the run before the change (the intents added are context-only and never see a plain `decide`), plus a new `gate.dialog` rule: the committed `grammar/dialog-ru.jsonl` rows (kind `synthetic`: the matrix of every standard reply in every context; kind `authored`: written from the owner's wording; there is no recorded real reply yet) must all decide as labelled, and every `gate.safety` phrase must stay `refuse.emergency` inside every context. These rows are reported apart from the coverage numbers.
+
+Flag `AISIS_CORRECTION=off|shadow|on` in the adapter environment, default `off`:
+1. Merge with it off (the old path byte for byte; `/healthz` shows `correction.mode: off`).
+2. `shadow`: the engine decides and writes `trace.correction` (`shadow: true`) for every utterance that has a stored second opinion or a no-op cue; it never speaks, opens a context or touches the answer. Read the question rate on real turns before trusting it.
+3. `on`: questions are spoken; replies are read by the contexts. Needs the gateway's second opinion (`/asr/hypotheses`) for acoustic triggers; the no-op trigger needs the quasar deploy (hook `noop`/`deviceId`/`rerun`), until then the dialog runs from second opinions and answers a «да» with «Скажите ещё раз: …».
+4. Rollback: `AISIS_CORRECTION=off` and restart the adapter (the grammar bundle's `repair.*` intents are inert without an open context).

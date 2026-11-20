@@ -69,6 +69,18 @@ lexicon:
   politicians: [путин*, зеленск*, байден*, =трамп, =трампа, =трампу, =трампом, =трампе, навальн*, лукашенк*, медведев*, мишустин*, шойг*]
   emergency: [полици*, =скорая, =скорую, =скорой, неотложк*, пожарн*, =пожар, милици*, спасател*, =спасите, =помогите]
 
+# Dialog contexts (README «Contexts»): intents with `context:` match only while the adapter holds that context open for the
+# station (correction.py, the repair dialog of #182), always below refuse.emergency (1000). `values` are the per-turn phrases the
+# adapter passes: alt = the alternative reading it proposed, heard = what it heard; first/second = the two readings of a choice.
+# Written in flow style on purpose: the session page indexes intent definitions by their `  - id:` line, and a context is not an intent.
+contexts:
+  # «Мне послышалось «включи свет». Вы имели в виду «выключи свет»?»
+  - {id: repair.confirm, values: [alt, heard], sample: {alt: ["выключи свет", "выключи"], heard: ["включи свет", "включи"]}}
+  # «Включить или выключить?»
+  - {id: repair.choice, values: [first, second], sample: {first: ["включи свет", "включи"], second: ["выключи свет", "выключи"]}}
+  # «Не расслышал. Повторите, пожалуйста.» and after a «нет»: a fresh utterance is expected, only «отмена» is a reply
+  - {id: repair.repeat, values: []}
+
 intents:
   # ── hygiene: speech that is not addressed to the speaker ────────────────
   - id: unaddressed.caption
@@ -783,6 +795,111 @@ intents:
     reply: {kind: canned, say: ["Хорошо, не буду."]}
     examples: ["не включай свет", "не выключай музыку", "не надо включать свет", "не делай громче"]
 
+  # ── the repair dialog (#182): replies that mean something only after the speaker has asked a question ──
+  # Executors repair.* are the router's own (intent_route.py runs them); the grammar only reads the reply. Every phrase here is
+  # whole-utterance: «да, и громче» is no accept, it leaves the dialog and takes its normal path.
+  - id: repair.accept
+    tier: execute
+    context: repair.confirm
+    max_tokens: 6
+    labels: [REPAIR_REPLY]
+    note: «Да» (and its synonyms), or the proposed alternative itself, with or without its object, with or without «да»/«нет» before it («нет, выключи свет» says the alternative).
+    patterns:
+      - "(да|ага|угу|конечно|именно|верно|точно|так|давай|правильно|согласен|согласна)"
+      - "(да|ага|угу|конечно|именно) (да|ага|конечно|именно|верно|точно|правильно|так|давай)"
+      - "(все|совершенно|абсолютно) (верно|правильно|точно)"
+      - "(да|нет|конечно|именно)? {@alt}"
+      - "(я|мы) (хотел|хотела|хотели|сказал|сказала|говорил|говорила|имел в виду|имела в виду) {@alt}"
+      - "(мне)? (нужно|надо|хочу) {@alt}"
+    action: {executor: repair.accept}
+    examples: ["да", "Ага", "угу", "конечно", "именно", "верно", "точно", "так", "давай", "правильно", "да, конечно", "все верно", "выключи", "выключить свет", "выключи свет", "нет, выключи свет", "я хотел выключить"]
+    negatives: ["нет", "не то", "включи свет", "да и громче", "да, выключи свет в спальне", "не выключай свет", "выключи чайник", "расскажи анекдот"]
+  - id: repair.keep
+    tier: execute
+    context: repair.confirm
+    max_tokens: 6
+    labels: [REPAIR_REPLY]
+    note: "The heard reading stands. The verb alone or with its object; «нет, включи свет» too."
+    patterns:
+      - "(да|нет|конечно|именно)? {@heard}"
+      - "(я|мы) (хотел|хотела|хотели|сказал|сказала|говорил|говорила|имел в виду|имела в виду) {@heard}"
+      - "(мне)? (нужно|надо|хочу) {@heard}"
+      - "я так и (сказал|сказала)"
+    action: {executor: repair.keep}
+    examples: ["включи", "включи свет", "включить свет", "нет, включи свет", "я так и сказал", "я хотела включить"]
+    negatives: ["да", "выключи свет", "не включай свет", "включи чайник"]
+  - id: repair.choose_first
+    tier: execute
+    context: repair.choice
+    max_tokens: 6
+    labels: [REPAIR_REPLY]
+    patterns:
+      - "(да)? {@first}"
+      - "(первое|первый|первую|первая)"
+      - "(я|мы) (хотел|хотела|хотели|сказал|сказала) {@first}"
+      - "(мне)? (нужно|надо|хочу) {@first}"
+    action: {executor: repair.choose, args: {pick: first}}
+    examples: ["включи", "включить", "включи свет", "первое", "я хотел включить"]
+    negatives: ["выключи", "второе", "да", "включи чайник"]
+  - id: repair.choose_second
+    tier: execute
+    context: repair.choice
+    max_tokens: 6
+    labels: [REPAIR_REPLY]
+    patterns:
+      - "(да)? {@second}"
+      - "(второе|второй|вторую|вторая)"
+      - "(я|мы) (хотел|хотела|хотели|сказал|сказала) {@second}"
+      - "(мне)? (нужно|надо|хочу) {@second}"
+    action: {executor: repair.choose, args: {pick: second}}
+    examples: ["выключи", "выключить", "выключи свет", "второе", "я хотел выключить"]
+    negatives: ["включи", "первое", "да", "выключи чайник"]
+  - id: repair.deny
+    tier: execute
+    context: [repair.confirm, repair.choice]
+    allow_negation: true
+    max_tokens: 4
+    labels: [REPAIR_REPLY]
+    note: "Not what was meant, listen again. «Не надо» is the owner's wording for it too; «не надо ничего» is the cancel."
+    patterns:
+      - "(нет|неа|не-а|нее|неверно|неправильно|ошибка|ошибаешься|ошибаетесь)"
+      - "(нет|совсем|вовсе|абсолютно|это)? не (то|надо|нужно)?"   # «не так» arrives as «не»: «так» is a lead-in word the normaliser cuts
+      - "нет (нет|неверно|неправильно)"
+      - "ни то ни другое"
+    action: {executor: repair.deny}
+    examples: ["нет", "неа", "не то", "не так", "неверно", "не надо", "нет, не то", "совсем не то", "нет нет"]
+    negatives: ["да", "не включай свет", "не надо ничего", "не надо включать свет", "выключи"]
+  - id: repair.again
+    tier: execute
+    context: [repair.confirm, repair.choice]
+    max_tokens: 5
+    labels: [REPAIR_REPLY]
+    note: Say the question again (the router does it at most once per dialog).
+    patterns:
+      - "(повтори|повторить|повторите) (еще раз)? (вопрос)?"
+      - "еще раз"
+      - "(что|чего|как)"
+      - "что ты (сказал|сказала|говорил|говорила|спросил|спросила)"
+    action: {executor: repair.again}
+    examples: ["повтори", "повтори ещё раз", "ещё раз", "что?", "как", "что ты сказала", "повторите вопрос"]
+    negatives: ["да", "нет", "что такое фотосинтез", "как дела", "повтори за мной привет"]
+  - id: repair.cancel
+    tier: execute
+    context: [repair.confirm, repair.choice, repair.repeat]
+    allow_negation: true
+    max_tokens: 5
+    labels: [REPAIR_REPLY]
+    note: Leave the dialog, nothing happens.
+    patterns:
+      - "(отмена|отмени|отменить|отбой|отставить|забудь|забыли|стоп|стой|хватит|оставь|оставить|проехали|ничего)"
+      - "(не надо|не нужно) ничего"
+      - "ничего (не надо|не нужно)"
+      - "(оставь|оставить) (как есть|это|все)"
+      - "(ладно|ну ладно)? (забудь|отмена|проехали)"
+    action: {executor: repair.cancel}
+    examples: ["отмена", "забудь", "стоп", "оставь", "не надо ничего", "отбой", "ничего не надо", "оставь как есть", "ладно, забудь"]
+    negatives: ["да", "нет", "не надо", "включи свет", "отмени таймер"]
+
 backtest:
   # Corpus labels that only a language model answers (the back-test expects abstain on these).
   brain_labels: [CHITCHAT, KNOWLEDGE, ADVICE, FOLLOWUP, question]
@@ -812,6 +929,10 @@ gate:
     floor: {coverage: 0.85, correct: 0.80}
     legacy_floor: {split: real/holdout, coverage: 0.85}   # the old absolute floor, shown in every report, not gated at n=18
   goal: {split: real/all, coverage: 0.90, correct: 0.90}
+  # The repair dialog (#182): every dialog row (committed grammar/dialog-ru.jsonl, plus any `context` row of the private corpus) must be
+  # decided as labelled inside its context, and every `safety` phrase below must stay the emergency intent inside every context. These
+  # rows are NOT part of the coverage numbers above: a reply means nothing outside its dialog.
+  dialog: {max_wrong: 0}
   # Must-pass safety set: every phrase has to be read as the emergency intent (and nothing else) no matter how coverage or
   # any other number moves. One miss fails the gate and so the nightly run. Add phrases, never remove them.
   safety:

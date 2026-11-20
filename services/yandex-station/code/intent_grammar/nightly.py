@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import backtest
-from .grammar import Grammar, load
+from .grammar import Grammar, Intent, load
 from .normalize import Normalised
 
 DEFAULT_BUNDLE = Path(__file__).parent / "grammar" / "ru.json"
@@ -175,10 +175,16 @@ def scan_corpus(corpus_dir: Path) -> tuple[set[str], set[str], list[str]]:
     return keys, truths, corrupt
 
 
+def standalone_intents(grammar: Grammar) -> list[Intent]:
+    """The intents a bare utterance can be classified as. A context-only intent (the repair replies) exists only inside its open
+    question: as a standalone label («да» -> REPAIR_REPLY) it could never be reproduced by the plain classification."""
+    return [intent for intent in grammar.intents if not intent.contexts]
+
+
 def allowed_truths(grammar: Grammar, known: set[str]) -> set[str]:
     """Labels a new real row may carry: the grammar's own, the back-test's brain and unaddressed ones, and any already in the corpus."""
     config = grammar.backtest
-    labels = {label for intent in grammar.intents for label in intent.labels}
+    labels = {label for intent in standalone_intents(grammar) for label in intent.labels}
     return labels | set(config.get("brain_labels") or ()) | set(config.get("unaddressed") or ()) | known
 
 
@@ -224,7 +230,7 @@ def append_owner_label(inbox: Path, text: str, truth: str, allowed: set[str]) ->
 
 def jev_candidates(grammar: Grammar, answers: list[tuple[str, tuple[str, float]]], now: float) -> list[Labelled]:
     """Rows from Jev's answers (text, (intent id, confidence)): only a confident choice of a real intent with a label is a label."""
-    by_id = {intent.id: intent for intent in grammar.intents}
+    by_id = {intent.id: intent for intent in standalone_intents(grammar)}
     rows = []
     for text, (choice, confidence) in answers:
         intent = by_id.get(choice)
@@ -308,7 +314,7 @@ def prepare(*, grammar_path: str | Path | None, corpus: str | None, db: str, hou
                   and backtest.split_of(item.text, holdout) != "holdout"]
     clusters = cluster_texts(grammar, [item.text for item in open_items])[:MAX_CLUSTERS]
 
-    descriptions = {i.id: "; ".join(example.say for example in i.examples[:2]) for i in grammar.intents if i.examples}
+    descriptions = {i.id: "; ".join(example.say for example in i.examples[:2]) for i in standalone_intents(grammar) if i.examples}
     jev: dict[str, Any] | None = None if label is None else {"asked": 0, "failed": 0, "labelled": 0, "skipped": "dry run" if dry_run else None}
     answers: list[tuple[str, tuple[str, float]]] = []
     cluster_rows = []
@@ -345,7 +351,8 @@ def prepare(*, grammar_path: str | Path | None, corpus: str | None, db: str, hou
             with nullcontext() if dry_run else backtest.baseline_lock():
                 previous = backtest.load_previous(None)
                 report = backtest.build_report(grammar, rows, manifest, previous=previous,
-                                               decide=_measured(grammar), route="combined", require_baseline=True)
+                                               decide=_measured(grammar), route="combined", require_baseline=True,
+                                               dialog_rows=backtest.load_dialog_rows(corpus_dir, fixture=backtest.gates_dialog(grammar)))
                 promote = report["gate"]["ok"] and not dry_run
                 backtest.save_report(report, out / "backtest.json", latest=backtest.reports_dir() / "latest.json" if promote else None)
             os.chmod(out / "backtest.json", 0o600)       # it holds the dev utterances

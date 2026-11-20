@@ -322,6 +322,18 @@ class OwnerFeedbackTests(unittest.TestCase):
         self.assertEqual([(r.text, r.truth, r.labeller) for r in rows], [("поставь будильник", labels, "jev")])
         self.assertIn("alarm.set", rows[0].note)
 
+    def test_a_context_only_intent_is_never_a_standalone_label(self):
+        """«да» is `repair.accept` only inside an open question; as a corpus row of its own it could never be classified that way."""
+        grammar = load(BUNDLE)
+        contextual = [i for i in grammar.intents if i.contexts]
+        self.assertTrue(contextual)
+        answers = [(f"ответ {n}", (i.id, 0.99)) for n, i in enumerate(contextual)]
+        self.assertEqual(nightly.jev_candidates(grammar, answers, NOW), [])
+        labels = {label for i in contextual for label in i.labels}
+        self.assertTrue(labels)
+        self.assertFalse(labels & nightly.allowed_truths(grammar, set()))
+        self.assertTrue(nightly.allowed_truths(grammar, set()))
+
 
 class PrepareTests(StoreFixture):
     def test_writes_private_files_and_an_aggregate_only_summary(self):
@@ -384,6 +396,12 @@ class PrepareTests(StoreFixture):
         out = self.prepare(gate=UNREACHABLE_FLOOR)
         self.assertFalse(self.summary(out)["gate"]["ok"])
         self.assertEqual((self.reports / "latest.json").read_bytes(), green)
+
+    def test_the_labeller_is_offered_no_context_only_intent(self):
+        offered = {}
+        self.prepare(label=lambda text, intents: offered.update(intents) or ("alarm.set", 0.97))
+        self.assertIn("alarm.set", offered)
+        self.assertFalse([name for name in offered if name.startswith("repair.")], offered.keys())
 
     def test_clusters_carry_the_jev_label_when_a_labeller_is_given(self):
         seen = []

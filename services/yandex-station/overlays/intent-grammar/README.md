@@ -34,16 +34,27 @@ makes the quasar fast-intent layer ask it first and act on the answer.
 Adapter response contract:
 
 ```
-request: {"text": string, "dialogActive": boolean, "shadow"?: true}
-{"route": "reply"|"silent"|"volume"|"dialog_end"|"none", "text": string|null, "listen": boolean,
- "volume": null | {"target"?: 0..1, "steps"?: signed int, "deltaLevels"?: signed int}, "intent": string|null, "ms": number}
+request: {"text": string, "dialogActive": boolean, "shadow"?: true,
+          "deviceId"?: string, "rerun"?: true, "noop"?: {"desired": "on"|"off", "label": string, "targets": string[]}}
+{"route": "reply"|"silent"|"volume"|"dialog_end"|"rerun"|"none", "text": string|null, "listen": boolean,
+ "volume": null | {"target"?: 0..1, "steps"?: signed int, "deltaLevels"?: signed int}, "intent": string|null, "ms": number,
+ "context"?: true}
 ```
+
+The repair dialog (`AISIS_CORRECTION=on`, #182) adds three optional request fields and one route; a caller that sends none of them sees today's contract:
+`deviceId` (the speaker's id; the adapter keeps one dialog per device, without it the hook's own key is used), `rerun: true` (the caller can handle the route
+`rerun`), and `noop` (a SECOND call for the same `text`, made from the no-op branch of `executeDeviceIntent`: the device is already in the state the text asks
+for; `desired` is that state, `label` the thing switched, `targets` its entity ids; the adapter treats it as the cue for its question «Свет в студии уже
+включён. Вы хотели выключить?» and does not open a second dialog when the first call already did). `context: true` is in a response while the station's repair
+dialog is open (also on the reply that opens it): quasar's own «повтори» handler defers to the hook then. `dialogActive` stays informational.
+
 
 | route        | result in quasar                                                                                  |
 |--------------|---------------------------------------------------------------------------------------------------|
 | `reply`      | `{kind:'reply', quasarDirectives: [], text}`, `listen: true` only when the adapter says so; empty text is ignored |
 | `silent`     | the existing `DIALOG_END` (reply with `text: null`)                                               |
 | `dialog_end` | the pending question is cleared, then `DIALOG_END`                                                |
+| `rerun`      | only for a request with `rerun: true`: `text` is a phrase to match as if it had been spoken (`matchFastIntent(text, {...options, noCorrect: true})`), the corrected reading the owner just confirmed; the adapter never sends it for a risky action (kettle, sockets, climate, locks): it asks the owner to say it again instead. Not deployed yet: the TypeScript side is the overlay's |
 | `volume`     | the existing `volumeResult`: `target` is a fraction of the scale; `steps` are multiples of `volumeStepPct()` (read like `executeResolved` does); `deltaLevels` becomes `target = clamp((speakerLevel + deltaLevels) / 10)` when the speaker reported its level, else `steps = sign(deltaLevels)`. The turn is recorded, but «повтори» repeats the level it reached (a target), not the change in levels: the recorded command cannot carry a delta (known gap, ticket) |
 | `none`, unknown | `null`: the phrase goes through the old tiers                                                  |
 

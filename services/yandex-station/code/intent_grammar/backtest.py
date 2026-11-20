@@ -16,9 +16,18 @@ Corpus files (JSON lines) under the corpus directory:
   real-voice-*.jsonl   {text, truth, ts?, verdict?, labeller?}        source "real"
   *-labelled.jsonl     the same schema                                source "real"
   intents-ru.jsonl     {text, expect: {kind, domain, tier?, action?}} source "synthetic"
+  <any of the above> a row with `context` is a DIALOG row (below), not part of the splits and the gate numbers
   quasar-replay.jsonl  {text, handled, via} from tools/replay_quasar.mts: which phrases the deployed quasar container
                        already answers without a model. Without it the flag falls back to the corpus' own record
                        (synthetic: expect.kind != llm; real: answered by layer L1 and judged ok/clarify).
+
+Dialog rows (`context`, optional `values`, `expect: {intent}` | `expect: {outside: true}`, or `truth` for a real row) say how the text
+reads INSIDE an open dialog context (`Grammar.decide(text, context=...)`): the intent it must decide to (`null`: abstain), or that it is
+no reply of the dialog (`outside`: it leaves the context and takes the normal route). They are measured apart from the coverage numbers
+(a reply is meaningless outside its dialog, and the real/synthetic splits must stay comparable), live in the committed
+`grammar/dialog-ru.jsonl` (kind `synthetic` for the generated matrix, `authored` for phrases written from the owner's wording; no real
+recorded reply exists yet) plus any `context` row of the private corpus (kind by source), and gate with `gate.dialog` (every row decided as
+labelled) and the emergency phrases of `gate.safety` inside every context.
 
 A synthetic row that carries `expect.tier` / `expect.action` is only correct when the decision's tier and the
 essential arguments of its action match too (see `meets_expectation`); every other row is judged by its label alone.
@@ -39,9 +48,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .grammar import ACTING_TIERS, TIERS, Decision, Grammar
+from .grammar import ACTING_TIERS, TIERS, ActiveContext, Decision, Grammar
 
 DEFAULT_CORPUS_DIR = "~/.local/share/aisis/corpus"
+DIALOG_FIXTURE = Path(__file__).parent / "grammar" / "dialog-ru.jsonl"
 ENV_CORPUS_DIR = "AISIS_INTENT_CORPUS_DIR"
 # Version of the split definition below. Bump it with ANY change of the canonical form, the salt or the hash: rows then
 # no longer belong to the split of older reports, and the comparison only trusts rows whose side did not change.
@@ -110,6 +120,13 @@ def corpus_source(name: str) -> str | None:
     return None
 
 
+def _jsonl_records(text: str) -> Iterator[dict[str, Any]]:
+    """The JSON record of every non-blank line of a corpus file."""
+    for line in text.splitlines():
+        if line.strip():
+            yield json.loads(line)
+
+
 def load_rows(directory: Path, grammar: Grammar) -> tuple[list[Row], list[dict[str, Any]]]:
     """All rows of every known corpus file under `directory`, plus the file manifest (name, sha256, rows)."""
     percent = holdout_percent(grammar)
@@ -128,10 +145,9 @@ def load_rows(directory: Path, grammar: Grammar) -> tuple[list[Row], list[dict[s
             continue
         data = path.read_bytes()
         count = 0
-        for line in data.decode("utf-8").splitlines():
-            if not line.strip():
-                continue
-            record = json.loads(line)
+        for record in _jsonl_records(data.decode("utf-8")):
+            if "context" in record:
+                continue   # a dialog row: `load_dialog_rows` reads it
             text = str(record.get("text", "")).strip()
             truth = _truth(source, record)
             if not text or not truth:
@@ -148,6 +164,122 @@ def load_rows(directory: Path, grammar: Grammar) -> tuple[list[Row], list[dict[s
 
 
 REPLAY_FILE = "quasar-replay.jsonl"
+
+
+@dataclass(frozen=True)
+class DialogRow:
+    """One reading inside a dialog context: `intent` is what `decide(text, context=...)` must return (None: abstain), or `outside`:
+    it must be no reply of the dialog (abstain or a normal intent: the utterance leaves the context)."""
+    id: str
+    text: str
+    context: str
+    values: dict[str, tuple[str, ...]] | None   # None: the context's sample values
+    kind: str                                    # synthetic | authored | real
+    intent: str | None = None
+    outside: bool = False
+
+
+def _dialog_row(record: dict[str, Any], kind: str, basis: str, occurrence: int) -> DialogRow | None:
+    text = str(record.get("text", "")).strip()
+    context = record.get("context")
+    expect = record.get("expect")
+    if not text or not isinstance(context, str):
+        return None
+    if isinstance(expect, dict):
+        outside, intent = bool(expect.get("outside")), expect.get("intent")
+    else:   # a real row: `truth` is the intent id, or «outside»
+        truth = record.get("truth")
+        outside, intent = truth == "outside", None if truth in (None, "", "outside", "abstain") else truth
+    values = record.get("values")
+    return DialogRow(_row_id(basis, occurrence), text, context,
+                     None if not isinstance(values, dict) else {str(k): tuple(str(p) for p in v) for k, v in values.items()},
+                     kind, None if outside else intent, outside)
+
+
+def _dialog_records(directory: Path | None, fixture: bool) -> Iterator[tuple[Path, str | None, dict[str, Any]]]:
+    """Every `context` record of the dialog fixture (when `fixture`) and of the corpus files under `directory`, with its file and
+    that file's source (None for the fixture)."""
+    sources: list[tuple[Path, str | None]] = [(DIALOG_FIXTURE, None)] if fixture else []
+    if directory is not None:
+        sources += [(path, corpus_source(path.name)) for path in sorted(directory.glob("*.jsonl")) if corpus_source(path.name)]
+    for path, source in sources:
+        if not path.exists():
+            continue
+        for record in _jsonl_records(path.read_text(encoding="utf-8")):
+            if "context" in record:
+                yield path, source, record
+
+
+def gates_dialog(grammar: Grammar) -> bool:
+    """The grammar asks for the dialog rows (`gate.dialog`): only then is the committed fixture, the shipped grammar's, read."""
+    return "dialog" in (grammar.gate or {})
+
+
+def load_dialog_rows(directory: Path | None, *, fixture: bool = True) -> list[DialogRow]:
+    """The dialog rows: the committed fixture (`fixture`: only a grammar that asks for it with `gate.dialog` should read it, the fixture
+    is the shipped grammar's), then every `context` row of the corpus files under `directory` (kind by file source)."""
+    rows: list[DialogRow] = []
+    occurrences: dict[str, int] = {}
+    for path, source, record in _dialog_records(directory, fixture):
+        kind = str(record.get("kind") or source or "synthetic")
+        basis = f"{path.stem}|{record.get('ts', '')}|{record['context']}|{split_key(str(record.get('text', '')))}|{json.dumps(record.get('values'), sort_keys=True, ensure_ascii=False)}"
+        occurrences[basis] = occurrences.get(basis, 0) + 1
+        row = _dialog_row(record, kind, basis, occurrences[basis])
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+def _judge_dialog_row(grammar: Grammar, row: DialogRow) -> tuple[bool, str | None]:
+    """Whether the row's text is decided inside its context as labelled, and the intent it was decided to (None: abstained)."""
+    declared = grammar.contexts.get(row.context)
+    if declared is None:   # a row for a context the grammar does not declare is a wrong row, never a skipped one
+        return False, f"unknown context {row.context}"
+    decision = grammar.decide(row.text, context=ActiveContext(row.context, row.values if row.values is not None else declared.sample))
+    got = decision.intent if decision else None
+    in_dialog = got is not None and any(intent.contexts and intent.id == got for intent in grammar.intents)
+    return ((not in_dialog) if row.outside else got == row.intent), got
+
+
+def _safety_reading(grammar: Grammar, context_id: str, phrase: str, intent: str) -> str | None:
+    """The failure message when an emergency phrase does not decide to the safety intent inside the context, else None."""
+    decision = grammar.decide(phrase, min_priority=0, context=ActiveContext(context_id, grammar.contexts[context_id].sample))
+    if decision is not None and decision.intent == intent:
+        return None
+    return f"SAFETY: «{phrase}» inside {context_id} reads as {decision.intent if decision else 'nothing'}, not {intent}"
+
+
+def _dialog_safety(grammar: Grammar) -> dict[str, Any]:
+    """The safety set of the grammar (`gate.safety`) decided inside every context."""
+    safety = (grammar.gate or {}).get("safety") or {}
+    safety_failures: list[str] = []
+    checked = 0
+    for context_id in grammar.contexts:
+        for phrase in safety.get("phrases") or ():
+            checked += 1
+            failure = _safety_reading(grammar, context_id, phrase, safety["intent"])
+            if failure is not None:
+                safety_failures.append(failure)
+    return {"checked": checked, "failures": safety_failures}
+
+
+def dialog_metrics(grammar: Grammar, rows: list[DialogRow], *, include_text: bool = True) -> dict[str, Any]:
+    """Every dialog row decided inside its context, and the safety set of the grammar (`gate.safety`) decided inside EVERY
+    context: no context may keep an emergency phrase from `refuse.emergency`."""
+    failures: list[dict[str, Any]] = []
+    kinds: dict[str, dict[str, int]] = {}
+    contexts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        ok, got = _judge_dialog_row(grammar, row)
+        for table, key in ((kinds, row.kind), (contexts, row.context)):
+            entry = table.setdefault(key, {"n": 0, "correct": 0})
+            entry["n"] += 1
+            entry["correct"] += ok
+        if not ok:
+            failures.append({"id": row.id, "kind": row.kind, "context": row.context, "intent": row.intent, "got": got,
+                             **({"text": row.text} if include_text else {})})
+    return {"rows": len(rows), "kinds": dict(sorted(kinds.items())), "contexts": dict(sorted(contexts.items())), "failures": failures,
+            "safety": _dialog_safety(grammar)}
 
 
 def _load_replay(path: Path) -> dict[str, tuple[bool, str | None]] | None:
@@ -362,25 +494,39 @@ def per_intent(outcomes: list[Outcome]) -> dict[str, dict[str, int]]:
     return dict(sorted(table.items()))
 
 
-def build_report(grammar: Grammar, rows: list[Row], manifest: list[dict[str, Any]], *, include_text: bool = True,
-                 previous: dict[str, Any] | None = None, decide: Decider | None = None,
-                 route: str = "grammar", require_baseline: bool = False) -> dict[str, Any]:
-    outcomes = evaluate(grammar, rows, decide)
-    unaddressed = set(grammar.backtest.get("unaddressed") or {})
+def _split_tables(grammar: Grammar, outcomes: list[Outcome]) -> dict[str, dict[str, Any]]:
+    """The metrics of every non-empty source/split combination."""
     splits: dict[str, dict[str, Any]] = {}
     for source in ("real", "synthetic", "all"):
         for split in ("dev", "holdout", "all"):
             chosen = [o for o in outcomes if source in (o.row.source, "all") and split in (o.row.split, "all")]
             if chosen:
                 splits[f"{source}/{split}"] = metrics(chosen, grammar)
-    dev = [o for o in outcomes if o.row.split == "dev"]
-    misses = [{"id": o.row.id, "split": "dev", "source": o.row.source, "truth": o.row.truth, "outcome": o.outcome,
-               "intent": o.decision.intent if o.decision else None,
-               **({"text": o.row.text} if include_text else {})}
-              for o in dev if o.outcome not in GOOD_OUTCOMES]
-    holdout_misses = [{"id": o.row.id, "split": "holdout", "source": o.row.source, "truth": o.row.truth,
-                       "outcome": o.outcome, "intent": o.decision.intent if o.decision else None}
-                      for o in outcomes if o.row.split == "holdout" and o.outcome not in GOOD_OUTCOMES]
+    return splits
+
+
+def _dev_misses(outcomes: list[Outcome], include_text: bool) -> list[dict[str, Any]]:
+    return [{"id": o.row.id, "split": "dev", "source": o.row.source, "truth": o.row.truth, "outcome": o.outcome,
+             "intent": o.decision.intent if o.decision else None,
+             **({"text": o.row.text} if include_text else {})}
+            for o in outcomes if o.row.split == "dev" and o.outcome not in GOOD_OUTCOMES]
+
+
+def _holdout_misses(outcomes: list[Outcome]) -> list[dict[str, Any]]:
+    return [{"id": o.row.id, "split": "holdout", "source": o.row.source, "truth": o.row.truth,
+             "outcome": o.outcome, "intent": o.decision.intent if o.decision else None}
+            for o in outcomes if o.row.split == "holdout" and o.outcome not in GOOD_OUTCOMES]
+
+
+def build_report(grammar: Grammar, rows: list[Row], manifest: list[dict[str, Any]], *, include_text: bool = True,
+                 previous: dict[str, Any] | None = None, decide: Decider | None = None,
+                 route: str = "grammar", require_baseline: bool = False,
+                 dialog_rows: list[DialogRow] | None = None) -> dict[str, Any]:
+    outcomes = evaluate(grammar, rows, decide)
+    unaddressed = set(grammar.backtest.get("unaddressed") or {})
+    splits = _split_tables(grammar, outcomes)
+    misses = _dev_misses(outcomes, include_text)
+    holdout_misses = _holdout_misses(outcomes)
     report: dict[str, Any] = {
         "schema": REPORT_SCHEMA,
         "split": {"version": SPLIT_VERSION, "holdout_percent": holdout_percent(grammar)},
@@ -401,6 +547,8 @@ def build_report(grammar: Grammar, rows: list[Row], manifest: list[dict[str, Any
                  for o in outcomes},
         "self_check_failures": grammar.self_check(),
     }
+    if dialog_rows is not None:
+        report["dialog"] = dialog_metrics(grammar, dialog_rows, include_text=include_text)
     report["compare"] = compare(report, previous)
     report["baseline"] = {"required": require_baseline, "usable": report["compare"] is not None
                           and not report["compare"].get("incompatible")}
@@ -510,6 +658,7 @@ def check_gate(report: dict[str, Any], grammar: Grammar) -> dict[str, Any]:
     if report["self_check_failures"]:
         failures.append(f"{len(report['self_check_failures'])} pinned examples/negatives fail")
     failures.extend(_safety_failures(grammar, rules.get("safety") or {}))
+    failures.extend(_dialog_failures(report.get("dialog"), rules.get("dialog")))
     failures.extend(_holdout_failures(report, rules.get("holdout") or {}))
     compare_ = report.get("compare")
     baseline = report.get("baseline") or {}
@@ -558,6 +707,20 @@ def _safety_failures(grammar: Grammar, rule: dict[str, Any]) -> list[str]:
         decision = grammar.decide(phrase, min_priority=0)
         if decision is None or decision.intent != wanted:
             failures.append(f"SAFETY: «{phrase}» reads as {decision.intent if decision else 'nothing'}, not {wanted}")
+    return failures
+
+
+def _dialog_failures(block: dict[str, Any] | None, rule: dict[str, Any] | None) -> list[str]:
+    """`gate.dialog`: dialog rows decided as labelled (at most `max_wrong` may not be), and the emergency phrases above every context.
+    A grammar that asks for the rule and a report without the dialog block fails: a run that skipped them proved nothing."""
+    if rule is None:
+        return []
+    if block is None:
+        return ["dialog: the report has no dialog rows (the gate measures the repair contexts)"]
+    failures: list[str] = []
+    if len(block["failures"]) > rule.get("max_wrong", 0):
+        failures.append(f"dialog: {len(block['failures'])} of {block['rows']} dialog rows are not decided as labelled (max {rule.get('max_wrong', 0)})")
+    failures.extend(block["safety"]["failures"])
     return failures
 
 
@@ -699,6 +862,11 @@ def summary_lines(report: dict[str, Any]) -> list[str]:
                      f"correct={_fmt(split['correct_rate'])} completed={_fmt(split['completed_rate'])} "
                      f"wrong_actions={split['wrong_actions']} false_triggers={split['false_triggers']} "
                      f"p95={split['latency_us']['p95']}us")
+    dialog = report.get("dialog")
+    if dialog:
+        kinds = ", ".join(f"{kind} {entry['correct']}/{entry['n']}" for kind, entry in dialog["kinds"].items())
+        lines.append(f"dialog rows n={dialog['rows']}: {kinds}; {len(dialog['failures'])} wrong; emergency phrase above every context "
+                     f"{dialog['safety']['checked'] - len(dialog['safety']['failures'])}/{dialog['safety']['checked']}")
     if report.get("compare"):
         compare_ = report["compare"]
         lines.append(f"vs previous: {len(compare_['regressed'])} worse, {compare_['fixed']} better, "

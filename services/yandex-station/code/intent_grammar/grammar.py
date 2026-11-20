@@ -16,11 +16,11 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 
 from .normalize import Canon, Normalised, normalise
-from .pattern import Alt, Matcher, Node, PatternError, Resolver, SLOT_TYPES, Word, compile_forms, parse_pattern
+from .pattern import Alt, Matcher, Node, Opt, PatternError, Resolver, SLOT_TYPES, Value, Word, compile_forms, parse_pattern
 from .timewords import duration_ru, parse_duration
 
 PHASES = ("pre", "post")   # pre: safe to answer before the quasar container's own handlers; post: only when they found nothing
@@ -34,9 +34,12 @@ GUARDS = ("not_negated", "not_question", "is_question")
 SET_GUARDS = ("has:", "not_has:")   # has:<lexicon set> / not_has:<lexicon set>: any token of the utterance is / is not in it
 REPLY_KINDS = ("canned", "template", "earcon", "none")
 _INTENT_KEYS = {"id", "tier", "labels", "priority", "patterns", "slots", "guards", "allow_negation", "fuzzy_ok", "max_tokens", "phase",
-                "action", "reply", "examples", "negatives", "note"}
+                "action", "reply", "examples", "negatives", "note", "context"}
+_CONTEXT_KEYS = {"id", "values", "sample", "note"}
+CONTEXT_PRIORITY = 900        # a context intent without an explicit priority sits here: above every normal intent, below the emergency one
+EMERGENCY_PRIORITY = 1000     # nothing a context intent can be given reaches it
 _SLOT_KEYS = {"type", "range", "required", "default", "ask", "values", "no_time", "reject"}
-_TOP_KEYS = {"version", "locale", "lexicon", "intents", "backtest", "gate"}
+_TOP_KEYS = {"version", "locale", "lexicon", "contexts", "intents", "backtest", "gate"}
 
 
 class GrammarError(ValueError):
@@ -79,6 +82,24 @@ class Intent:
     examples: tuple[Example, ...]
     negatives: tuple[str, ...]
     required_stems: tuple[frozenset[str], ...]
+    contexts: tuple[str, ...] = ()   # the dialog contexts the intent lives in; empty: a normal intent, which never sees a context
+
+
+@dataclass(frozen=True)
+class Context:
+    """A dialog context declared by the grammar: the names of the per-turn values its intents may reference as `{@name}`,
+    and sample phrases for them (what the pinned examples and the back-test pass when a row brings no values of its own)."""
+    id: str
+    values: tuple[str, ...] = ()
+    sample: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ActiveContext:
+    """A context that is open for one decision: its id and the per-turn phrases (`values[name]`) the caller supplies.
+    The YAML stays static; the dialog's turn-specific words (the proposed alternative, the heard verb) ride here."""
+    id: str
+    values: Mapping[str, Sequence[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -111,22 +132,29 @@ class Grammar:
     sha256: str
     lexicon_forms: dict[str, list[str]] = field(default_factory=dict)
     sets: dict[str, Alt] = field(default_factory=dict)
+    contexts: dict[str, Context] = field(default_factory=dict)
 
     # ── decision ───────────────────────────────────────────────────────────
     def normalise(self, text: str) -> Normalised:
         return normalise(text, self.canon)
 
     def decide(self, text: str, *, min_priority: int | None = None, max_priority: int | None = None,
-               phase: str | None = None) -> Decision | None:
+               phase: str | None = None, context: ActiveContext | str | None = None) -> Decision | None:
         """One decision or None (abstain). Whole utterance first, then a compound of clauses: the split runs only when
         the whole utterance has no reading at all, never to override two readings that tied.
 
         `min_priority` / `max_priority` select a band of intents: the router asks for the real intents (priority >= 0),
         lets the arithmetic and weather skills answer, and only then lets the catch-alls (priority < 0) read what is left.
         `phase="pre"` keeps only the intents that may answer before the quasar container's own handlers.
+
+        `context`: an open dialog context (an `ActiveContext`, or just its id). The intents that live in it (priority 900 unless
+        the grammar says otherwise) join the normal ones and outrank them, but never `refuse.emergency` (1000); without the
+        argument, and for every intent that has no `context`, nothing changes. A compound is split into clauses of normal
+        intents only: «да и громче» is never «accept» plus a volume change.
         """
         started = time.perf_counter_ns()
         utterance = self.normalise(text)
+        active = self._active(context)
         if min_priority is None and max_priority is None:
             # Real intents (and compounds of them) first, the catch-alls (priority < 0) only for what is left.
             bands = ((0, None), (None, -1))
@@ -134,7 +162,7 @@ class Grammar:
             bands = ((min_priority, max_priority),)
         decision = None
         for low, high in bands:
-            decision, tied = self._pick(utterance, low, high, phase)
+            decision, tied = self._pick(utterance, low, high, phase, active)
             if decision is None and not tied:
                 decision = self._compound(utterance, low, high, phase)
             if decision is not None or tied:
@@ -147,14 +175,26 @@ class Grammar:
                           max_priority: int | None = None, phase: str | None = None) -> Decision | None:
         return self._pick(utterance, min_priority, max_priority, phase)[0]
 
+    def _active(self, context: ActiveContext | str | None) -> tuple[str, dict[str, tuple[Normalised, ...]]] | None:
+        """The open context as (id, its per-turn phrases normalised like utterances), or None. An id the grammar does not
+        declare is a caller's bug and raises rather than silently deciding without the dialog."""
+        if context is None:
+            return None
+        if isinstance(context, str):
+            context = ActiveContext(context)
+        if context.id not in self.contexts:
+            raise GrammarError(f"unknown context {context.id!r}")
+        values = {name: tuple(self.normalise(phrase) for phrase in phrases) for name, phrases in context.values.items()}
+        return context.id, values
+
     def _pick(self, utterance: Normalised, min_priority: int | None = None, max_priority: int | None = None,
-              phase: str | None = None) -> tuple[Decision | None, bool]:
+              phase: str | None = None, active: tuple[str, dict[str, tuple[Normalised, ...]]] | None = None) -> tuple[Decision | None, bool]:
         """The winning decision of one (sub-)utterance and whether it was withheld because two intents tied."""
         if not utterance.tokens:
             return None, False
-        found = self._candidates(utterance, fuzzy=False, band=(min_priority, max_priority, phase))
+        found = self._candidates(utterance, fuzzy=False, band=(min_priority, max_priority, phase), active=active)
         if not found:
-            found = self._candidates(utterance, fuzzy=True, band=(min_priority, max_priority, phase))
+            found = self._candidates(utterance, fuzzy=True, band=(min_priority, max_priority, phase), active=active)
         if not found:
             return None, False
         # priority first, then specificity (more literal words consumed), then ambiguity -> abstain
@@ -165,29 +205,28 @@ class Grammar:
             return None, True
         return top[2], False
 
-    def candidates(self, text: str) -> list[Decision]:
+    def candidates(self, text: str, context: ActiveContext | str | None = None) -> list[Decision]:
         """Every intent that reads the utterance (priority/specificity order); more than one at the top is a conflict."""
         utterance = self.normalise(text)
-        found = self._candidates(utterance, fuzzy=False) or self._candidates(utterance, fuzzy=True)
+        active = self._active(context)
+        found = self._candidates(utterance, fuzzy=False, active=active) or self._candidates(utterance, fuzzy=True, active=active)
         found.sort(key=lambda c: (-c[0], -c[1]))
         return [c[2] for c in found]
 
-    def _candidates(self, u: Normalised, *, fuzzy: bool,
-                    band: tuple[int | None, int | None, str | None] = (None, None, None)) -> list[tuple[int, int, Decision]]:
+    def _candidates(self, u: Normalised, *, fuzzy: bool, band: tuple[int | None, int | None, str | None] = (None, None, None),
+                    active: tuple[str, dict[str, tuple[Normalised, ...]]] | None = None) -> list[tuple[int, int, Decision]]:
         out: list[tuple[int, int, Decision]] = []
         stems = set(u.stems)
-        low, high, phase = band
         for intent in self.intents:
-            if (low is not None and intent.priority < low) or (high is not None and intent.priority > high):
+            if not _in_scope(intent, band, active):
                 continue
-            if phase is not None and intent.phase != phase:
-                continue
-            best = self._match_intent(intent, u, stems, fuzzy)
+            best = self._match_intent(intent, u, stems, fuzzy, active[1] if active is not None else None)
             if best is not None:
                 out.append((intent.priority, best[0], best[1]))
         return out
 
-    def _match_intent(self, intent: Intent, u: Normalised, stems: set[str], fuzzy: bool) -> tuple[int, Decision] | None:
+    def _match_intent(self, intent: Intent, u: Normalised, stems: set[str], fuzzy: bool,
+                      values: dict[str, tuple[Normalised, ...]] | None = None) -> tuple[int, Decision] | None:
         if intent.max_tokens is not None and len(u.tokens) > intent.max_tokens:
             return None
         for guard in intent.guards:
@@ -205,7 +244,7 @@ class Grammar:
         for index, seq in enumerate(intent.patterns):
             if not fuzzy and not intent.required_stems[index] <= stems:
                 continue
-            matcher = Matcher(u, fuzzy=fuzzy, slot_ok=lambda name, value, i=intent: _slot_ok(i, name, value))
+            matcher = Matcher(u, fuzzy=fuzzy, slot_ok=lambda name, value, i=intent: _slot_ok(i, name, value), values=values)
             for caps, score in matcher.full(seq):
                 decision = self._build(intent, index, caps, u, fuzzy)
                 if decision is not None and (best is None or score > best[0]):
@@ -303,20 +342,43 @@ class Grammar:
         """Every example must decide to its intent (and slots); every negative must not. Returns the failures."""
         failures: list[str] = []
         for intent in self.intents:
-            for example in intent.examples:
-                decision = self.decide(example.say)
-                if decision is None or decision.intent != intent.id:
-                    got = "abstain" if decision is None else decision.intent
-                    failures.append(f"{intent.id}: example {example.say!r} -> {got}")
-                    continue
-                for name, want in example.slots.items():
-                    if decision.slots.get(name) != want:
-                        failures.append(f"{intent.id}: example {example.say!r} slot {name}={decision.slots.get(name)!r}, want {want!r}")
-            for negative in intent.negatives:
-                decision = self.decide(negative)
-                if decision is not None and decision.intent == intent.id:
-                    failures.append(f"{intent.id}: negative {negative!r} matched")
+            for where, context in self._check_settings(intent):
+                for example in intent.examples:
+                    failures.extend(self._check_example(intent, example, where, context))
+                failures.extend(self._check_negatives(intent, where, context))
         return failures
+
+    def _check_settings(self, intent: Intent) -> list[tuple[str, ActiveContext | None]]:
+        """Where an intent's pinned checks run: a context intent inside each of its contexts, with the context's sample values."""
+        return [(f" [{cid}]", ActiveContext(cid, self.contexts[cid].sample)) for cid in intent.contexts] or [("", None)]
+
+    def _check_example(self, intent: Intent, example: Example, where: str, context: ActiveContext | None) -> list[str]:
+        decision = self.decide(example.say, context=context)
+        if decision is None or decision.intent != intent.id:
+            got = "abstain" if decision is None else decision.intent
+            return [f"{intent.id}{where}: example {example.say!r} -> {got}"]
+        return [f"{intent.id}{where}: example {example.say!r} slot {name}={decision.slots.get(name)!r}, want {want!r}"
+                for name, want in example.slots.items() if decision.slots.get(name) != want]
+
+    def _check_negatives(self, intent: Intent, where: str, context: ActiveContext | None) -> list[str]:
+        failures: list[str] = []
+        for negative in intent.negatives:
+            decision = self.decide(negative, context=context)
+            if decision is not None and decision.intent == intent.id:
+                failures.append(f"{intent.id}{where}: negative {negative!r} matched")
+        return failures
+
+
+def _in_scope(intent: Intent, band: tuple[int | None, int | None, str | None],
+              active: tuple[str, dict[str, tuple[Normalised, ...]]] | None) -> bool:
+    """Whether the intent takes part in a decision: inside the priority band, and either a normal intent of the requested phase or a
+    context intent of the open context (the phase does not apply to a dialog's replies)."""
+    low, high, phase = band
+    if (low is not None and intent.priority < low) or (high is not None and intent.priority > high):
+        return False
+    if intent.contexts:
+        return active is not None and active[0] in intent.contexts
+    return phase is None or intent.phase == phase
 
 
 def _slot_ok(intent: Intent, name: str, value: object) -> bool:
@@ -437,10 +499,11 @@ def from_data(data: Any, sha256: str) -> Grammar:
                   typo_vocabulary=tuple(sorted(words("typo_vocabulary"))))
     connectors = tuple(tuple(str(form).lower().replace("ё", "е").split()) for form in forms.get("connectors", []))
 
+    contexts = _contexts(data.get("contexts"))
     intents: list[Intent] = []
     seen: set[str] = set()
     for raw in data.get("intents") or []:
-        intent = _intent(raw, resolver)
+        intent = _intent(raw, resolver, contexts)
         if intent.id in seen:
             raise GrammarError(f"duplicate intent id {intent.id}")
         seen.add(intent.id)
@@ -449,7 +512,67 @@ def from_data(data: Any, sha256: str) -> Grammar:
         raise GrammarError("the grammar has no intents")
     return Grammar(version=1, locale=str(data.get("locale", "ru")), intents=tuple(intents), canon=canon,
                    connectors=connectors, backtest=dict(data.get("backtest") or {}), gate=dict(data.get("gate") or {}),
-                   sha256=sha256, lexicon_forms=forms, sets=resolver.sets)
+                   sha256=sha256, lexicon_forms=forms, sets=resolver.sets, contexts=contexts)
+
+
+def _contexts(raw: Any) -> dict[str, Context]:
+    """The `contexts:` list: id, the names of the per-turn values (`values`) and sample phrases for them (`sample`)."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        raise GrammarError("contexts must be a list")
+    found: dict[str, Context] = {}
+    for item in raw:
+        context = _context(item, found)
+        found[context.id] = context
+    return found
+
+
+def _context(item: Any, known: dict[str, Context]) -> Context:
+    """One entry of `contexts:`, checked; `known` are the contexts declared before it (an id is declared once)."""
+    if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+        raise GrammarError(f"every context is a mapping with an id, got {item!r}")
+    cid = item["id"]
+    unknown = set(item) - _CONTEXT_KEYS
+    if unknown:
+        raise GrammarError(f"context {cid}: unknown keys {sorted(unknown)}")
+    if cid in known:
+        raise GrammarError(f"duplicate context {cid}")
+    values = _context_values(cid, item)
+    return Context(cid, tuple(values), _context_sample(cid, item, values))
+
+
+def _context_values(cid: str, item: dict[str, Any]) -> list[str]:
+    values = item.get("values") or []
+    if not isinstance(values, list) or not all(isinstance(name, str) and name for name in values):
+        raise GrammarError(f"context {cid}: values must be a list of names")
+    return values
+
+
+def _context_sample(cid: str, item: dict[str, Any], values: list[str]) -> dict[str, tuple[str, ...]]:
+    sample = item.get("sample") or {}
+    if not isinstance(sample, dict):
+        raise GrammarError(f"context {cid}: sample must be a mapping of value name -> phrases")
+    for name, phrases in sample.items():
+        if name not in values:
+            raise GrammarError(f"context {cid}: sample {name} is not one of its values {values}")
+        if not isinstance(phrases, list) or not all(isinstance(p, str) for p in phrases):
+            raise GrammarError(f"context {cid}: sample {name} must be a list of phrases")
+    return {name: tuple(phrases) for name, phrases in sample.items()}
+
+
+def _value_names(seq: tuple[Node, ...]) -> set[str]:
+    """Every `{@name}` a compiled pattern references, at any depth."""
+    found: set[str] = set()
+    for node in seq:
+        if isinstance(node, Value):
+            found.add(node.name)
+        elif isinstance(node, Alt):
+            for option in node.options:
+                found |= _value_names(option)
+        elif isinstance(node, Opt):
+            found |= _value_names((node.inner,))
+    return found
 
 
 def _holds_time(value: str) -> bool:
@@ -461,7 +584,7 @@ def _words(value: Any) -> tuple[str, ...]:
     return tuple(str(word).lower().replace("ё", "е") for word in value or ())
 
 
-def _intent(raw: Any, resolver: Resolver) -> Intent:
+def _intent(raw: Any, resolver: Resolver, declared: dict[str, Context]) -> Intent:
     if not isinstance(raw, dict) or "id" not in raw:
         raise GrammarError("every intent is a mapping with an id")
     iid = str(raw["id"])
@@ -471,20 +594,7 @@ def _intent(raw: Any, resolver: Resolver) -> Intent:
     tier = raw.get("tier")
     if tier not in TIERS:
         raise GrammarError(f"{iid}: tier must be one of {TIERS}, got {tier!r}")
-    slots: dict[str, SlotSpec] = {}
-    for name, spec in (raw.get("slots") or {}).items():
-        if not isinstance(spec, dict) or "type" not in spec:
-            raise GrammarError(f"{iid}: slot {name} needs a type")
-        bad = set(spec) - _SLOT_KEYS
-        if bad:
-            raise GrammarError(f"{iid}: slot {name} unknown keys {sorted(bad)}")
-        if spec["type"] not in SLOT_TYPES and spec["type"] not in resolver.keyed:
-            raise GrammarError(f"{iid}: slot {name} has unknown type {spec['type']!r}")
-        rng = spec.get("range")
-        if rng is not None and (not isinstance(rng, list) or len(rng) != 2):
-            raise GrammarError(f"{iid}: slot {name} range must be [low, high]")
-        slots[name] = SlotSpec(name, spec["type"], tuple(rng) if rng else None, bool(spec.get("required", False)),
-                               spec.get("default"), spec.get("ask"), bool(spec.get("no_time", False)), _words(spec.get("reject")))
+    slots = _slot_specs(iid, raw, resolver)
     local = Resolver(sets=resolver.sets, keyed=resolver.keyed, slot_types={n: s.type for n, s in slots.items()})
     pattern_text = [str(p) for p in (raw.get("patterns") or [])]
     if not pattern_text:
@@ -495,6 +605,9 @@ def _intent(raw: Any, resolver: Resolver) -> Intent:
             patterns.append(parse_pattern(text, local))
         except PatternError as err:
             raise GrammarError(f"{iid}: pattern {text!r}: {err}") from err
+    in_contexts = _intent_contexts(iid, raw.get("context"), declared)
+    _check_context_values(iid, pattern_text, patterns, in_contexts, declared)
+    priority = _intent_priority(iid, raw, in_contexts)
     guards = tuple(raw.get("guards") or ())
     for guard in guards:
         named = next((g for g in SET_GUARDS if guard.startswith(g)), None)
@@ -524,13 +637,65 @@ def _intent(raw: Any, resolver: Resolver) -> Intent:
         else:
             raise GrammarError(f"{iid}: bad example {item!r}")
     return Intent(id=iid, tier=tier, labels=tuple(str(label) for label in raw.get("labels") or ()),
-                  priority=int(raw.get("priority", 0)), patterns=tuple(patterns), pattern_text=tuple(pattern_text),
+                  priority=priority, patterns=tuple(patterns), pattern_text=tuple(pattern_text),
                   slots=slots, guards=guards, fuzzy_ok=bool(raw.get("fuzzy_ok", False)),
                   max_tokens=int(raw["max_tokens"]) if raw.get("max_tokens") is not None else None,
                   phase=_phase(iid, raw.get("phase", "post")),
                   action=action, reply=reply,
                   examples=tuple(examples), negatives=tuple(str(n) for n in raw.get("negatives") or ()),
-                  required_stems=tuple(_required_stems(seq) for seq in patterns))
+                  required_stems=tuple(_required_stems(seq) for seq in patterns), contexts=in_contexts)
+
+
+def _slot_spec(iid: str, name: str, spec: Any, resolver: Resolver) -> SlotSpec:
+    if not isinstance(spec, dict) or "type" not in spec:
+        raise GrammarError(f"{iid}: slot {name} needs a type")
+    bad = set(spec) - _SLOT_KEYS
+    if bad:
+        raise GrammarError(f"{iid}: slot {name} unknown keys {sorted(bad)}")
+    if spec["type"] not in SLOT_TYPES and spec["type"] not in resolver.keyed:
+        raise GrammarError(f"{iid}: slot {name} has unknown type {spec['type']!r}")
+    rng = spec.get("range")
+    if rng is not None and (not isinstance(rng, list) or len(rng) != 2):
+        raise GrammarError(f"{iid}: slot {name} range must be [low, high]")
+    return SlotSpec(name, spec["type"], tuple(rng) if rng else None, bool(spec.get("required", False)),
+                    spec.get("default"), spec.get("ask"), bool(spec.get("no_time", False)), _words(spec.get("reject")))
+
+
+def _slot_specs(iid: str, raw: dict[str, Any], resolver: Resolver) -> dict[str, SlotSpec]:
+    return {name: _slot_spec(iid, name, spec, resolver) for name, spec in (raw.get("slots") or {}).items()}
+
+
+def _check_context_values(iid: str, pattern_text: list[str], patterns: list[tuple[Node, ...]], in_contexts: tuple[str, ...],
+                          declared: dict[str, Context]) -> None:
+    """A pattern may reference `{@name}` only in an intent that has a context, and only names that context declares."""
+    for text, seq in zip(pattern_text, patterns):
+        names = _value_names(seq)
+        if names and not in_contexts:
+            raise GrammarError(f"{iid}: pattern {text!r} uses a context value {sorted(names)} but the intent has no context")
+        for cid in in_contexts:
+            missing = names - set(declared[cid].values)
+            if missing:
+                raise GrammarError(f"{iid}: pattern {text!r} uses {sorted(missing)}, which context {cid} does not declare in values")
+
+
+def _intent_priority(iid: str, raw: dict[str, Any], in_contexts: tuple[str, ...]) -> int:
+    priority = int(raw.get("priority", CONTEXT_PRIORITY if in_contexts else 0))
+    if in_contexts and priority >= EMERGENCY_PRIORITY:
+        raise GrammarError(f"{iid}: a context intent never reaches priority {EMERGENCY_PRIORITY} (the emergency intent's), got {priority}")
+    return priority
+
+
+def _intent_contexts(iid: str, raw: Any, declared: dict[str, Context]) -> tuple[str, ...]:
+    """The `context:` of an intent (one id or a list), every one declared at the top level."""
+    if raw is None:
+        return ()
+    ids = [raw] if isinstance(raw, str) else raw
+    if not isinstance(ids, list) or not ids or not all(isinstance(cid, str) for cid in ids):
+        raise GrammarError(f"{iid}: context must be a context id or a list of them")
+    for cid in ids:
+        if cid not in declared:
+            raise GrammarError(f"{iid}: context {cid} is not declared under contexts")
+    return tuple(dict.fromkeys(ids))
 
 
 def _phase(iid: str, value: Any) -> str:
