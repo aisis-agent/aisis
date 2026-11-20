@@ -4,6 +4,7 @@ import re, subprocess, html, json, time, os, urllib.request, threading, http.cli
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 import dialogstore
+import ha_action_log
 import session_pages
 import trace_view
 import voiceclips
@@ -236,7 +237,8 @@ def session_html(dialog_id=None, clip_id=None):
     for c in clips:
         c["gain"] = clipfeed.boost_for(c.get("peak"))
     found = dialog is not None or bool(clips)
-    return (200 if found else 404), session_pages.render_session(dialog, clips, traces, focus_clip=clip_id, key=key)
+    ha_actions = ha_action_log.read(ha_action_log.JOURNAL_PATH, min(c["ts"] for c in clips) - 3, max(c["ts"] for c in clips) + 45) if clips else []
+    return (200 if found else 404), session_pages.render_session(dialog, clips, traces, focus_clip=clip_id, key=key, ha_actions=ha_actions)
 
 def dialogs_stats():
     conn = dialogstore.connect()

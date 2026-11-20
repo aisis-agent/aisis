@@ -66,6 +66,9 @@ jobs:
           python3 -m unittest test_tone_guard
           python3 -m unittest test_bench_asr_archive asr_eval.test_asr_eval_tier_a asr_eval.test_asr_eval_tier_b asr_eval.test_asr_eval_tier_c asr_eval.test_asr_eval_batch asr_eval.test_asr_eval_latency
           python3 -m intent_grammar compile --check
+      - name: ha-cli command verification (fake Home Assistant, journal, trace lines, isolated clip replay)
+        working-directory: services/yandex-station/code
+        run: python3 -m unittest test_ha_verify test_ha_action_log test_hacli test_hacli_response_calls test_hacli_verify test_ha_trace_view test_ha_replay
       - name: Claude cache and shared transport integration
         working-directory: services/yandex-station/code
         run: python3 -m unittest test_claude_cache_integration

@@ -7,6 +7,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import ha_action_log
+
 LAYERS = {"grammar": "грамматика", "skill": "навык", "calc": "калькулятор", "jev": "Jev", "brain": "ИИ", "error": "ошибка"}
 VIA = {"turn": "ход колонки", "hook": "хук квазара", "hook-shadow": "хук квазара (теневой)"}
 ASKED = {"clarify": "уточнение", "reprompt": "переспрос", "brain": "вопрос ИИ"}
@@ -180,7 +182,11 @@ def call_line(call: dict) -> str:
         status = call.get("status") or call.get("error") or "—"
         extra = f" {call['data']}" if call.get("data") else ""
         queued = " (в очереди)" if call.get("queued") else ""
-        return f"HA {call.get('service', '?')} {call.get('entity') or ''}{extra} → {status}{queued} · {ms_text(call.get('ms'))}".replace("  ", " ")
+        head = f"HA {call.get('service', '?')} {call.get('entity') or ''}{extra}"
+        if call.get("verify"):   # ha-cli read the device state after the call: that verdict, not Home Assistant's HTTP answer, is the result
+            verdict = ha_action_log.verdict_line(call["verify"], ha=call.get("ha"), down=call.get("down"), queued=bool(call.get("queued")))
+            return f"{head} → {verdict} · {ms_text(call.get('ms'))}".replace("  ", " ")
+        return f"{head} → {status}{queued} · {ms_text(call.get('ms'))}".replace("  ", " ")
     if kind == "weather-cli":
         return f"weather-cli {call.get('argv', '')} → {'ок' if call.get('ok') else 'сбой'} · {ms_text(call.get('ms'))}"
     if kind == "music":
@@ -236,6 +242,8 @@ def ranked_lines(trace: dict, compact: bool = False, answered: str | None = None
         out.append((3, f"итог: {trace['outcome']}"))
     for call in trace.get("calls") or []:
         out.append((2, "🔧 " + call_line(call)))
+    if trace.get("reply_why"):
+        out.append((2, "💬 причина ответа: " + ha_action_log.WHY_RU.get(trace["reply_why"], trace["reply_why"])))
     if trace.get("jev"):
         out.append((3, "🧠 " + jev_line(trace["jev"])))
     if trace.get("brain"):

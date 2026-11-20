@@ -222,16 +222,18 @@ class Adapter:
             result.raise_for_status()
             return await result.json(content_type=None)
 
-    async def _ha_post_json(self, path: str, body: dict):
+    async def _ha_post_json(self, path: str, body: dict) -> ha_actions.HaReply:
+        """POST through ha-cli: the answer carries ha-cli's verdict on the device state after the call (headers X-Aisis-*)."""
         async with self._hacli().post(self.intent_ha_url + path, json=body) as result:
             text = await result.text()
             try:
-                return result.status, json.loads(text) if text else None
+                parsed = json.loads(text) if text else None
             except ValueError:
-                return result.status, text
+                parsed = text
+            return ha_actions.HaReply.from_response(result.status, parsed, result.headers)
 
     async def _ha_post_status(self, path: str, body: dict) -> int:
-        return (await self._ha_post_json(path, body))[0]
+        return (await self._ha_post_json(path, body)).status
 
     def _chatgpt_timeout(self):
         if not self.env.get("AISIS_PM_URL"):

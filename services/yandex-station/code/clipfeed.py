@@ -46,6 +46,7 @@ from pathlib import Path
 import clipbot
 import cliptruth
 import dialogstore
+import ha_action_log
 import session_links
 import trace_view
 import voiceclips
@@ -307,7 +308,14 @@ def processing_lines(conn: sqlite3.Connection, clip: dict, end: float, dialog: d
     """How the adapter processed the clip, as ranked caption lines. Diagnostics must never keep a clip from the owner: a failure shows as a line."""
     try:
         traces = dialogstore.traces_between(conn, clip["ts"] - trace_view.MATCH_BEFORE_S, end + trace_view.MATCH_AFTER_S)
-        return trace_caption_lines(clip, trace_view.traces_of_clip(clip, traces, end), dialog, end)
+        mine = trace_view.traces_of_clip(clip, traces, end)
+        lines = trace_caption_lines(clip, mine, dialog, end)
+        if clip["status"] == "sent" and (clip.get("transcript") or "").strip():
+            # What ha-cli verified for the phrase (the quasar layer's own Home Assistant calls are not in the adapter's trace; the
+            # adapter's calls are, by journal id) and how Home Assistant was doing meanwhile.
+            known = {call["aid"] for trace in mine for call in trace.get("calls") or [] if call.get("aid")}
+            lines += ha_action_log.window_lines(clip["ts"] - trace_view.MATCH_BEFORE_S, end + trace_view.MATCH_AFTER_S, known)
+        return lines
     except Exception as exc:
         LOG.warning("clip_feed_diag_failed clip=%s class=%s", clip["id"], type(exc).__name__)
         return [(1, "⚠ диагностика обработки недоступна (%s)" % type(exc).__name__)]

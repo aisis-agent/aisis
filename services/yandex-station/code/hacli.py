@@ -1,56 +1,89 @@
 #!/usr/bin/env python3
-"""aisis-ha-cli: always-on local Home Assistant proxy with state cache.
+"""aisis-ha-cli: always-on local Home Assistant proxy with state cache, and the place where a command is VERIFIED.
 
-Serves 127.0.0.1:8790. Proxies REST calls to Home Assistant while it is up,
-answers state reads from a persistent cache while it is down, and queues
-service calls until HA returns. Keeps the voice stack (quasar container
-ha-intents layer) working across HA restarts without its own restarts.
+Serves 127.0.0.1:8795. Proxies REST calls to Home Assistant while it is up, answers state reads from a persistent cache while
+it is down, and queues service calls while Home Assistant is observed to be gone. Keeps the voice stack (quasar container
+ha-intents layer, the adapter) working across HA restarts without its own restarts.
 
 Endpoints (auth header optional; the real HA token is added here):
-  GET  /health                 -> {ha_up, cache_age_s, cached_states, queued,
+  GET  /health                 -> {ha_up, status up|slow|down, last_error, cache_age_s, cached_states, queued,
                                    recovery_eta_s, outages_measured}
   GET  /api/states             -> live, or cache with X-Aisis-Cache: stale
   GET  /api/states/<entity_id> -> live, or cache with X-Aisis-Cache: stale
   POST /api/template           -> live, or cached rendering with stale header
-  POST /api/services/...       -> live, or 202 + queue (X-Aisis-Queue: 1,
-                                   X-Aisis-Eta: <seconds>)
-Anything else: proxied when HA is up, 503 otherwise.
+  POST /api/services/...       -> the call, verified against the device state (below)
+Anything else: proxied when HA is up, 503/504 otherwise.
+
+A service call is done when the DEVICE says so (ha_verify.py: what each domain's service must leave in the state). While the call
+is in flight ha-cli polls the target entities' states and answers as soon as they are as expected; when Home Assistant's own
+answer is an error or never comes, the state is checked all the same: the command may have run (2026-11-19 21:21: the light was
+off 0.85 s after the command, Home Assistant's answer took longer than the 2 s ha-cli then allowed, and the speaker announced a
+reboot nobody observed). Answers, all within CALL_BUDGET_S (the callers abort at 3 s):
+  200  X-Aisis-Verify: ok       the state is as expected (Home Assistant's body, or the verified states when its answer failed)
+  502  X-Aisis-Verify: failed   Home Assistant answered, the device state is not as expected after the budget (X-Aisis-Ha-Status)
+  504  X-Aisis-Verify: unknown  no state could be read: Home Assistant did not answer. NOT a reboot: nothing is claimed
+  202  X-Aisis-Queue: 1, X-Aisis-Eta, X-Aisis-Down: <kind>   Home Assistant was OBSERVED gone (connection refused/reset, 502-504,
+       «starting» on the call AND on a second look); the call waits for its return
+  4xx  Home Assistant's own rejection, passed through (X-Aisis-Verify: skipped, reason rejected)
+  other calls (nothing in the state tells): Home Assistant's answer as it is (X-Aisis-Verify: skipped)
+Headers of every answer: X-Aisis-Action (journal id), X-Aisis-Verify[-Reason|-Ms|-Attempts], X-Aisis-Verified-State, X-Aisis-Ha-Status.
+Every action, availability change and replay is one line in the journal (ha_action_log.py): `journalctl --user -u aisis-ha-cli`
+or ~/.local/share/aisis/ha-actions.jsonl.
 
 Config: ~/.local/share/aisis/ha.config.json ({url, token}).
 Cache:   ~/.local/share/aisis/ha-state-cache.json
 Outages: ~/.local/share/aisis/ha-outages.json (measured down->up windows)
-Env overrides for testing: AISIS_HACLI_HA_URL, AISIS_HACLI_PORT,
-AISIS_HACLI_CACHE, AISIS_HACLI_OUTAGES.
+Journal: ~/.local/share/aisis/ha-actions.jsonl
+Env overrides for testing: AISIS_HACLI_HA_URL, AISIS_HACLI_PORT, AISIS_HACLI_CACHE, AISIS_HACLI_OUTAGES, AISIS_HACLI_JOURNAL.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
-import sys
+import secrets
+import socket
+import ssl
 import statistics
-import time
+import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
+
+import ha_action_log
+import ha_verify
 
 BASE = Path.home() / '.local' / 'share' / 'aisis'
 CONFIG_FILE = BASE / 'ha.config.json'
 CACHE_FILE = Path(os.environ.get('AISIS_HACLI_CACHE', BASE / 'ha-state-cache.json'))
 OUTAGES_FILE = Path(os.environ.get('AISIS_HACLI_OUTAGES', BASE / 'ha-outages.json'))
+JOURNAL = ha_action_log.Journal(os.environ.get('AISIS_HACLI_JOURNAL', BASE / 'ha-actions.jsonl'))
 PORT = int(os.environ.get('AISIS_HACLI_PORT', '8795'))
 REFRESH_S = 30.0
 # While HA is down, probe fast so the measured outage ends within seconds of the
 # real recovery and queued service calls replay promptly.
 DOWN_POLL_S = 3.0
 HA_TIMEOUT_S = 5.0
-# A proxied client call must answer inside the caller's own timeout: the quasar container's haFetch aborts at 3 s
-# (FETCH_TIMEOUT_MS in ha-intents.ts). A client that gave up before the 202/queue answer reports the command as failed
-# while this daemon queues it and replays it once HA is back (2026-11-15 21:33: the speaker said «Не удалось выполнить
-# команду умного дома», the owner confirmed the command ran). Background probing keeps the longer HA_TIMEOUT_S.
+# A proxied READ must answer inside the caller's own timeout: the quasar container's haFetch aborts at 3 s (FETCH_TIMEOUT_MS in
+# ha-intents.ts), the adapter's session at 3 s. Background probing keeps the longer HA_TIMEOUT_S.
 CLIENT_TIMEOUT_S = 2.0
+# A service call is answered inside CALL_BUDGET_S, state checks included; Home Assistant gets CALL_TIMEOUT_S for its own answer
+# and the call thread goes on after the caller was answered (the late result is journalled).
+CALL_BUDGET_S = 2.5
+CALL_TIMEOUT_S = 2.3
+POLL_FIRST_S = 0.2      # the first state check comes this long after the call left
+POLL_EVERY_S = 0.25
+STATE_READ_S = 0.6      # one state read must not eat the budget
+BEFORE_READ_S = 0.5    # the state read before the call: it may not delay the call by more than this
+DOWN_CONFIRM_S = 0.25   # a second look this long after a call that found Home Assistant gone
+UNRESPONSIVE_S = 5.0   # no answer to anything for this long: Home Assistant is down, cause unknown (less: slow)
 # Recovery time of a Home Assistant restart: median of the last OUTAGE_WINDOW
 # down->up durations. Seeded with the 38 outages the ha-ble-vhci service logged
 # ("Home Assistant is back after N s", journal 2026-10-23..11-07: median 62 s,
@@ -62,14 +95,12 @@ SEED_OUTAGES_S = [
     13, 78, 434, 7, 179, 145, 33, 269, 8, 17, 7, 6, 91, 91, 61, 12, 91, 91, 1,
 ]
 OUTAGE_WINDOW = 40
+# Transport errors that say nobody is listening (versus a timeout, which says nothing about why).
+DOWN_KINDS = frozenset({'refused', 'reset', 'dns', 'unreachable', 'starting'})
 
 _lock = threading.Lock()
-_ha_up = False
-_seen_up = False  # HA answered at least once since this daemon started
-_down_since: float | None = None  # first failure of the current outage
-_last_ok = 0.0
-_queue: list[tuple[str, dict | None]] = []  # (path, body) service calls
-_wake = threading.Event()  # set when a request sees HA down: probe now, then fast
+_queue: list[tuple[str, dict | None, str]] = []  # (path, body, action id) service calls waiting for Home Assistant
+_wake = threading.Event()  # set when a request saw trouble: probe now, then fast
 
 
 def load_config() -> tuple[str, str | None]:
@@ -85,22 +116,66 @@ def load_config() -> tuple[str, str | None]:
 HA_URL, HA_TOKEN = load_config()
 
 
-def ha_request(path: str, body: dict | None = None, timeout: float = HA_TIMEOUT_S) -> tuple[int, bytes, dict]:
+# -- one request to Home Assistant -----------------------------------------------------------------------------------------
+
+@dataclass
+class Reply:
+    status: int              # HTTP status, 0 when nothing came back
+    raw: bytes = b''
+    error: str | None = None  # why nothing came back (timeout|refused|reset|dns|unreachable|ssl|other), or `starting` on a 503 «starting»
+    ms: int = 0
+
+    @property
+    def down_evidence(self) -> bool:
+        """Home Assistant is observed gone: nobody listens, or its front says it is not there (not: it was merely slow)."""
+        return self.error in DOWN_KINDS or self.status in (502, 503, 504)
+
+    @property
+    def answered(self) -> bool:
+        return self.status > 0 and not self.down_evidence
+
+    @property
+    def what(self) -> str:
+        """The outcome as a short token for logs and headers: the HTTP status, or the error kind."""
+        return self.error if self.status == 0 and self.error else str(self.status)
+
+
+def _classify(err: BaseException) -> str:
+    reason = err.reason if isinstance(err, urllib.error.URLError) else err
+    if isinstance(reason, TimeoutError):
+        return 'timeout'
+    if isinstance(reason, ConnectionRefusedError):
+        return 'refused'
+    if isinstance(reason, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return 'reset'
+    if isinstance(reason, socket.gaierror):
+        return 'dns'
+    if isinstance(reason, ssl.SSLError):
+        return 'ssl'
+    if isinstance(reason, OSError) and reason.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN):
+        return 'unreachable'
+    return 'other'
+
+
+def ha_call(path: str, body: dict | None = None, timeout: float = HA_TIMEOUT_S) -> Reply:
+    started = time.monotonic()
     req = urllib.request.Request(HA_URL + path, method='GET' if body is None else 'POST')
     if HA_TOKEN:
         req.add_header('Authorization', f'Bearer {HA_TOKEN}')
+    data = None
     if body is not None:
         req.add_header('Content-Type', 'application/json')
         data = json.dumps(body).encode()
-    else:
-        data = None
     try:
         with urllib.request.urlopen(req, data, timeout=timeout) as resp:
-            return resp.status, resp.read(), dict(resp.headers)
+            status, raw = resp.status, resp.read()
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), dict(e.headers)
-    except Exception:
-        return 0, b'', {}
+        with e:
+            status, raw = e.code, e.read()
+    except Exception as err:
+        return Reply(0, b'', _classify(err), int((time.monotonic() - started) * 1000))
+    starting = status == 503 and b'starting' in raw[:400].lower()
+    return Reply(status, raw, 'starting' if starting else None, int((time.monotonic() - started) * 1000))
 
 
 def read_cache() -> dict:
@@ -109,6 +184,8 @@ def read_cache() -> dict:
     except Exception:
         return {}
 
+
+# -- outage statistics and availability ------------------------------------------------------------------------------------
 
 def _load_measured_outages() -> list[dict]:
     try:
@@ -141,60 +218,367 @@ def _record_outage(seconds: float) -> None:
         pass  # read-only stage mount: keep the in-memory window
 
 
-def _note_ha(ok: bool) -> None:
-    """Track HA reachability and time the down->up window (caller holds _lock).
+class Availability:
+    """What ha-cli has OBSERVED about Home Assistant: up, slow (requests got no answer, for less than UNRESPONSIVE_S) or down
+    (nobody listens, a proxy in front says so, or nothing has answered for UNRESPONSIVE_S). A slow answer is not an outage: it is
+    not timed, queued for, or announced as one.
 
-    A window is only measured when its start was observed (HA seen up first), so a
-    daemon started during an outage does not record a truncated duration.
-    """
-    global _ha_up, _last_ok, _down_since, _seen_up
-    now = time.time()
-    if ok:
-        if _down_since is not None:
-            _record_outage(now - _down_since)
-            _down_since = None
-        _ha_up = _seen_up = True
-        _last_ok = now
-    else:
-        _ha_up = False
-        if _seen_up and _down_since is None:
-            _down_since = now
+    A down window is only measured when its start was observed (HA seen up first), so a daemon started during an outage does not
+    record a truncated duration."""
+
+    def __init__(self) -> None:
+        self.state = 'unknown'
+        self.since = time.time()
+        self.first_failure = 0.0     # when the current run of unanswered requests began
+        self.last_error: str | None = None
+        self.last_ok = 0.0
+        self.seen_up = False
+        self.down_since: float | None = None
+
+    @property
+    def up(self) -> bool:
+        return self.state in ('up', 'slow')
+
+    def note(self, reply: Reply, now: float) -> list[dict]:
+        """Fold one request's outcome in; returns the journal records of the state change (caller holds _lock)."""
+        if reply.answered:
+            self.first_failure = 0.0
+            self.last_ok = now
+            self.seen_up = True
+            return self._move('up', now, None)
+        if not self.first_failure:
+            self.first_failure = now
+        self.last_error = reply.error or f'http_{reply.status}'
+        silent_long = now - self.first_failure >= UNRESPONSIVE_S
+        return self._move('down' if reply.down_evidence or silent_long else 'slow', now, self.last_error)
+
+    def _move(self, new: str, now: float, error: str | None) -> list[dict]:
+        old = self.state
+        if new == old:
+            return []
+        record: dict[str, Any] = {'kind': 'ha_status', 'ts': round(now, 3), 'from': old, 'to': new}
+        if error:
+            record['error'] = error
+        if new == 'down' and self.down_since is None and self.seen_up:
+            self.down_since = now
+        if new == 'up' and self.down_since is not None:
+            record['down_s'] = round(now - self.down_since, 1)
+            _record_outage(now - self.down_since)
+            self.down_since = None
+        self.state, self.since = new, now
+        return [record]
 
 
-def report_down() -> None:
-    """A proxied request found HA unreachable: start timing now, probe immediately."""
+_avail = Availability()
+
+
+def observe(reply: Reply) -> None:
+    """Every answer (or silence) of Home Assistant to any request teaches ha-cli how it is doing."""
     with _lock:
-        _note_ha(False)
-    _wake.set()
+        records = _avail.note(reply, time.time())
+    for record in records:
+        JOURNAL.write(record)
+    if not reply.answered:
+        _wake.set()
+
+
+# -- state reads for verification ------------------------------------------------------------------------------------------
+
+def _read_state(entity: str, timeout: float) -> tuple[dict | None, Reply]:
+    reply = ha_call('/api/states/' + urllib.parse.quote(entity, safe=''), timeout=timeout)
+    observe(reply)
+    if reply.status == 200:
+        try:
+            state = json.loads(reply.raw)
+        except ValueError:
+            state = None
+        return (state if isinstance(state, dict) else None), reply
+    return None, reply
+
+
+def read_states(entities: tuple[str, ...], timeout: float) -> tuple[dict[str, dict | None], list[Reply]]:
+    """Fresh states (never the cache: a stale state would verify a command by the past) of the entities, read in parallel."""
+    if not entities:
+        return {}, []
+    if len(entities) == 1:
+        state, reply = _read_state(entities[0], timeout)
+        return {entities[0]: state}, [reply]
+    with ThreadPoolExecutor(max_workers=len(entities)) as pool:
+        got = list(pool.map(lambda entity: _read_state(entity, timeout), entities))
+    return {entity: state for entity, (state, _) in zip(entities, got)}, [reply for _, reply in got]
+
+
+# -- one verified service call ---------------------------------------------------------------------------------------------
+
+class _Call:
+    """Home Assistant's own answer to a service call, awaited in a thread so the device state can be watched meanwhile."""
+
+    def __init__(self, path: str, body: dict | None, action_id: str) -> None:
+        self.path, self.body, self.action_id = path, body, action_id
+        self.reply: Reply | None = None
+        self.done = threading.Event()
+        self.sent = time.monotonic()
+        self._caller_answered = False
+        self._late_journaled = False
+        self._late_lock = threading.Lock()
+        threading.Thread(target=self._run, name='ha-call', daemon=True).start()
+
+    def _run(self) -> None:
+        self.reply = ha_call(self.path, self.body, CALL_TIMEOUT_S)
+        observe(self.reply)
+        self.done.set()
+        self._journal_late()
+
+    def caller_answered(self) -> None:
+        """The caller has its answer while this call is still in flight: how it ends goes to the journal."""
+        with self._late_lock:
+            self._caller_answered = True
+        self._journal_late()
+
+    def _journal_late(self) -> None:
+        with self._late_lock:
+            late = self._caller_answered and self.done.is_set() and not self._late_journaled
+            self._late_journaled = self._late_journaled or late
+        if late:
+            JOURNAL.write({'kind': 'ha_response', 'ts': round(time.time(), 3), 'id': self.action_id, 'call': _call_record(self.reply)})
+
+
+def _call_record(reply: Reply | None) -> dict:
+    if reply is None:
+        return {'pending': True}
+    record: dict[str, Any] = {'ms': reply.ms}
+    if reply.status:
+        record['status'] = reply.status
+    if reply.error:
+        record['error'] = reply.error
+    return record
+
+
+def _ascii(text: str) -> str:
+    return text.encode('ascii', 'replace').decode('ascii')
+
+
+@dataclass
+class Answer:
+    status: int
+    body: bytes
+    headers: dict
+    record: dict
+
+
+def _probe(timeout: float) -> Reply:
+    reply = ha_call('/api/', timeout=timeout)
+    observe(reply)
+    return reply
+
+
+def _check(expect: ha_verify.Expectation, entities: tuple[str, ...], timeout: float
+           ) -> tuple[ha_verify.Verdict, dict[str, dict | None], list[Reply]]:
+    """One look at the device state against the expectation: (verdict, the states read, the replies of the reads)."""
+    if expect.whole_domain:
+        reply = ha_call('/api/template', {'template': ha_verify.whole_domain_template(expect.whole_domain, expect.whole_state or '')}, timeout)
+        observe(reply)
+        verdict = (ha_verify.whole_domain_verdict(reply.raw.decode('utf-8', 'replace')) if reply.status == 200
+                   else ha_verify.Verdict('pending', 'state_unreadable'))
+        return verdict, {}, [reply]
+    states, replies = read_states(entities, timeout)
+    return expect.check(states), states, replies
+
+
+class ServiceCall:
+    """One `POST /api/services/<domain>/<service>`: state before, the call, state checks until the device agrees or the budget ends."""
+
+    def __init__(self, path: str, body: dict | None) -> None:
+        self.path, self.body = path, body
+        self.started = time.monotonic()
+        self.wall = time.time()
+        self.id = secrets.token_hex(4)
+        parts = path.split('/')
+        self.domain, self.service = (parts[3], parts[4]) if len(parts) >= 5 else ('', '')
+        found = ha_verify.targets(body)
+        self.entities: tuple[str, ...] = found[0] if found else ()
+        self.before: dict[str, dict | None] = {}
+        self.expect: ha_verify.Expectation | None = None
+        self.already = False             # the state read before the call was already the expected one
+        self.call: _Call | None = None
+        self.verdict: ha_verify.Verdict | None = None
+        self.states: dict[str, dict | None] = {}
+        self.attempts = 0
+        self.reads_answered = 0
+        self.down_look: Reply | None = None   # the second look that confirmed Home Assistant gone
+        self.rejected = False
+        self.verified_ms: int | None = None
+
+    def _left(self) -> float:
+        return self.started + CALL_BUDGET_S - time.monotonic()
+
+    def run(self) -> Answer:
+        before_replies: list[Reply] = []
+        if self.entities:
+            self.before, before_replies = read_states(self.entities, BEFORE_READ_S)
+            self.reads_answered = sum(1 for reply in before_replies if reply.answered)
+        self.expect = ha_verify.expectation(self.domain, self.service, self.body, self.before) if self.domain else None
+        self.already = bool(self.expect and self.entities and self.expect.check(self.before).result == 'ok')
+        self.call = _Call(self.path, self.body, self.id)
+        self._watch()
+        return self._answer()
+
+    def _watch(self) -> None:
+        call = self.call
+        assert call is not None
+        while self._left() > 0:
+            reply = call.reply
+            if reply is not None and 400 <= reply.status < 500:
+                self.rejected = True             # Home Assistant refused the call itself: nothing was done
+                return
+            if reply is not None and self.expect is None and not reply.down_evidence:
+                return                           # nothing in the state to check: its answer is the answer
+            first = self.attempts == 0 and self.down_look is None
+            pause = DOWN_CONFIRM_S if reply is not None and reply.down_evidence else (POLL_FIRST_S if first else POLL_EVERY_S)
+            if call.done.is_set():
+                time.sleep(max(0.0, min(pause, self._left())))
+            else:
+                call.done.wait(max(0.0, min(pause, self._left())))     # a quick answer is looked at at once
+            reply = call.reply
+            if reply is not None and reply.down_evidence:
+                look = _probe(min(STATE_READ_S, max(0.1, self._left())))
+                if look.down_evidence:
+                    self.down_look = look        # the call found Home Assistant gone and so does this second look
+                    return
+            if self.expect is None:
+                if call.done.is_set():
+                    return                       # Home Assistant answered like a gateway but is there, and there is no state to look at
+                continue
+            verdict, states, replies = _check(self.expect, self.entities, min(STATE_READ_S, max(0.1, self._left())))
+            self.verdict, self.states = verdict, states
+            self.attempts += 1
+            self.reads_answered += sum(1 for r in replies if r.answered)
+            if verdict.result == 'ok':
+                self.verified_ms = int((time.monotonic() - call.sent) * 1000)
+                return
+
+    def _answer(self) -> Answer:
+        call, expect, verdict = self.call, self.expect, self.verdict
+        assert call is not None
+        reply = call.reply
+        since_sent = int((time.monotonic() - call.sent) * 1000)
+        headers: dict[str, str] = {'X-Aisis-Action': self.id}
+        verify: dict[str, Any] = {'result': 'skipped', 'reason': 'not_verifiable'}
+        status, payload, why = 200, b'', 'passed_through'
+
+        if verdict is not None and verdict.result == 'ok':
+            verify = {'result': 'ok', 'reason': 'already_in_state' if self.already else 'state_matched', 'ms': self.verified_ms,
+                      'after': verdict.after}
+            payload = reply.raw if reply is not None and 200 <= reply.status < 300 else json.dumps([s for s in self.states.values() if s]).encode()
+            why = 'verified_state'
+        elif self.rejected and reply is not None:
+            verify = {'result': 'skipped', 'reason': 'rejected'}
+            status, payload, why = reply.status, reply.raw, 'ha_rejected'
+        elif self.down_look is not None:
+            evidence = (reply.error if reply is not None and reply.error else None) or self.down_look.error or f'http_{self.down_look.status}'
+            verify = {'result': 'unknown', 'reason': 'ha_down_observed', 'ms': since_sent}
+            with _lock:
+                _queue.append((self.path, self.body, self.id))
+                position = len(_queue)
+            eta = recovery_eta_s()
+            status = 202
+            payload = json.dumps({'queued': True, 'position': position, 'recovery_eta_s': eta, 'down': evidence}).encode()
+            headers.update({'X-Aisis-Queue': '1', 'X-Aisis-Eta': str(eta), 'X-Aisis-Down': evidence})
+            why = 'queued_ha_down'
+        elif expect is None and reply is not None and reply.status and not reply.down_evidence:
+            status, payload = reply.status, reply.raw    # Home Assistant answered and nothing in the state could say otherwise
+        elif expect is None:
+            reason = 'no_answer_unverifiable' if _probe(0.4).answered else 'ha_no_answer'
+            verify = {'result': 'unknown', 'reason': reason, 'ms': since_sent}
+            status, payload, why = 504, json.dumps({'error': reason, 'verify': verify}).encode(), 'unverified_no_answer'
+        elif verdict is not None and verdict.result == 'failed':
+            verify = {'result': 'failed', 'reason': verdict.reason, 'ms': since_sent, 'after': verdict.after, 'wrong': verdict.wrong}
+            status, payload, why = 502, json.dumps({'error': verdict.reason, 'verify': verify}).encode(), 'state_not_as_expected'
+        else:
+            reason = 'ha_no_answer' if self.reads_answered == 0 else 'state_unreadable'
+            verify = {'result': 'unknown', 'reason': reason, 'ms': since_sent}
+            status, payload, why = 504, json.dumps({'error': reason, 'verify': verify}).encode(), 'unverified_no_answer'
+
+        verify['attempts'] = self.attempts
+        headers['X-Aisis-Verify'] = verify['result']
+        headers['X-Aisis-Verify-Reason'] = verify['reason']
+        if verify.get('ms') is not None:
+            headers['X-Aisis-Verify-Ms'] = str(verify['ms'])
+        headers['X-Aisis-Verify-Attempts'] = str(self.attempts)
+        if verify.get('after'):
+            headers['X-Aisis-Verified-State'] = _ascii(','.join(f'{k}={v}' for k, v in list(verify['after'].items())[:5]))[:240]
+        headers['X-Aisis-Ha-Status'] = reply.what if reply is not None else 'pending'
+
+        record: dict[str, Any] = {
+            'kind': 'action', 'ts': round(self.wall, 3), 'id': self.id, 'service': f'{self.domain}.{self.service}',
+            'entities': [f'{expect.whole_domain}.*'] if expect is not None and expect.whole_domain else list(self.entities),
+            'data': self.body if isinstance(self.body, dict) else {}, 'expect': expect.want if expect is not None else None,
+            'before': {k: ha_verify.state_text(v) for k, v in self.before.items()}, 'call': _call_record(reply),
+            'verify': verify, 'reply': {'status': status, 'why': why}, 'ms': int((time.monotonic() - self.started) * 1000)}
+        JOURNAL.write(record)
+        if reply is None:
+            call.caller_answered()
+        return Answer(status, payload, headers, record)
+
+
+def service_call(path: str, body: dict | None) -> Answer:
+    return ServiceCall(path, body).run()
+
+
+# -- the background probe, the queue replay --------------------------------------------------------------------------------
+
+def probe_once() -> None:
+    """One look at Home Assistant: refresh the state cache, learn its availability, and send what waited for it."""
+    reply = ha_call('/api/states')
+    cache = {}
+    if reply.status == 200:
+        try:
+            states = json.loads(reply.raw)
+        except Exception:
+            states = None
+        if isinstance(states, list):
+            cache['states'] = states
+            # Areas template needed by the container registry builder.
+            template = ha_call('/api/template', {'template': AREA_TEMPLATE})
+            if template.status == 200:
+                cache['areas'] = template.raw.decode('utf-8', 'replace')
+            cache['saved_at'] = time.time()
+            tmp = CACHE_FILE.with_suffix('.json.tmp')
+            tmp.write_text(json.dumps(cache, ensure_ascii=False))
+            tmp.replace(CACHE_FILE)
+    observe(reply)
+    pending: list[tuple[str, dict | None, str]] = []
+    with _lock:
+        if reply.answered and _queue:
+            pending, _queue[:] = _queue[:], []
+    for path, body, action_id in pending:
+        _replay(path, body, action_id)
+
+
+def _replay(path: str, body: dict | None, action_id: str) -> None:
+    """A call that waited for Home Assistant's return: sent, then checked against the state like any other."""
+    sent = ha_call(path, body, HA_TIMEOUT_S)
+    observe(sent)
+    parts = path.split('/')
+    found = ha_verify.targets(body)
+    entities = found[0] if found else ()
+    expect = ha_verify.expectation(parts[3], parts[4], body) if len(parts) >= 5 else None
+    record: dict[str, Any] = {'kind': 'replay', 'ts': round(time.time(), 3), 'id': action_id,
+                              'service': '.'.join(parts[3:5]), 'entities': list(entities), 'call': _call_record(sent)}
+    if expect is not None and sent.answered:
+        deadline = time.monotonic() + 2.0
+        verdict = _check(expect, entities, STATE_READ_S)[0]
+        while verdict.result != 'ok' and time.monotonic() < deadline:
+            time.sleep(POLL_EVERY_S)
+            verdict = _check(expect, entities, STATE_READ_S)[0]
+        record['verify'] = {'result': verdict.result, 'reason': verdict.reason, 'after': verdict.after}
+    JOURNAL.write(record)
 
 
 def refresh_loop() -> None:
     while True:
-        status, raw, _ = ha_request('/api/states')
-        cache = {}
-        if status == 200:
-            try:
-                states = json.loads(raw)
-            except Exception:
-                states = None
-            if isinstance(states, list):
-                cache['states'] = states
-                # Areas template needed by the container registry builder.
-                tstatus, traw, _ = ha_request('/api/template', {'template': AREA_TEMPLATE})
-                if tstatus == 200:
-                    cache['areas'] = traw.decode('utf-8', 'replace')
-                cache['saved_at'] = time.time()
-                tmp = CACHE_FILE.with_suffix('.json.tmp')
-                tmp.write_text(json.dumps(cache, ensure_ascii=False))
-                tmp.replace(CACHE_FILE)
-        pending: list[tuple[str, dict | None]] = []
-        with _lock:
-            _note_ha(status == 200)
-            if status == 200 and _queue:
-                pending, _queue[:] = _queue[:], []
-        for p, b in pending:
-            ha_request(p, b)
-        _wake.wait(REFRESH_S if _ha_up else DOWN_POLL_S)
+        probe_once()
+        _wake.wait(REFRESH_S if _avail.state == 'up' else DOWN_POLL_S)
         _wake.clear()
 
 
@@ -222,13 +606,19 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _unreachable(self, reply: Reply):
+        """Home Assistant gave no answer to a proxied request: 503 when it is observed gone, 504 when it merely did not answer."""
+        self._send(503 if reply.down_evidence else 504, json.dumps({'error': reply.error or f'http_{reply.status}'}).encode())
+
     def do_GET(self):
         path = self.path.split('?')[0]
         if path == '/health':
             with _lock:
                 body = json.dumps({
-                    'ha_up': _ha_up,
-                    'cache_age_s': None if not _ha_up else round(time.time() - _last_ok),
+                    'ha_up': _avail.up,
+                    'status': _avail.state,
+                    'last_error': _avail.last_error,
+                    'cache_age_s': None if not _avail.up else round(time.time() - _avail.last_ok),
                     'cached_states': len(read_cache().get('states', [])),
                     'queued': len(_queue),
                     'recovery_eta_s': recovery_eta_s(),
@@ -237,13 +627,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, body)
             return
         if path == '/api/states' or path.startswith('/api/states/'):
-            status, raw, _ = ha_request(path, timeout=CLIENT_TIMEOUT_S)
-            if status == 200:
-                self._send(200, raw, {'X-Aisis-Cache': 'live'})
+            reply = ha_call(path, timeout=CLIENT_TIMEOUT_S)
+            observe(reply)
+            if reply.status == 200:
+                self._send(200, reply.raw, {'X-Aisis-Cache': 'live'})
                 return
-            if status == 0:
-                report_down()
-            # HA down: serve cache.
+            # HA down or silent: serve cache (the header says it is stale).
             cache = read_cache()
             states = cache.get('states', [])
             if path == '/api/states':
@@ -257,11 +646,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b'{"error": "not in cache"}', {'X-Aisis-Cache': 'stale'})
             return
         # Other GETs: straight proxy.
-        status, raw, headers = ha_request(path, timeout=CLIENT_TIMEOUT_S)
-        if status:
-            self._send(status, raw)
+        reply = ha_call(path, timeout=CLIENT_TIMEOUT_S)
+        observe(reply)
+        if reply.status:
+            self._send(reply.status, reply.raw)
         else:
-            self._send(503, b'{"error": "ha down"}')
+            self._unreachable(reply)
 
     def do_POST(self):
         path = self.path.split('?')[0]
@@ -272,9 +662,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             body = None
         if path == '/api/template':
-            status, raw, _ = ha_request(path, body, CLIENT_TIMEOUT_S)
-            if status == 200:
-                self._send(200, raw, {'X-Aisis-Cache': 'live'})
+            reply = ha_call(path, body, CLIENT_TIMEOUT_S)
+            observe(reply)
+            if reply.status == 200:
+                self._send(200, reply.raw, {'X-Aisis-Cache': 'live'})
                 return
             cache = read_cache()
             if cache.get('areas') is not None:
@@ -283,27 +674,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(503, b'{"error": "ha down, no cache"}')
             return
         if path.startswith('/api/services/'):
-            status, raw, _ = ha_request(path + query, body, CLIENT_TIMEOUT_S)
-            if status:
-                self._send(status, raw)
+            if 'return_response' in urllib.parse.parse_qs(query.lstrip('?'), keep_blank_values=True):
+                # The caller waits for data: nothing to verify, and queueing it would only hide the outage.
+                reply = ha_call(path + query, body, CLIENT_TIMEOUT_S)
+                observe(reply)
+                if reply.status:
+                    self._send(reply.status, reply.raw)
+                else:
+                    self._unreachable(reply)
                 return
-            report_down()
-            if 'return_response' in urllib.parse.parse_qs(query.lstrip('?'), keep_blank_values=True):  # the caller waits for the answer: queueing it would only hide the outage
-                self._send(503, b'{"error": "ha down"}')
-                return
-            with _lock:
-                _queue.append((path, body))
-                queued = len(_queue)
-            eta = recovery_eta_s()
-            self._send(202, json.dumps({
-                'queued': True, 'position': queued, 'recovery_eta_s': eta,
-            }).encode(), {'X-Aisis-Queue': '1', 'X-Aisis-Eta': str(eta)})
+            answer = service_call(path, body)
+            self._send(answer.status, answer.body, answer.headers)
             return
-        status, raw, _ = ha_request(path + query, body, CLIENT_TIMEOUT_S)
-        if status:
-            self._send(status, raw)
+        reply = ha_call(path + query, body, CLIENT_TIMEOUT_S)
+        observe(reply)
+        if reply.status:
+            self._send(reply.status, reply.raw)
         else:
-            self._send(503, b'{"error": "ha down"}')
+            self._unreachable(reply)
 
 
 def main() -> int:

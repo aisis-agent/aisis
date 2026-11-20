@@ -339,9 +339,10 @@ unit_restore_files() {
   done
 }
 
-# unit NAME [FILE]: install adapter and its cache module together; restore both on failure.
+# unit NAME [FILE]: install adapter and its cache module together (ha-cli and the modules it imports); restore all on failure.
 cmd_unit() {
-  local name=${1:?unit name} newfile=${2:-} file unit url cache_source="" backup_dir cache_needed
+  local name=${1:?unit name} newfile=${2:-} file unit url cache_source="" backup_dir cache_needed companion companion_source
+  local -a companion_sources=()
   case $name in
     adapter) file=adapter.py unit=aisis-station-adapter.service url=http://127.0.0.1:31117/healthz ;;
     stt)     file=stt_wyoming.py unit=aisis-station-stt.service url=http://127.0.0.1:31121/healthz ;;
@@ -360,6 +361,15 @@ cmd_unit() {
         python3 -m py_compile "$cache_source" || die "announcement_cache.py does not compile"
         files+=(announcement_cache.py)
       fi
+    fi
+    if [[ $name == ha-cli ]]; then
+      for companion in ha_verify.py ha_action_log.py; do
+        companion_source=$(dirname -- "$newfile")/$companion
+        [[ -f $companion_source ]] || die "$companion must accompany the new hacli.py"
+        python3 -m py_compile "$companion_source" || die "$companion does not compile"
+        files+=("$companion")
+        companion_sources+=("$companion_source")
+      done
     fi
   fi
   maintenance_on
@@ -390,6 +400,13 @@ cmd_unit() {
       || die "restore failed; recover manually from $backup_dir"
     die "cache module installation failed; previous files restored"
   fi
+  for companion_source in "${companion_sources[@]}"; do
+    if ! unit_install_file "$companion_source" "$(basename -- "$companion_source")"; then
+      unit_restore_files "$backup_dir" "${files[@]}" \
+        || die "restore failed; recover manually from $backup_dir"
+      die "companion module installation failed; previous files restored"
+    fi
+  done
   if [[ -n $newfile ]] && ! unit_install_file "$newfile" "${files[0]}"; then
     unit_restore_files "$backup_dir" "${files[@]}" \
       || die "restore failed; recover manually from $backup_dir"
