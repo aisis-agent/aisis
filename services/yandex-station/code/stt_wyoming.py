@@ -80,6 +80,51 @@ RECOGNIZER_BROKEN = (RuntimeError, ValueError, KeyError, AttributeError, TypeErr
                      ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
 
 
+class NoVerdict(RuntimeError):
+    """The recognizer refused on purpose, with a code that says nothing about its health: `gpu-lent` (its GPU copy is lent to another
+    program, Orca's preview) or `model-unloaded` (idle-unloaded, and a probe never reloads it). A RuntimeError so live callers see
+    what they always saw; /healthz/asr tells it apart before it reads as broken."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+NO_VERDICT_CODES = {"gpu-lent": "gpu-lent", "model-unloaded": "unloaded"}
+
+
+WHISPER_CTL_STATES_WITHOUT_VERDICT = ("unloaded", "pinned")   # idle-unloaded or lent: probing would reload the model or only be refused
+PROBE_CONTEXT = {"aisis_probe": True}   # the wrapper does not count a request with this context as activity (idle unload)
+CTL_TIMEOUT_S = 2.0
+
+
+async def whisper_ctl_status(env):
+    """`status` of the offload control socket named by AISIS_WHISPER_CTL_SOCKET, or None when none is configured, the socket is
+    missing, or it does not answer (then the probe runs as it always did). The socket is used ONLY when configured: the operator
+    declares it belongs to the recognizer at AISIS_WYOMING_URI (aisis-station-stt.service does for the local whisper); a guessed
+    default could hide a broken recognizer behind an unrelated daemon's `unloaded`."""
+    path = env.get("AISIS_WHISPER_CTL_SOCKET")
+    if not path or not os.path.exists(path):
+        return None
+    async def exchange():
+        reader, writer = await asyncio.open_unix_connection(path)
+        try:
+            writer.write(b'{"op":"status"}\n')
+            await writer.drain()
+            reply = json.loads(await reader.readline())
+        finally:
+            writer.close()
+        return reply
+    try:
+        reply = await asyncio.wait_for(exchange(), CTL_TIMEOUT_S)
+    except (OSError, ValueError, asyncio.TimeoutError):
+        return None
+    if not (isinstance(reply, dict) and reply.get("ok") is True and isinstance(reply.get("state"), str)
+            and isinstance(reply.get("leases", []), list)):
+        return None    # a reply of the wrong shape is no status at all: the probe runs as it always did
+    return reply
+
+
 def _fold(text):
     folded = re.sub(r"[^a-zа-я0-9 ]+", " ", text.lower().replace("ё", "е"))
     return re.sub(r"\s+", " ", folded).strip()
@@ -147,6 +192,8 @@ async def transcribe(uri, pcm, sample_rate, language="ru", timeout=30, profile=N
             for _ in range(100):
                 kind, data = await read_event(reader)
                 if kind == "error":
+                    if data.get("code") in NO_VERDICT_CODES:
+                        raise NoVerdict(NO_VERDICT_CODES[data["code"]])
                     raise RuntimeError("wyoming_asr_error")
                 if kind == "transcript":
                     text = data.get("text")
@@ -615,13 +662,19 @@ class STTGateway:
         504 for a timeout or a refused or unreachable address (slow, contended, starting, or gone: systemd restarts a dead
         process), 202 while live utterances hold a slot (the probe waits for none, and leaves one slot open while it runs; the
         recognizer itself may still serialize a live utterance behind its half second of silence),
-        501 when no usable recognizer address is configured. The probe sends the language and profile of live traffic."""
+        501 when no usable recognizer address is configured. 202 also when the recognizer is idle-unloaded or its GPU is lent
+        (its offload control socket says so, or it answers a `gpu-lent` error): the probe would only reload the model. The probe sends the language and profile of live traffic."""
         uri = self.env.get("AISIS_WYOMING_URI")
         try:
             wyoming_address(uri or "")
         except ValueError:
             return web.json_response({"error": "bad_uri" if uri else "not_configured"}, status=501)
         language, extras = self.env.get("AISIS_STT_LANGUAGE", "ru"), self.recognizer_extras()
+        extras["context"] = {**(extras.get("context") or {}), **PROBE_CONTEXT}
+        status = await whisper_ctl_status(self.env)
+        if status and status.get("state") in WHISPER_CTL_STATES_WITHOUT_VERDICT:
+            return web.json_response({"skipped": status["state"], "idle_s": status.get("idle_s"), "leases": len(status.get("leases") or [])},
+                                     status=202)
         taken = 0
         while taken < self.SLOTS and not self.slots.locked():   # free slots are taken without yielding: no waiting, no queue jumping
             await self.slots.acquire()
@@ -636,6 +689,8 @@ class STTGateway:
         try:
             await asyncio.wait_for(self.recognizer(uri, bytes(PROBE_PCM_BYTES), PROBE_RATE, language, timeout=PROBE_TIMEOUT_S, **extras),
                                    PROBE_TIMEOUT_S + 1)
+        except NoVerdict as refused:   # lent or unloaded on purpose: a restart cannot fix it and would drop other work
+            return web.json_response({"skipped": refused.reason}, status=202)
         except RECOGNIZER_BROKEN as exc:  # the class name is the diagnosis, never the text
             LOG.warning("asr_probe_broken class=%s", type(exc).__name__)
             return web.json_response({"error": type(exc).__name__}, status=503)
