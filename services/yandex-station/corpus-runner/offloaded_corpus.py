@@ -57,8 +57,8 @@ ADAPTER_FILES = {
     "intent_grammar/pattern.py": "6cb6f4644590a9cfe8e4dabeba8756fca5a95981e965130371e44dcacf9dea81",
     "intent_grammar/numerals.py": "c1f292178318a2ee8e3d0fbb454c89d8280f43929c52fc0d98017442f87e1e9c",
     "intent_grammar/timewords.py": "008f82b0cd9641a6be127e8aa4d457775cfa6080a29b4657d6f92e90fa5e1d7b",
-    "intent_grammar/grammar/ru.json": "775c2b9f2f531ab841649dffd9b8db0443814d2fdc6410311ed38cf5d4941615",
-    "intent_grammar/grammar/ru.yaml": "e1bf866ab1d1165bb076501f21cb3b56bdabdb2c98f38dc78425a0e13ea12b35",
+    "intent_grammar/grammar/ru.json": "15ea884239f0ecd62858a1b2e569ba476ef25a6cb093c44a659cf513131986f7",
+    "intent_grammar/grammar/ru.yaml": "abb2e1a3f98b849b239e46dbb875e1741f4ac583dc37775b3df399b9973c7e4b",
 }
 SOURCE_PATHS = {
     "/src/backend/ha-intents.ts", "/src/backend/turn-memory.ts",
