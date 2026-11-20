@@ -276,9 +276,9 @@ class UnitInstallTargetTests(unittest.TestCase):
         self.env.pop("AISIS_CODE_DIR")
         self.env["HOME"] = str(home)
 
-    def exec_start(self, folder):
+    def exec_start(self, folder, entry="adapter.py"):
         python = self.folder / "home dir/.local/share/aisis/venv/bin/python"
-        self.env["TEST_EXEC_START"] = (f"{{ path={python} ; argv[]={python} {folder}/adapter.py ; "
+        self.env["TEST_EXEC_START"] = (f"{{ path={python} ; argv[]={python} {folder}/{entry} ; "
                                        "ignore_errors=no ; start_time=[n/a] ; status=0/0 }")
 
     def install(self, unit, name):
@@ -333,8 +333,15 @@ class UnitInstallTargetTests(unittest.TestCase):
         for folder in (self.primary, self.deploy_main):
             self.assertEqual((folder / "adapter.py").read_text(), self.old)
 
-    def test_stt_and_ha_cli_install_into_primary_checkout(self):
-        for unit, name in (("stt", "stt_wyoming.py"), ("ha-cli", "hacli.py")):
+    def test_stt_installs_into_the_worktree_its_unit_runs_from(self):
+        self.exec_start(self.deploy_main, "stt_wyoming.py")
+        result = self.install("stt", "stt_wyoming.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.deploy_main / "stt_wyoming.py").read_text(), "VERSION = 'new'\n")
+        self.assertEqual((self.primary / "stt_wyoming.py").read_text(), self.old)
+
+    def test_ha_cli_installs_into_primary_checkout(self):
+        for unit, name in (("ha-cli", "hacli.py"),):
             result = self.install(unit, name)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((self.primary / name).read_text(), "VERSION = 'new'\n", unit)

@@ -375,9 +375,9 @@ cmd_unit() {
   maintenance_on
   # Resolved only while the maintenance lock is held (the installer takes the same lock around drop-in install + daemon-reload),
   # so the unit cannot migrate between this lookup and the restart. Without an explicit AISIS_CODE_DIR the adapter's files go where
-  # systemd actually runs it (its effective ExecStart: primary checkout or the deploy-main worktree), never where a directory
+  # systemd actually runs it (adapter or stt; its effective ExecStart: primary checkout or the deploy-main worktree), never where a directory
   # merely exists: a restart must run the code just installed.
-  if [[ $name == adapter && -z $code_dir_overridden ]]; then
+  if [[ ( $name == adapter || $name == stt ) && -z $code_dir_overridden ]]; then
     local exec_start exec_path argv adapter_path
     exec_start=$(systemctl --user show -p ExecStart --value "$unit") || die "cannot read ExecStart of $unit"
     # systemd prints `{ path=P ; argv[]=P ARG... ; ignore_errors=... }` with no quoting: split on the field separators, not on
@@ -386,8 +386,8 @@ cmd_unit() {
     argv=${exec_start#*argv\[\]=}; argv=${argv%% ; ignore_errors=*}
     [[ -n $exec_path && $argv == "$exec_path "* ]] || die "cannot parse the effective ExecStart of $unit; refusing to guess the install target"
     adapter_path=${argv#"$exec_path "}
-    [[ $adapter_path == /*/adapter.py ]] || die "$unit has no lone /…/adapter.py argument in its effective ExecStart; refusing to guess the install target"
-    app_dir=${adapter_path%/adapter.py}
+    [[ $adapter_path == /*/$file ]] || die "$unit has no lone /…/$file argument in its effective ExecStart; refusing to guess the install target"
+    app_dir=${adapter_path%/"$file"}
   fi
   [[ -f $app_dir/$file ]] || die "installed file missing: $file"
   mkdir -p "$state_dir/unit-backups"
