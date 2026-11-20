@@ -126,9 +126,10 @@ class FakeHa:
             ids = AREA_ENTITIES.get(area, [])
             return HaReply(200, json.dumps(ids) if self.template_as_text else ids)
         self.services.append((path, body))
-        if self.service_status == 200 and self.apply and path.startswith("/api/services/climate/"):
+        reply = self.service_reply or HaReply(self.service_status)
+        if reply.status == 200 and self.apply and path.startswith("/api/services/climate/"):
             self._apply(path, body)
-        return self.service_reply or HaReply(self.service_status)
+        return reply
 
 
 class LivingRoomActions(HaActions):
@@ -385,7 +386,7 @@ class AirConditionerOff(Base):
         self.assertEqual(await self.say({"mode": "heat"}, unreadable=True), ha_actions.REPLY_UNVERIFIED)
 
     async def test_a_queued_command_is_not_verified(self):
-        reply = await self.say({"mode": "heat"}, service_status=202)
+        reply = await self.say({"mode": "heat"}, service_reply=HaReply(202, down="refused"))
         self.assertEqual(reply, ha_actions.REPLY_QUEUED)
         self.assertEqual(self.ha.entity_gets, 1, "only the read before the command")
 
@@ -395,7 +396,7 @@ class AirConditionerOff(Base):
 
     async def test_consecutive_deltas_queued_during_an_outage_add_up(self):
         """hacli serves its old cached setpoint while Home Assistant is down: the fresh read must not undo the queued 25 before the next «теплее»."""
-        a = self.make(service_status=202, stale=True)
+        a = self.make(service_reply=HaReply(202, down="refused"), stale=True)
         for _ in range(2):
             self.assertEqual(await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None}), ha_actions.REPLY_QUEUED)
         self.assertEqual([body["temperature"] for path, body in self.ha.services if path.endswith("set_temperature")], [25, 26])
@@ -424,10 +425,10 @@ class AirConditionerOff(Base):
 
     async def test_a_setpoint_set_after_the_outage_is_not_overwritten_by_the_queued_one(self):
         """Queued 25 during an outage, Home Assistant recovers, someone sets 22: «теплее» reads the live 22."""
-        a = self.make(service_status=202, stale=True)
+        a = self.make(service_reply=HaReply(202, down="refused"), stale=True)
         await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None})
         self.ha.services.clear()
-        self.ha.stale, self.ha.service_status = False, 200
+        self.ha.stale, self.ha.service_status, self.ha.service_reply = False, 200, None
         self.ha.states[0]["attributes"]["temperature"] = 22
         await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None})
         self.assertEqual([body["temperature"] for path, body in self.ha.services if path.endswith("set_temperature")], [23])
