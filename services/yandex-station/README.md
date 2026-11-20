@@ -202,6 +202,19 @@ the ones at `aisis-pre-weather-20261117`.
   (and the probe's `context.aisis_probe` is not activity, and a probe never reloads the model), so aisis-failover never restarts a whisper that was unloaded on purpose.
   The gateway reads the socket only when `AISIS_WHISPER_CTL_SOCKET` is set (the `aisis-station-stt.service` unit sets it for the local whisper).
   `status` reports `last_offload_s`, `last_restore_s`, `last_first_answer_s`.
+- **Chime guard**: the station's own activation chime leaks into its microphone as a 0.2-0.5 s tone near 313 Hz (ticket #158),
+  which the VAD calls speech and recognisers answer with words («Громкость.», a subtitle caption, GigaAM's «да»). `tone_guard.py`
+  drops a cut whose audible part (frames above -30 dB of its loudest, so a quiet request after the chime counts) is at most
+  0.6 s long (plus the VAD's hangover in the cheap pre-check), whose two strongest 40 Hz-wide spectral peaks hold at least 90 % of the
+  energy below 1.9 kHz (spoken words: at most 0.59 on synthetic Piper commands) and in whose every audible window (100 ms) those same two
+  peaks hold at least 75 % (stdlib only, ~10 ms): gate reason `tone`, clip
+  `status='gate'`. A request run into the chime is longer or has a spread spectrum, so it is not dropped. Like `wake_window.py`
+  it is a sibling module of the gateway: the unit runs from the checkout, so both ship together.
+  `AISIS_STT_TONE_GUARD` (in `~/.config/aisis/runtime.env`) picks the mode: `shadow` (the default) only logs
+  `stt_tone_shadow would_drop ...` per cut and drops nothing; `1` / `enforce` drops; `0` switches it off. Known risk: a one-word
+  request that is nearly a pure tone would be dropped, so run `shadow` for a while first: each would-drop line is followed by the
+  recogniser's `stt_final text=...` for the same cut, which tells a chime caption from a real word (count: `journalctl --user -u aisis-station-stt | grep -c stt_tone_shadow`).
+  Python-only: restart `aisis-station-stt`.
 - **Whisper prompt**: `aisis-whisper-prompt.timer` regenerates the recognizer's
   initial prompt every 6 h (code/refresh-whisper-prompt.sh -> `voice_vocab.py prompt`).
   It is home vocabulary only (fixed example commands, HA room and device names, library
