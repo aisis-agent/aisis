@@ -319,6 +319,12 @@ def outcome_text(outcome: str) -> str:
     return f"выбрано «{outcome[len('chose:'):]}»" if outcome.startswith("chose:") else word(OUTCOMES, outcome)
 
 
+def dialog_is_open(outcome: Any) -> bool:
+    """No outcome yet, or a denial that turned the dialog into a repeat request. Any other outcome ended it, and the state it keeps
+    (the one it last had) says nothing."""
+    return not (isinstance(outcome, str) and outcome) or outcome == "denied"
+
+
 def dialog_line(dialog: dict, shadow: bool = False) -> str:
     """The question, the owner's answer and how it ended, or that the question is still open. A shadow question was only decided, never asked."""
     ask, answer, outcome, state = (dialog.get(k) for k in ("ask", "answer", "outcome", "state"))
@@ -330,8 +336,8 @@ def dialog_line(dialog: dict, shadow: bool = False) -> str:
     if isinstance(answer, str) and answer:
         line += f" → «{answer}»"
     if isinstance(outcome, str) and outcome:
-        line += ": " + outcome_text(outcome)      # the state of a finished dialog is the one it last had, not worth showing
-    elif isinstance(state, str):
+        line += ": " + outcome_text(outcome)
+    if isinstance(state, str) and state and dialog_is_open(outcome):
         line += " · " + word(DIALOG_STATES, state)
     return line
 
@@ -378,8 +384,10 @@ def engine_label(engine: Any) -> str:
 def _traces_list_alternatives(traces: list[dict], primary: Any) -> bool:
     """A trace's correction lists the alternatives of THIS clip when it heard the clip's own primary reading; the correction a reply trace
     inherits from the question describes another clip."""
-    return isinstance(primary, str) and bool(primary) and any(
-        mapping(t.get("correction")).get("heard") == primary and mappings(mapping(t.get("correction")).get("nbest"))
+    wanted = norm(primary) if isinstance(primary, str) else ""
+    return bool(wanted) and any(
+        isinstance(heard := mapping(t.get("correction")).get("heard"), str) and norm(heard) == wanted
+        and mappings(mapping(t.get("correction")).get("nbest"))
         for t in traces if isinstance(t, dict))
 
 

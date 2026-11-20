@@ -71,6 +71,11 @@ class CorrectionLines(unittest.TestCase):
         self.assertIn("принято", got)
         self.assertNotIn("ждём", got)
 
+    def test_a_denied_answer_is_still_waiting_for_the_repeat(self):
+        denied = dict(CORRECTION, dialog={"state": "awaiting_repeat", "ask": "Повторите, пожалуйста.", "answer": "нет",
+                                          "outcome": "denied", "retries": 1})
+        self.assertIn((1, "❓ «Повторите, пожалуйста.» → «нет»: отклонено · ждём повтор фразы"), self.lines(denied))
+
     def test_a_shadow_question_is_labelled_as_never_asked(self):
         shadow = dict(CORRECTION, shadow=True, dialog={"state": "awaiting_confirm", "ask": "Вы имели в виду «выключи свет»?",
                                                        "answer": None, "outcome": None, "retries": 0})
@@ -124,6 +129,8 @@ class EvidenceLines(unittest.TestCase):
     def test_the_reply_clip_keeps_its_own_evidence_when_the_trace_alternatives_belong_to_the_question(self):
         question_trace = {"correction": dict(CORRECTION, heard="включи свет")}      # a reply trace inherits the question's record
         self.assertTrue(trace_view.evidence_lines(dict(EVIDENCE, primary_text="да"), [question_trace]))
+        stored = dict(EVIDENCE, primary_text="Включи свет.")      # the gateway keeps the primary as it said it, the hook's `heard` is normalised
+        self.assertEqual(trace_view.evidence_lines(stored, [{"correction": CORRECTION}]), [])
 
     def test_the_trace_correction_already_carries_the_alternatives_so_they_are_not_repeated(self):
         self.assertEqual(trace_view.evidence_lines(EVIDENCE, [{"correction": CORRECTION}]), [])
@@ -317,6 +324,13 @@ class SessionPage(unittest.TestCase):
         page = self.render([], EVIDENCE)
         self.assertIn("140 мс", page)
         self.assertNotIn("120 мс", page)
+
+    def test_a_denied_answer_still_waits_for_the_repeat_on_the_page(self):
+        denied = dict(CORRECTION, dialog={"state": "awaiting_repeat", "ask": "Повторите, пожалуйста.", "answer": "нет",
+                                          "outcome": "denied", "retries": 1})
+        page = self.render([dict(SPOTTER_TRACE, id=1, ts=OWNER_CLIP["ts"] + 1, correction=denied)], None)
+        self.assertIn("итог диалога: отклонено", page)
+        self.assertIn("состояние: ждём повтор фразы", page)
 
 
 if __name__ == "__main__":

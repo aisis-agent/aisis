@@ -260,8 +260,8 @@ def _dialog_steps(dialog: dict, shadow: bool) -> list[tuple[str, Any]]:
     steps = [(label, value) for label, value in (("вопрос", ask), ("ответ", answer)) if isinstance(value, str) and value]
     outcome, state = dialog.get("outcome"), dialog.get("state")
     if isinstance(outcome, str) and outcome:
-        steps.append(("итог диалога", trace_view.outcome_text(outcome)))      # a finished dialog keeps its last state: not shown beside the outcome
-    elif isinstance(state, str) and state:
+        steps.append(("итог диалога", trace_view.outcome_text(outcome)))
+    if isinstance(state, str) and state and trace_view.dialog_is_open(outcome):
         steps.append(("состояние", trace_view.word(trace_view.DIALOG_STATES, state)))
     if isinstance(dialog.get("retries"), int) and dialog["retries"]:
         steps.append(("повторов вопроса", str(dialog["retries"])))
