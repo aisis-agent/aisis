@@ -1,0 +1,41 @@
+flowchart TD
+  H["<b>Text of the request</b><br/>(the speaker's own recognition, or Whisper via the STT gateway)"]
+  Q0{{"<b>1. Quasar pre-checks</b> (TypeScript, in the container)<br/>stop words («спасибо», «хватит», «пока»), «repeat», answer to a pending question, «and in the kitchen?»"}}
+  HK{{"<b>2. Grammar hook</b>: POST adapter /intent/decide<br/>pre-phase intents only, 250 ms, fails open"}}
+  AG["<b>handled by the ADAPTER: hook answer</b> (pre-phase grammar)<br/>wake, greeting, emergency refusal, clock, date, timers, alarms,<br/>reminders; «louder on two»: decided here, executed by quasar"]
+  QT{{"<b>3. Quasar fast-intent tiers</b><br/>arithmetic, TV app, media keys, Home Assistant catalog<br/>(execute, confirm, clarify, answer, query, reprompt), «play artist»"}}
+  QA["<b>handled by QUASAR</b><br/>lights, climate, volume, media keys, TV,<br/>«play artist» (calls the adapter for the music search)"]
+  PR["<b>4. Adapter turn: WebSocket /processor</b><br/>the quasar layer returned nothing"]
+  GR{{"<b>4a. Adapter route</b>: grammar (priority 0 and up: AC setpoint, light colour),<br/>then arithmetic, then weather (skill.weather via weather-cli)"}}
+  SK{{"<b>4b. Catch-alls</b> (garbled-phrase reprompt), then skills.answer<br/>(«play music» without a name)"}}
+  AT["<b>handled by the ADAPTER: turn answer</b><br/>grammar, arithmetic, weather skill, catch-all reprompt, music skill"]
+  JV["<b>4c. Jev</b> (off by default): advice, only logged"]
+  BR["<b>5. Brain</b><br/>claude_primary router: Claude API, ChatGPT web last"]
+  OUT["<b>Reply text</b> goes to quasar, quasar asks adapter /v1/audio/speech for audio,<br/>then sends Ogg Opus and directives to the speaker<br/>(device commands: an earcon, no speech)"]
+
+  H --> Q0
+  Q0 -- "answers" --> QA
+  Q0 -- "nothing" --> HK
+  HK -- "route reply / silent / volume / dialog_end" --> AG
+  HK -- "route none, timeout or error" --> QT
+  QT -- "answers" --> QA
+  QT -- "no match" --> PR
+  PR --> GR
+  GR -- "answers" --> AT
+  GR -- "abstains" --> SK
+  SK -- "answers" --> AT
+  SK -- "no skill" --> JV
+  JV --> BR
+  AG --> OUT
+  AT --> OUT
+  QA --> OUT
+  BR --> OUT
+
+  classDef quasar fill:#ffe0b2,stroke:#e65100,color:#1b1b1b,stroke-width:2px
+  classDef adapter fill:#c8e6c9,stroke:#2e7d32,color:#1b1b1b,stroke-width:2px
+  classDef brain fill:#e1bee7,stroke:#6a1b9a,color:#1b1b1b,stroke-width:2px
+  classDef neutral fill:#e0e0e0,stroke:#616161,color:#1b1b1b,stroke-width:2px
+  class Q0,QT,QA quasar
+  class HK,AG,AT,PR,GR,SK,JV adapter
+  class BR brain
+  class H,OUT neutral

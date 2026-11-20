@@ -1,5 +1,7 @@
 # Local Voice Speaker Surface
 
+> The speaker that runs today is the rooted Yandex Station with the stack in `services/yandex-station/`, not the `vad-cli` / `openclaw-speaker` design below. See [`docs/architecture/voice-stack-layers.md`](../architecture/voice-stack-layers.md).
+
 ## Goal
 
 Provide a self-hosted smart speaker as an AISIS surface: an alternative to Alice for the home, with our own wake word, voice activity detection and speech recognition running on the home server, and the same identity, conversations, tools and jobs as every other surface.
