@@ -145,7 +145,8 @@ def lift(wave: "np.ndarray", voiced_ms: int | None) -> "np.ndarray":
     if os.environ.get("AISIS_ASR_BENCH_LIFT", "1") == "0":
         return wave
     import numpy as np
-    from stt_wyoming import FRAME_MS, Tuning, lift_for_recognizer
+    import types
+    from stt_wyoming import FRAME_MS, STTGateway, Tuning, lift_for_recognizer
     pcm = (wave * 32768).clip(-32768, 32767).astype("<i2")
     frame = RATE * FRAME_MS // 1000
     count = len(pcm) // frame
@@ -154,7 +155,7 @@ def lift(wave: "np.ndarray", voiced_ms: int | None) -> "np.ndarray":
     energy = (pcm[:count * frame].astype("float64").reshape(count, frame) ** 2).mean(axis=1)
     top = max(1, min(count, (voiced_ms or 0) // FRAME_MS or count // 3))
     voiced_rms = float(np.sqrt(np.sort(energy)[-top:].mean()))
-    lifted, _ = lift_for_recognizer(pcm.tobytes(), voiced_rms, Tuning.from_env(os.environ))
+    lifted, _ = lift_for_recognizer(pcm.tobytes(), voiced_rms, STTGateway.live_tuning(types.SimpleNamespace(tuning=Tuning.from_env(os.environ))))   # with the dashboard's stored DSP overrides, as the gateway applies them
     return np.frombuffer(lifted, dtype="<i2").astype("float32") / 32768.0
 
 
