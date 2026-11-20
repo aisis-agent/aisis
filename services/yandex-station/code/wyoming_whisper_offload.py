@@ -72,7 +72,7 @@ def proc_stat_fields(pid, proc_root="/proc"):
     """Fields of /proc/<pid>/stat from the state letter on (index 0); None when the process does not exist. Any other read error
     (EMFILE, EIO) is raised: "cannot tell" must not read as "dead". The comm field may contain spaces and ")"."""
     try:
-        stat = Path(proc_root, str(pid), "stat").read_text()
+        stat = Path(proc_root, str(pid), "stat").read_bytes().decode("latin-1")    # comm may hold any bytes; only the tail is parsed
     except (FileNotFoundError, ProcessLookupError):
         return None
     try:

@@ -115,6 +115,14 @@ class ControllerTest(unittest.TestCase):
         controller.end(answered=True)
         self.assertAlmostEqual(controller.status()["last_first_answer_s"], 0.5)
 
+    def test_a_non_utf8_process_name_keeps_the_holder_alive(self):
+        controller, backend = self.make()
+        self.offload(controller)
+        stat = Path(self.proc, "4242", "stat")
+        stat.write_bytes(stat.read_bytes().replace(b"(my ) proc)", b"(\xe2\x82 \xff)"))
+        self.assertTrue(offload.holder_alive(4242, 777, self.proc))
+        self.assertEqual(controller.status()["state"], "pinned")
+
     def test_an_unreaped_zombie_holder_is_dead(self):
         controller, backend = self.make()
         self.offload(controller)
@@ -127,10 +135,11 @@ class ControllerTest(unittest.TestCase):
         from unittest import mock
         controller, backend = self.make()
         self.offload(controller)
-        with mock.patch.object(Path, "read_text", side_effect=OSError(24, "Too many open files")):
+        with mock.patch.object(Path, "read_bytes", side_effect=OSError(24, "Too many open files")) as read:
             self.assertTrue(offload.holder_alive(4242, 777, self.proc))
+            self.assertEqual(controller.status()["state"], "pinned")           # the lease survives a /proc that cannot be read
+        self.assertTrue(read.called)
         self.assertTrue(offload.holder_alive(4242, 777, self.proc))
-        self.assertEqual(controller.status()["state"], "pinned")
 
     @unittest.skipUnless(importlib.util.find_spec("wyoming_faster_whisper"), "run() imports the upstream package of the whisper host")
     def test_a_mismatch_fallback_does_not_start_upstream_over_a_live_lease(self):
