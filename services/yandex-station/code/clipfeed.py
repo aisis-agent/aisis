@@ -180,7 +180,7 @@ def describe_result(clip: dict, dialog: dict | None, window_end: float) -> str:
         return "∅ пустой текст"
     if dialog is None:
         if clip.get("trigger") == voiceclips.SPOTTER_TRIGGER:  # «громче», «пауза»: the speaker ran it itself, the server heard no text turn
-            return "🔊 команду выполнила сама колонка, серверу пришла только запись"
+            return "🔊 " + trace_view.SPOTTER_RAN_IT
         return "❔ диалог не найден"
     start = _seconds_of_day(time.strftime("%H:%M:%S", time.localtime(clip["ts"]))) or 0
     stop = start + max(1, int(window_end - clip["ts"]))
@@ -264,15 +264,22 @@ def activation_line(clip: dict) -> str | None:
     return None
 
 
-def trace_caption_lines(clip: dict, traces: list[dict]) -> list[tuple[int, str]]:
-    """Ranked caption lines of the adapter's records for the clip (trace_view); a phrase the adapter never saw says so."""
+def trace_caption_lines(clip: dict, traces: list[dict], dialog: dict | None = None, until: float | None = None) -> list[tuple[int, str]]:
+    """Ranked caption lines of the adapter's records for the clip (trace_view); a phrase with no record says why, as far as the dialog
+    (`load_dialog`: its fast-intent actions and brain turns) tells. A phrase the adapter handed on names who answered instead."""
+    if dialog is not None:
+        first = bool(clip.get("first_in_dialog"))
+        dialog = {**dialog, "actions": trace_view.evidence_of_clip(clip, dialog.get("actions"), "at", until, first),
+                  "brain": trace_view.evidence_of_clip(clip, dialog.get("brain"), "ts", until, first)}
     if not traces:
-        if clip["status"] == "sent" and clip.get("trigger") != voiceclips.SPOTTER_TRIGGER and (clip.get("transcript") or "").strip():
-            return [(2, "🧭 адаптер не вызывали: фразу обработал квазар сам (быстрый интент) или она не дошла")]
+        if clip["status"] == "sent" and (clip.get("trigger") != voiceclips.SPOTTER_TRIGGER or (dialog and (dialog["actions"] or dialog["brain"]))) \
+                and (clip.get("transcript") or "").strip():
+            return [(2, "🧭 " + trace_view.untraced_reason(clip, dialog))]
         return []
+    answered = trace_view.answered_by(clip.get("transcript"), traces, (dialog or {}).get("actions"), (dialog or {}).get("brain"))
     out: list[tuple[int, str]] = []
     for trace in traces:
-        ranked = trace_view.ranked_lines(trace, compact=True)
+        ranked = trace_view.ranked_lines(trace, compact=True, answered=answered)
         mark = "🧭 " + (trace_view.VIA.get(trace.get("via"), "") + ": " if len(traces) > 1 else "")
         out.append((ranked[0][0], mark + ranked[0][1]))
         out.extend(ranked[1:])
@@ -296,11 +303,11 @@ def activation_of(conn: sqlite3.Connection, clip: dict) -> dict | None:
     return dict(row) if row else None
 
 
-def processing_lines(conn: sqlite3.Connection, clip: dict, end: float) -> list[tuple[int, str]]:
+def processing_lines(conn: sqlite3.Connection, clip: dict, end: float, dialog: dict | None = None) -> list[tuple[int, str]]:
     """How the adapter processed the clip, as ranked caption lines. Diagnostics must never keep a clip from the owner: a failure shows as a line."""
     try:
         traces = dialogstore.traces_between(conn, clip["ts"] - trace_view.MATCH_BEFORE_S, end + trace_view.MATCH_AFTER_S)
-        return trace_caption_lines(clip, trace_view.traces_of_clip(clip, traces, end))
+        return trace_caption_lines(clip, trace_view.traces_of_clip(clip, traces, end), dialog, end)
     except Exception as exc:
         LOG.warning("clip_feed_diag_failed clip=%s class=%s", clip["id"], type(exc).__name__)
         return [(1, "⚠ диагностика обработки недоступна (%s)" % type(exc).__name__)]
@@ -312,9 +319,10 @@ def post_context(conn: sqlite3.Connection, clip: dict) -> tuple[str, list[tuple[
     clip["first_in_dialog"] = bool(clip.get("dialog_id")) and conn.execute(
         "SELECT 1 FROM voice_clips WHERE dialog_id=? AND ts<? LIMIT 1", (clip["dialog_id"], clip["ts"])).fetchone() is None
     end = window_end(conn, clip)
-    result = describe_result(clip, load_dialog(conn, clip.get("dialog_id")), end)
+    dialog = load_dialog(conn, clip.get("dialog_id"))
+    result = describe_result(clip, dialog, end)
     clip["activation"] = activation_of(conn, clip)
-    return result, processing_lines(conn, clip, end), link_line(clip, session_links.base_url())
+    return result, processing_lines(conn, clip, end, dialog), link_line(clip, session_links.base_url())
 
 
 def build_caption(clip: dict, result: str, gain: int, test: bool = False, footer: str = REPLY_FOOTER,

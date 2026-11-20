@@ -120,6 +120,46 @@ def init_db(path=DB_PATH):
     return c
 
 
+# ---------- which log lines are failures ----------
+# The quasar router logs one line per ended WebSocket (src/routers/uniproxy.alice.yandex.net.ts), at WARN, whatever the reason: the
+# dialog's own socket after each exchange, the spotter-log socket half a second after each wake word, the deploy smoke probes. The
+# line says nothing went wrong. overlays/uniproxy-close-log adds the close code: "(normal)" for the peer ending the connection
+# itself (1000, 1001, 1005), "abnormally" for a connection that dropped; the text without a code is the older image's line.
+WS_CLOSE_RE = re.compile(r"UniProxy WebSocket closed(?: \(normal\)(?:: .*)?)?$")
+RAW_LINE = re.compile(r"^(\d\d:\d\d:\d\d) \[(\w+)\] (.*)$")
+# Optional helpers the quasar's own source says fail open ("null on any failure: the caller then behaves exactly as without
+# correction"; the semantic shadow is a fire-and-forget observer): a WARN from one is a note, the turn went on without it.
+HELPER_NOTES = [(re.compile(r"^SEMANTIC shadow: "), "теневая проверка смысла (на ответ не влияет)"),
+                (re.compile(r"^ASR correction (?:failed|http)\b"), "коррекция ASR не ответила, взят исходный текст")]
+
+
+def normal_ws_close(msg):
+    return WS_CLOSE_RE.match(msg) is not None
+
+
+def helper_note(msg):
+    """The Russian name of the optional helper a log message is a failed-open warning of, or None."""
+    return next((label for pattern, label in HELPER_NOTES if pattern.match(msg)), None)
+
+
+def is_failure(lvl, msg):
+    """True when a quasar log line is a failure of the dialog it falls into. Not every WARN is: the normal end of a WebSocket is not,
+    nor is the warning of an optional helper that failed open."""
+    return lvl in ("ERROR", "WARN") and not normal_ws_close(msg) and helper_note(msg) is None
+
+
+def normal_close_count(raw):
+    """How many normal WebSocket closes a dialog's raw log lines ("HH:MM:SS [LVL] message") hold: shown as one counter, not as errors."""
+    return sum(1 for line in raw if (m := RAW_LINE.match(line)) and normal_ws_close(m.group(3)))
+
+
+def log_notes(raw):
+    """(time, text) of the failed-open helper warnings among a dialog's raw log lines: shown dimmed, not as errors. A helper's INFO line
+    (the semantic shadow's verdict) is no warning."""
+    return [(m.group(1), f"{label}: {m.group(3)}") for line in raw
+            if (m := RAW_LINE.match(line)) and m.group(2) in ("ERROR", "WARN") and (label := helper_note(m.group(3)))]
+
+
 # ---------- log line -> chat turns ----------
 FILLER_RE = re.compile(r"Filler '(.*)' \(\d+b\) sent$")
 ASR_CORR_RE = re.compile(r"ASR (corrected|correction to confirm|correction ignored) '(.+?)' -> '(.+?)' \((.*)\)$")
@@ -154,7 +194,7 @@ def line_turns(lvl, msg, src="", dialog_open=True):
     m = re.match(r"Synthesizing: (.*)", msg)
     if m and m.group(1).strip():
         out.append(("assistant", "speech", m.group(1), ""))
-    if lvl in ("ERROR", "WARN") and dialog_open:
+    if is_failure(lvl, msg) and dialog_open:
         out.append(("event", "error", f"{src.split('/')[-1]}: {msg}"[:200], ""))
     return out
 
@@ -194,6 +234,25 @@ def backfill_turns(conn):
     conn.execute("INSERT INTO meta(k,v) VALUES('turns_backfill_v1','1') ON CONFLICT(k) DO UPDATE SET v=excluded.v")
     conn.commit()
     return n
+
+
+def reclassify_failures(conn):
+    """One-off after `is_failure` changed: the warnings the old rule stored as dialog errors (a red dialog, «ошибка: …:49:
+    UniProxy WebSocket closed»; a failed-open helper) stop being errors. Docker dialogs are re-derived from raw_log (`rebuild`, so
+    a real error the first such line used to hide shows up); a dialog without lines (imported from a transcript) only loses the
+    stored text."""
+    if conn.execute("SELECT v FROM meta WHERE k='log_failures_v1'").fetchone():
+        return False
+    rebuild(conn)
+    for row in conn.execute("SELECT id, errors FROM dialogs WHERE errors!=''").fetchall():
+        if not is_failure("WARN", row["errors"].partition(": ")[2]):
+            conn.execute("UPDATE dialogs SET errors='' WHERE id=?", (row["id"],))
+    for row in conn.execute("SELECT id, text FROM dialog_turns WHERE kind='error'").fetchall():
+        if not is_failure("WARN", row["text"].partition(": ")[2]):
+            conn.execute("DELETE FROM dialog_turns WHERE id=?", (row["id"],))
+    conn.execute("INSERT INTO meta(k,v) VALUES('log_failures_v1','1') ON CONFLICT(k) DO UPDATE SET v=excluded.v")
+    conn.commit()
+    return True
 
 
 # ---------- log line -> dialog projection ----------
@@ -267,7 +326,7 @@ class DialogParser:
         if d is None:
             return
         add_turns(conn, d["id"], t, line_turns(lvl, msg, src, not d["status"]))
-        if lvl in ("ERROR", "WARN") and not d["err"] and not d["status"]:   # lines after "ended" are not that dialog's failure
+        if is_failure(lvl, msg) and not d["err"] and not d["status"]:   # lines after "ended" are not that dialog's failure
             d["err"] = f"{src.split('/')[-1]}: {msg}"[:200]
         hit = None
         m = re.match(r"Fast intent for text '(.+?)': (.*)$", msg)
@@ -275,7 +334,7 @@ class DialogParser:
             d["textreq"] = True
         m = m or re.match(r"Fast intent for '(.+?)': (.*)$", msg)
         if m:
-            hit = {"ts": hms, "kind": "запрос", "text": m.group(1), "res": m.group(2)}
+            hit = {"ts": hms, "at": t, "kind": "запрос", "text": m.group(1), "res": m.group(2)}
             d["reqs"].append(hit)
         m = re.match(r"ASR (corrected|correction to confirm|correction ignored) '(.+?)' -> '(.+?)' \((.*)\)$", msg)
         if m:   # raw ASR text vs the corrector's guess; the raw text itself stays in `heard`
@@ -435,8 +494,9 @@ class Ingester(threading.Thread):
         self.conn = init_db(path)
         try:
             backfill_turns(self.conn)
+            reclassify_failures(self.conn)
         except sqlite3.Error as e:
-            print(f"dialog-ingester: turns backfill: {e}", file=sys.stderr, flush=True)
+            print(f"dialog-ingester: backfill: {e}", file=sys.stderr, flush=True)
         self.conn.close()
 
     def _run(self, args, timeout=20):
@@ -842,8 +902,9 @@ def stats(conn, path=DB_PATH):
 
 
 def rebuild(conn):
-    """Re-derive docker dialogs from raw_log (after a parser change); keeps attached brain turns."""
+    """Re-derive docker dialogs from raw_log (after a parser change); keeps attached brain turns and each dialog's station."""
     keep = {r["id"]: r["brain"] for r in conn.execute("SELECT id, brain FROM dialogs WHERE brain!='[]' AND src LIKE 'docker:%'")}
+    stations = {r["id"]: r["station"] for r in conn.execute("SELECT id, station FROM dialogs WHERE src LIKE 'docker:%'")}
     conn.execute("DELETE FROM dialog_turns WHERE dialog_id IN (SELECT id FROM dialogs WHERE src LIKE 'docker:%')")
     conn.execute("DELETE FROM dialogs WHERE src LIKE 'docker:%'")
     for (src,) in conn.execute("SELECT DISTINCT src FROM raw_log WHERE src LIKE 'docker:%'").fetchall():
@@ -852,6 +913,8 @@ def rebuild(conn):
             parser.feed(conn, line)
     for did, brain in keep.items():
         conn.execute("UPDATE dialogs SET brain=? WHERE id=?", (brain, did))
+    for did, station in stations.items():   # the parser knows only the default station; an imported dialog keeps its own
+        conn.execute("UPDATE dialogs SET station=? WHERE id=?", (station, did))
     conn.commit()
 
 

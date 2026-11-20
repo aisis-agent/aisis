@@ -71,7 +71,81 @@ class Rendering(unittest.TestCase):
                                             [{**TRACE, "id": 9, "ts": NOW + 400, "text": "совсем другое"}])
         self.assertIn("Вызовы адаптера без записи", page)
         page = session_pages.render_session(dialog(), [clip("20261117T160337-f7efcc", NOW + 9, "sent", "что-то")], [])
-        self.assertIn("Запись адаптера об этой фразе не найдена", page)
+        self.assertIn("Записи вызова адаптера нет", page)
+
+    def test_a_spotter_clip_without_a_call_says_the_speaker_ran_it_not_that_parsing_was_missed(self):
+        spotter = clip("20261117T160337-f7efcc", NOW + 9, "sent", "громче", trigger=voiceclips.SPOTTER_TRIGGER)
+        page = session_pages.render_session(dialog(), [spotter], [])
+        self.assertIn("Команду выполнила сама колонка, серверу пришла только запись.", page)
+        self.assertNotIn("не дошла до разбора", page)
+
+    def test_a_shadow_verdict_at_info_level_is_no_helper_note(self):
+        raw = ["12:00:01 [INFO] SEMANTIC shadow: text='включи свет' scoreIntent=null laya=abstain(0.10) zone=nomatch ms=12",
+               "12:00:05 [INFO] Dialog x ended: serverFinished"]
+        page = session_pages.render_session(dialog(raw=raw, turns=[]), [], [], key=DIALOG)
+        self.assertNotIn("теневая проверка смысла", page)
+
+    def test_a_phrase_the_quasar_answered_itself_says_so_on_the_page(self):
+        asked = [{"ts": "16:03:38", "at": NOW + 9.5, "kind": "запрос", "text": "что-то", "res": "Влажность на улице 100 процентов."}]
+        page = session_pages.render_session(dialog(reqs=asked, brain=[]), [clip("20261117T160337-f7efcc", NOW + 9, "sent", "что-то")], [])
+        self.assertIn("фразу обработал сам квазар (быстрый интент → «Влажность на улице 100 процентов.»)", page)
+
+    def test_a_repeat_of_the_phrase_seconds_later_is_the_next_clips_answer_not_the_earlier_ones(self):
+        reqs = [{"ts": "a", "at": NOW + 1, "kind": "запрос", "text": "что-то", "res": "null"},
+                {"ts": "b", "at": NOW + 11, "kind": "запрос", "text": "что-то", "res": "Готово"}]
+        clips = [clip("20261117T160337-aaaaaa", NOW, "sent", "что-то"), clip("20261117T160347-bbbbbb", NOW + 10, "sent", "что-то")]
+        page = session_pages.render_session(dialog(reqs=reqs, brain=[]), clips, [])
+        self.assertEqual(page.count("обработал сам квазар"), 1)
+
+    def test_adjacent_clips_of_one_phrase_each_get_their_own_answer(self):
+        reqs = [{"ts": "a", "at": NOW + 0.5, "kind": "запрос", "text": "что-то", "res": "Первый"},
+                {"ts": "b", "at": NOW + 2.5, "kind": "запрос", "text": "что-то", "res": "Второй"}]
+        clips = [clip("20261117T160337-aaaaaa", NOW, "sent", "что-то"), clip("20261117T160339-bbbbbb", NOW + 2, "sent", "что-то")]
+        page = session_pages.render_session(dialog(reqs=reqs, brain=[]), clips, [])
+        self.assertIn("«Первый»", page)
+        self.assertIn("«Второй»", page)
+
+    def test_a_linked_spotter_clip_with_a_server_side_answer_does_not_claim_the_speaker_ran_it(self):
+        reqs = [{"ts": "a", "at": NOW + 0.5, "kind": "запрос", "text": "включи свет", "res": "Включаю"}]
+        page = session_pages.render_session(dialog(reqs=reqs, brain=[]), [clip("20261117T160337-aaaaaa", NOW, "sent", "включи свет",
+                                                                               trigger=voiceclips.SPOTTER_TRIGGER)], [])
+        self.assertNotIn(trace_view.SPOTTER_RAN_IT, page)
+        self.assertIn("быстрый интент → «Включаю»", page)
+
+    def test_a_later_answer_to_the_same_phrase_is_not_read_into_the_earlier_clip(self):
+        later = [{"ts": "16:05:00", "at": NOW + 120, "kind": "запрос", "text": "что-то", "res": "Готово"}]
+        page = session_pages.render_session(dialog(reqs=later, brain=[]), [clip("20261117T160337-f7efcc", NOW + 9, "sent", "что-то")], [])
+        self.assertNotIn("обработал сам квазар", page)
+
+    def test_a_handed_on_phrase_is_not_labelled_as_an_error_on_the_page(self):
+        hook = {**TRACE, "via": "hook", "layer": "none", "intent": None, "tier": None, "asked": None, "text": "что-то"}
+        page = session_pages.render_session(dialog(), [clip("20261117T160337-f7efcc", NOW + 9, "sent", "что-то")], [hook])
+        self.assertIn("грамматика не знает эту фразу → дальше решал квазар (быстрый интент или ИИ)", page)
+        self.assertNotIn("не обработано адаптером", page)
+
+    def test_normal_connection_closes_are_one_counter_line_and_not_an_error(self):
+        raw = ["12:00:01 [WARN] UniProxy WebSocket closed", "12:00:02 [INFO] UniProxy WebSocket closed (normal): code=1000 device=D age=900ms",
+               "12:00:03 [WARN] UniProxy WebSocket closed", "12:00:05 [INFO] Dialog x ended: serverFinished"]
+        page = session_pages.render_session(dialog(raw=raw, turns=[]), [], [], key=DIALOG)
+        self.assertIn("соединение колонки закрывалось 3 раза: штатно, не ошибка", page)
+        self.assertNotIn("ошибка:", page)
+        self.assertNotIn("⚠", page)
+        self.assertNotIn("class='card bad'", page)
+        quiet = session_pages.render_session(dialog(raw=["12:00:05 [INFO] Dialog x ended: serverFinished"], turns=[]), [], [], key=DIALOG)
+        self.assertNotIn("соединение колонки закрывалось", quiet)
+
+    def test_a_helper_that_failed_open_is_a_dim_note_and_not_an_error(self):
+        raw = ["12:00:01 [WARN] SEMANTIC shadow: laya http 503 for 'Какая погода.' (zone=nomatch)", "12:00:05 [INFO] Dialog x ended: serverFinished"]
+        page = session_pages.render_session(dialog(raw=raw, turns=[]), [], [], key=DIALOG)
+        self.assertIn("<li class=dim><span class=dim>12:00:01</span> теневая проверка смысла (на ответ не влияет): SEMANTIC shadow: laya http 503", page)
+        self.assertNotIn("ошибка:", page)
+        self.assertNotIn("class='card bad'", page)
+
+    def test_a_real_error_still_shows_in_red_and_in_the_log(self):
+        turns = [{"role": "event", "kind": "error", "t": "12:00:01", "text": "uniproxy-connection.ts:1218: Error happened in VoiceInputHandler: "}]
+        page = session_pages.render_session(dialog(err="uniproxy-connection.ts:1218: Error happened in VoiceInputHandler: ", turns=turns), [], [], key=DIALOG)
+        self.assertIn("class='card bad'", page)
+        self.assertIn("ошибка: uniproxy-connection.ts:1218", page)
 
     def test_user_text_is_escaped(self):
         page = session_pages.render_session(dialog(), [clip("20261117T160337-f7efcc", NOW + 9, "sent", "<script>alert(1)</script>")],

@@ -60,18 +60,47 @@ class Caption(unittest.TestCase):
         self.assertEqual(caption.split("\n")[-2], link)
         self.assertNotIn("Реплай", caption, "the footer is the first optional line to give way")
 
-    def test_a_phrase_the_adapter_never_saw_says_so_but_a_noise_clip_does_not(self):
+    def test_a_phrase_without_an_adapter_record_says_why_but_a_noise_clip_does_not(self):
         sent = clipfeed.trace_caption_lines(clip_row(), [])
-        self.assertTrue(any("адаптер не вызывали" in line for _, line in sent))
+        self.assertEqual([line for _, line in sent], ["🧭 записи вызова адаптера нет и диалога квазара нет: возможно, фраза не дошла до разбора"])
         self.assertEqual(clipfeed.trace_caption_lines(clip_row(status="gate", transcript=""), []), [])
         self.assertEqual(clipfeed.trace_caption_lines(clip_row(trigger=voiceclips.SPOTTER_TRIGGER), []), [])
 
+    def test_a_phrase_the_quasar_answered_itself_names_the_quasar_fast_intent(self):
+        dialog = {"status": "serverFinished", "brain": [], "actions": [
+            {"ts": "16:03:38", "at": clip_row()["ts"] + 1, "kind": "запрос", "text": "Напомню, выключить грелку через десять минут.", "res": "Скажи, когда напомнить. (listen=false)"}]}
+        sent = clipfeed.trace_caption_lines(clip_row(), [], dialog)
+        self.assertEqual([line for _, line in sent], ["🧭 записи вызова адаптера нет: фразу обработал сам квазар "
+                                                      "(быстрый интент → «Скажи, когда напомнить.»)"])
+
+    def test_a_spotter_clip_with_a_server_side_answer_in_its_dialog_is_explained_by_it(self):
+        spotter = clip_row(trigger=voiceclips.SPOTTER_TRIGGER)
+        dialog = {"status": "serverFinished", "brain": [], "actions": [
+            {"ts": "a", "at": spotter["ts"] + 1, "kind": "запрос", "text": spotter["transcript"], "res": "Включаю"}]}
+        self.assertIn("быстрый интент → «Включаю»", clipfeed.trace_caption_lines(spotter, [], dialog)[0][1])
+
+    def test_the_same_phrase_said_again_is_answered_by_its_own_clip_window(self):
+        first = clip_row()
+        text = first["transcript"]
+        dialog = {"status": "serverFinished", "brain": [], "actions": [
+            {"ts": "a", "at": first["ts"] + 1, "kind": "запрос", "text": text, "res": "null"},
+            {"ts": "b", "at": first["ts"] + 30, "kind": "запрос", "text": text, "res": "Готово"}]}
+        sent = clipfeed.trace_caption_lines(first, [], dialog, first["ts"] + 25)
+        self.assertNotIn("квазар", sent[0][1].split("адаптера нет")[1].split("и ответа")[0])
+        self.assertIn("ответа квазара в диалоге нет", sent[0][1])
+
     def test_the_hook_and_the_turn_of_one_phrase_are_both_shown_and_named(self):
+        brain = {**TRACE, "layer": "brain", "intent": None, "tier": None, "asked": None, "brain": {"provider": "claude", "slot": "a"}}
         diag = clipfeed.trace_caption_lines(clip_row(), [{**TRACE, "via": "hook", "layer": "none", "intent": None, "tier": None, "asked": None},
-                                                         TRACE])
+                                                         brain])
         text = "\n".join(line for _, line in diag)
-        self.assertIn("🧭 хук квазара: не обработано адаптером", text)
-        self.assertIn("🧭 ход колонки: грамматика → reminder.help", text)
+        self.assertIn("🧭 хук квазара: грамматика не знает эту фразу → ответ: ИИ (ход колонки)", text)
+        self.assertIn("🧭 ход колонки: ИИ → claude a", text)
+        self.assertNotIn("не обработано адаптером", text)
+
+    def test_a_handed_on_phrase_with_no_witness_of_the_answer_says_the_quasar_decided(self):
+        diag = clipfeed.trace_caption_lines(clip_row(), [{**TRACE, "via": "hook", "layer": "none", "intent": None, "tier": None, "asked": None}])
+        self.assertEqual(diag[0][1], "🧭 грамматика не знает эту фразу → дальше решал квазар (быстрый интент или ИИ)")
 
     def test_activation_line_for_a_separate_wake_segment_and_for_a_cut_head(self):
         separate = clipfeed.activation_line(clip_row(activation={"ts": 100.0, "transcript": "Алиса"}, ts=102.5))
@@ -109,8 +138,8 @@ class FeedPosts(unittest.TestCase):
         conn = dialogstore.init_db(self.db)
         conn.execute("INSERT INTO dialogs(id,station,kind,src,ts_start,ts_end,status,heard,answered,actions) VALUES(?,?,?,?,?,?,?,?,?,?)",
                      (DIALOG, "M00ZRW3008RAJG", "voice", "docker:x", self.now - 130, self.now - 100, "serverFinished", "[]", "[]",
-                      '[{"ts":"%s","kind":"запрос","text":"Напомню, выключить грелку через десять минут.","res":"Скажи, когда напомнить. (listen=false)"}]'
-                      % time.strftime("%H:%M:%S", time.localtime(self.now - 119))))
+                      '[{"ts":"%s","at":%s,"kind":"запрос","text":"Напомню, выключить грелку через десять минут.","res":"Скажи, когда напомнить. (listen=false)"}]'
+                      % (time.strftime("%H:%M:%S", time.localtime(self.now - 119)), self.now - 119)))
         conn.commit()
         conn.close()
         self.sent = []
