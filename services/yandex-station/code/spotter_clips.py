@@ -80,6 +80,12 @@ def clip_time(sent_ms: str | None, now: float) -> float:
 def archive(db_path: str, audio: bytes, transcript: str, station: str | None = None, sent_ms: str | None = None,
             now: float | None = None) -> dict:
     """Decode and archive one upload; returns {"clip": id, "dur": seconds}. Raises Rejected."""
+    return archive_decoded(db_path, audio, transcript, station, sent_ms, now)[0]
+
+
+def archive_decoded(db_path: str, audio: bytes, transcript: str, station: str | None = None, sent_ms: str | None = None,
+                    now: float | None = None) -> tuple[dict, bytes]:
+    """`archive`, and the 16 kHz mono s16le PCM it decoded (for a second recogniser: the upload is decoded once). Raises Rejected."""
     now = time.time() if now is None else now
     transcript = transcript.strip()
     if not transcript:
@@ -97,4 +103,4 @@ def archive(db_path: str, audio: bytes, transcript: str, station: str | None = N
     if clip_id is None:
         raise Rejected("save_failed")
     LOG.info("spotter_clip clip=%s dur_ms=%d rms=%d peak=%d text=%r", clip_id, duration_ms, rms, peak, transcript)
-    return {"clip": clip_id, "dur": duration_ms / 1000}
+    return {"clip": clip_id, "dur": duration_ms / 1000}, pcm

@@ -40,6 +40,9 @@ SCHEMA = (
     # the clip feed, truth set and ASR bench enumerate voice_clips and must keep seeing one row per utterance.
     "CREATE TABLE IF NOT EXISTS voice_clip_variants(clip_id TEXT NOT NULL, variant TEXT NOT NULL, path TEXT NOT NULL, "
     "bytes INTEGER, ts REAL NOT NULL, engine TEXT, ms INTEGER, PRIMARY KEY(clip_id, variant))",
+    # What a second recogniser (second_opinion.py) thought of a clip: its NBest as JSON. Also a sibling table, for the same reason.
+    "CREATE TABLE IF NOT EXISTS clip_hypotheses(clip_id TEXT PRIMARY KEY, ts REAL NOT NULL, source TEXT NOT NULL, primary_text TEXT, "
+    "nbest TEXT NOT NULL, ms INTEGER)",
 )
 COLUMNS = ("id", "ts", "dialog_id", "path", "dur", "rate", "bytes", "rms", "peak", "voiced_ms", "floor_rms", "contrast",
            "engine", "trigger", "status", "reason", "transcript", "asr_ms", "silence_ms", "final_ms", "station")
@@ -272,6 +275,7 @@ def prune(db_path: str, now: float | None = None) -> int:
                 except OSError:
                     pass
             conn.execute("DELETE FROM voice_clip_variants WHERE clip_id=?", (clip_id,))
+            conn.execute("DELETE FROM clip_hypotheses WHERE clip_id=?", (clip_id,))
             conn.execute("DELETE FROM voice_clips WHERE id=?", (clip_id,))
             removed += 1
         conn.commit()
@@ -308,6 +312,44 @@ def save_variant(db_path: str, clip_id: str, variant: str, pcm: bytes, rate: int
     except Exception as exc:
         LOG.warning("voice_clip_variant_failed class=%s", type(exc).__name__)
         return False
+
+
+def save_hypotheses(db_path: str, clip_id: str, source: str, primary_text: str | None, nbest: dict, ms: int | None, ts: float | None = None) -> bool:
+    """Keep the recognition alternatives (a second recogniser's NBest, as_dict() form) of an archived clip; one row per clip,
+    the later write replaces the earlier. Never raises; True when stored."""
+    try:
+        if not CLIP_ID.match(clip_id or ""):
+            return False
+        encoded = json.dumps(nbest, ensure_ascii=False)
+        conn = connect(db_path)
+        try:
+            conn.execute("INSERT OR REPLACE INTO clip_hypotheses(clip_id, ts, source, primary_text, nbest, ms) VALUES(?,?,?,?,?,?)",
+                         (clip_id, time.time() if ts is None else ts, source, primary_text, encoded, ms))
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+    except Exception as exc:
+        LOG.warning("clip_hypotheses_failed class=%s", type(exc).__name__)
+        return False
+
+
+def hypotheses_of(db_path: str, clip_id: str) -> dict | None:
+    """{clip_id, ts, source, primary_text, nbest (dict), ms} stored for a clip, or None (unknown clip, unreadable database)."""
+    try:
+        if not CLIP_ID.match(clip_id or ""):
+            return None
+        conn = connect(db_path)
+        try:
+            row = conn.execute("SELECT clip_id, ts, source, primary_text, nbest, ms FROM clip_hypotheses WHERE clip_id=?", (clip_id,)).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {"clip_id": row[0], "ts": row[1], "source": row[2], "primary_text": row[3], "nbest": json.loads(row[4]), "ms": row[5]}
+    except Exception as exc:
+        LOG.warning("clip_hypotheses_read_failed class=%s", type(exc).__name__)
+        return None
 
 
 def variants_for(db_path: str, clip_ids: list[str]) -> dict[str, list[str]]:

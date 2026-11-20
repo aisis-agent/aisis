@@ -298,32 +298,47 @@ cmd_adopt() {
   log "adopted; legacy container $legacy is stopped and kept (docker rm $legacy when no longer needed)"
 }
 
-adapter_needs_cache() {
-  python3 - "$1" <<'PY'
+# Sibling modules of a unit's entry file that an update carries along when the file imports them: `unit` installs one file, so a
+# module the new code newly depends on (or calls a new function of) would otherwise be missing or stale at the restart.
+unit_companion_candidates() {
+  case $1 in
+    adapter) echo "announcement_cache.py hypothesis_store.py" ;;
+    stt) echo "second_opinion.py spotter_clips.py voiceclips.py" ;;
+    ha-cli) echo "ha_verify.py ha_action_log.py" ;;
+  esac
+}
+
+# unit_imported_companions ENTRY_FILE MODULE.py...: those of the modules that ENTRY_FILE imports, one per line.
+unit_imported_companions() {
+  python3 - "$@" <<'PY'
 import ast
 import sys
 import tokenize
 with tokenize.open(sys.argv[1]) as source:
     tree = ast.parse(source.read())
-needed = any(
-    (isinstance(node, ast.Import) and any(item.name == "announcement_cache" for item in node.names))
-    or (isinstance(node, ast.ImportFrom) and node.module == "announcement_cache")
-    for node in ast.walk(tree)
-)
-print("required" if needed else "none")
+imported = set()
+for node in ast.walk(tree):
+    if isinstance(node, ast.Import):
+        imported.update(item.name for item in node.names)
+    elif isinstance(node, ast.ImportFrom) and node.module:
+        imported.add(node.module)
+for module in sys.argv[2:]:
+    if module[:-3] in imported:
+        print(module)
 PY
 }
 
-unit_invalidate_cache_bytecode() {
-  # Only the companion belongs to this update; preserve all other module caches.
-  rm -f -- "$app_dir/announcement_cache.pyc" "$app_dir"/__pycache__/announcement_cache.*.pyc
+unit_invalidate_bytecode() {
+  # Only the files of this update; preserve all other module caches.
+  local stem=${1%.py}
+  rm -f -- "$app_dir/$stem.pyc" "$app_dir"/__pycache__/"$stem".*.pyc
 }
 
 unit_install_file() {
   local source=$1 target=$app_dir/$2 mode=644
   [[ ! -f $target ]] || mode=$(stat -c %a "$target")
   install -m "$mode" "$source" "$target" || return 1
-  if [[ $2 == announcement_cache.py ]]; then unit_invalidate_cache_bytecode; fi
+  unit_invalidate_bytecode "$2"
 }
 
 unit_restore_files() {
@@ -335,14 +350,14 @@ unit_restore_files() {
     else
       rm -f -- "$app_dir/$file" || return 1
     fi
-    if [[ $file == announcement_cache.py ]]; then unit_invalidate_cache_bytecode || return 1; fi
+    unit_invalidate_bytecode "$file" || return 1
   done
 }
 
-# unit NAME [FILE]: install adapter and its cache module together (ha-cli and the modules it imports); restore all on failure.
+# unit NAME [FILE]: install the entry file and the sibling modules it imports (unit_companion_candidates) together; restore all on failure.
 cmd_unit() {
-  local name=${1:?unit name} newfile=${2:-} file unit url cache_source="" backup_dir cache_needed companion companion_source
-  local -a companion_sources=()
+  local name=${1:?unit name} newfile=${2:-} file unit url backup_dir candidates imported module
+  local -a companions=()
   case $name in
     adapter) file=adapter.py unit=aisis-station-adapter.service url=http://127.0.0.1:31117/healthz ;;
     stt)     file=stt_wyoming.py unit=aisis-station-stt.service url=http://127.0.0.1:31121/healthz ;;
@@ -351,25 +366,23 @@ cmd_unit() {
     *) die "unknown unit $name (adapter|stt|ha-cli|pm)" ;;
   esac
   local -a files=("$file")
+  candidates=$(unit_companion_candidates "$name")
   if [[ -n $newfile ]]; then
     python3 -m py_compile "$newfile" || die "$newfile does not compile"
-    if [[ $name == adapter ]]; then
-      cache_needed=$(adapter_needs_cache "$newfile") || die "cannot inspect adapter dependencies"
-      if [[ $cache_needed == required ]]; then
-        cache_source=$(dirname -- "$newfile")/announcement_cache.py
-        [[ -f $cache_source ]] || die "announcement_cache.py must accompany the new adapter"
-        python3 -m py_compile "$cache_source" || die "announcement_cache.py does not compile"
-        files+=(announcement_cache.py)
+    if [[ -n $candidates ]]; then
+      # ha-cli always carries both of its modules; the others only those the new entry file imports
+      if [[ $name == ha-cli ]]; then
+        imported=$candidates
+      else
+        # shellcheck disable=SC2086  # plain module file names, split on purpose
+        imported=$(unit_imported_companions "$newfile" $candidates) || die "cannot inspect $name dependencies"
       fi
-    fi
-    if [[ $name == ha-cli ]]; then
-      for companion in ha_verify.py ha_action_log.py; do
-        companion_source=$(dirname -- "$newfile")/$companion
-        [[ -f $companion_source ]] || die "$companion must accompany the new hacli.py"
-        python3 -m py_compile "$companion_source" || die "$companion does not compile"
-        files+=("$companion")
-        companion_sources+=("$companion_source")
+      for module in $imported; do
+        [[ -f $(dirname -- "$newfile")/$module ]] || die "$module must accompany the new $name"
+        python3 -m py_compile "$(dirname -- "$newfile")/$module" || die "$module does not compile"
+        companions+=("$module")
       done
+      files+=("${companions[@]}")
     fi
   fi
   maintenance_on
@@ -395,16 +408,11 @@ cmd_unit() {
   for file in "${files[@]}"; do
     [[ ! -f $app_dir/$file ]] || cp -p "$app_dir/$file" "$backup_dir/$file"
   done
-  if [[ -n $cache_source ]] && ! unit_install_file "$cache_source" announcement_cache.py; then
-    unit_restore_files "$backup_dir" "${files[@]}" \
-      || die "restore failed; recover manually from $backup_dir"
-    die "cache module installation failed; previous files restored"
-  fi
-  for companion_source in "${companion_sources[@]}"; do
-    if ! unit_install_file "$companion_source" "$(basename -- "$companion_source")"; then
+  for module in "${companions[@]}"; do
+    if ! unit_install_file "$(dirname -- "$newfile")/$module" "$module"; then
       unit_restore_files "$backup_dir" "${files[@]}" \
         || die "restore failed; recover manually from $backup_dir"
-      die "companion module installation failed; previous files restored"
+      die "$module installation failed; previous files restored"
     fi
   done
   if [[ -n $newfile ]] && ! unit_install_file "$newfile" "${files[0]}"; then

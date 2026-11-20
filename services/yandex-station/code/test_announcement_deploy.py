@@ -258,6 +258,111 @@ if sys.argv[-1].endswith('/announcement_cache.py'):
                 self.assertFalse((self.folder / "state/maintenance").exists())
 
 
+RESTART_RUNS_THE_ENTRY_FILE = '''import json, os, runpy, sys
+from pathlib import Path
+app = Path(os.environ['AISIS_CODE_DIR'])
+sys.path.insert(0, str(app))
+entry = app / os.environ['TEST_ENTRY']
+with Path(os.environ['TEST_RESTART_TRACE']).open('a') as stream:
+    stream.write(json.dumps({'entry': entry.read_text(),
+        'modules': {path.name: path.read_text() for path in sorted(app.glob('*.py')) if path != entry}}) + '\\n')
+runpy.run_path(str(entry), run_name='__main__')   # a module the entry file imports and the update did not bring stops the unit here
+'''
+
+
+class UnitCompanionTests(unittest.TestCase):
+    """`unit` installs one entry file, so the sibling modules it newly imports must travel with it and leave with it on a rollback."""
+    STT_IMPORTS = "import second_opinion\nimport spotter_clips\nimport voiceclips\nVERSION = 'new'\n"
+
+    def setUp(self):
+        AdapterDeploymentTests.setUp(self)
+        (self.bin / "systemctl").write_text(f"#!{sys.executable}\n" + RESTART_RUNS_THE_ENTRY_FILE)
+        (self.bin / "systemctl").chmod(0o700)
+
+    def deploy_unit(self, unit, entry, new_source, **modules):
+        (self.source / entry).write_text(new_source)
+        for name, text in modules.items():
+            (self.source / name).write_text(text)
+        self.env["TEST_ENTRY"] = entry
+        return subprocess.run(["bash", str(DEPLOY), "unit", unit, str(self.source / entry)],
+            env=self.env, capture_output=True, text=True, timeout=10)
+
+    def restarts(self):
+        return [json.loads(line) for line in self.trace.read_text().splitlines()]
+
+    def test_adapter_ships_the_hypothesis_store_it_imports(self):
+        adapter = "import announcement_cache\nimport hypothesis_store\nVERSION = 'new'\n"
+        result = self.deploy_unit("adapter", "adapter.py", adapter, **{"hypothesis_store.py": "STORE = 'new'\n"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.app / "hypothesis_store.py").read_text(), "STORE = 'new'\n")
+        (restart,) = self.restarts()
+        self.assertEqual((restart["entry"], restart["modules"]["hypothesis_store.py"]), (adapter, "STORE = 'new'\n"))
+
+    def test_adapter_without_its_hypothesis_store_beside_it_is_refused_untouched(self):
+        result = self.deploy_unit("adapter", "adapter.py", "import hypothesis_store\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("hypothesis_store.py must accompany", result.stderr)
+        self.assertEqual((self.app / "adapter.py").read_text(), self.old)
+        self.assertFalse(self.trace.exists())
+
+    def test_adapter_that_does_not_import_the_store_does_not_need_it(self):
+        result = self.deploy_unit("adapter", "adapter.py", "VERSION = 'new'\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.app / "hypothesis_store.py").exists())
+
+    def test_failed_health_removes_the_store_the_old_adapter_never_had(self):
+        self.env["TEST_HEALTH_EXIT"] = "22"
+        result = self.deploy_unit("adapter", "adapter.py", "import hypothesis_store\n", **{"hypothesis_store.py": "STORE = 'new'\n"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.app / "adapter.py").read_text(), self.old)
+        self.assertFalse((self.app / "hypothesis_store.py").exists())
+        self.assertEqual(self.restarts()[-1], {"entry": self.old, "modules": {}})
+
+    def test_stale_bytecode_of_a_shipped_module_is_dropped_and_other_caches_stay(self):
+        cache = self.app / "__pycache__"
+        cache.mkdir()
+        (cache / "hypothesis_store.cpython-fixture.pyc").write_bytes(b"stale")
+        (cache / "other_module.cpython-fixture.pyc").write_bytes(b"unrelated")
+        result = self.deploy_unit("adapter", "adapter.py", "import hypothesis_store\n", **{"hypothesis_store.py": "STORE = 'new'\n"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((cache / "hypothesis_store.cpython-fixture.pyc").exists())
+        self.assertEqual((cache / "other_module.cpython-fixture.pyc").read_bytes(), b"unrelated")
+
+    def stt_modules(self, tag):
+        return {f"{name}.py": f"VERSION = '{tag} {name}'\n" for name in ("second_opinion", "spotter_clips", "voiceclips")}
+
+    def test_stt_ships_the_second_opinion_and_the_recorder_modules_its_new_code_calls(self):
+        (self.app / "stt_wyoming.py").write_text(self.old)
+        for name in ("spotter_clips.py", "voiceclips.py"):
+            (self.app / name).write_text("VERSION = 'old'\n")
+        result = self.deploy_unit("stt", "stt_wyoming.py", self.STT_IMPORTS, **self.stt_modules("new"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name, text in self.stt_modules("new").items():
+            self.assertEqual((self.app / name).read_text(), text)
+        self.assertEqual(self.restarts()[0]["modules"]["second_opinion.py"], "VERSION = 'new second_opinion'\n")
+
+    def test_stt_without_one_of_its_modules_beside_it_is_refused_untouched(self):
+        (self.app / "stt_wyoming.py").write_text(self.old)
+        modules = self.stt_modules("new")
+        del modules["second_opinion.py"]
+        result = self.deploy_unit("stt", "stt_wyoming.py", self.STT_IMPORTS, **modules)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("second_opinion.py must accompany", result.stderr)
+        self.assertEqual((self.app / "stt_wyoming.py").read_text(), self.old)
+        self.assertFalse(self.trace.exists())
+
+    def test_failed_stt_health_restores_the_previous_modules_and_removes_the_new_one(self):
+        (self.app / "stt_wyoming.py").write_text(self.old)
+        for name in ("spotter_clips.py", "voiceclips.py"):
+            (self.app / name).write_text("VERSION = 'old'\n")
+        self.env["TEST_HEALTH_EXIT"] = "22"
+        result = self.deploy_unit("stt", "stt_wyoming.py", self.STT_IMPORTS, **self.stt_modules("new"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.app / "stt_wyoming.py").read_text(), self.old)
+        self.assertEqual({path.name: path.read_text() for path in self.app.glob("*.py")},
+                         {"adapter.py": self.old, "stt_wyoming.py": self.old, "spotter_clips.py": "VERSION = 'old'\n", "voiceclips.py": "VERSION = 'old'\n"})
+
+
 class UnitInstallTargetTests(unittest.TestCase):
     """With AISIS_CODE_DIR unset, the adapter is installed where its loaded unit's effective ExecStart runs it."""
     def setUp(self):
