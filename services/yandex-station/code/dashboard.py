@@ -236,6 +236,7 @@ def session_html(dialog_id=None, clip_id=None):
     cliptruth.annotate(dialogstore.DB_PATH, clips)
     for c in clips:
         c["gain"] = clipfeed.boost_for(c.get("peak"))
+        c["hypotheses"] = clipfeed.evidence_of(dialogstore.DB_PATH, c)    # the second opinion stored for the clip (#182)
     found = dialog is not None or bool(clips)
     ha_actions = ha_action_log.read(ha_action_log.JOURNAL_PATH, min(c["ts"] for c in clips) - 3, max(c["ts"] for c in clips) + 45) if clips else []
     return (200 if found else 404), session_pages.render_session(dialog, clips, traces, focus_clip=clip_id, key=key, ha_actions=ha_actions)

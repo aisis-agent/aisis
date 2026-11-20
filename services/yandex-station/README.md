@@ -332,6 +332,13 @@ that was not observed.
   The quasar side of the same change is `overlays/uniproxy-close-log` (the close code in the line, INFO for a normal close);
   the parser reads the old and the new text, so it does not wait for that deploy. After a change of the rule the ingester
   re-derives the docker dialogs from `raw_log` once at start (`reclassify_failures`, meta `log_failures_v1`).
+- **Recognition alternatives and the repair dialog in diagnostics (#182)**: a trace's `correction` record (decision, trigger, heard,
+  alternatives with percentages, cues, the question asked with the owner's answer and outcome) reads in Russian in the post and on the
+  session page (`trace_view.correction_lines`; rank 1 = decision, alternatives, dialog, so they outlast stage times in a full caption).
+  A clip with a stored second opinion (`voiceclips.hypotheses_of`, table `clip_hypotheses`) but no correction in its trace (a spotter
+  clip) gets «🔎 второе мнение (GigaAM): «выключи свет» 94% · «включи свет» 5%» instead. The session page adds the full table (percent,
+  fit, source, engine, ms) and the dialog transcript; `/grammar` lists each dialog context (`contexts:` of the bundle) with its
+  intents under `#context-<id>`. Percentages are the share among the listed readings and appear in diagnostics only, never in speech.
 - Containers keep their historical names (`aisis-yandex-postgres-1`,
   `aisis-yandex-network-{tls-voice,dns-relay}-1`, compose project `aisis-yandex`
   for postgres) — do not recreate them just to rename.
