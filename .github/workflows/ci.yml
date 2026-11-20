@@ -58,6 +58,8 @@ jobs:
       - name: quasar LAN proxy peer allow-list tests
         working-directory: services/yandex-station/code
         run: python3 -m unittest test_quasar_lan_proxy
+      - name: resource-bounds overlay patch applier tests
+        run: python3 -m unittest discover -s services/yandex-station/overlays/resource-bounds
       - name: weather skill tests (adapter parser, runner and the quasar hand-over list)
         working-directory: services/yandex-station/code
         run: python3 -m unittest test_weather_skills
