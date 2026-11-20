@@ -150,9 +150,10 @@ class TraceTests(unittest.IsolatedAsyncioTestCase):
         trace = self.traces()[-1]
         self.assertEqual(trace["layer"], "grammar")
         calls = trace["calls"]
-        self.assertEqual([c["service"] for c in calls], ["climate.set_temperature"])
+        self.assertEqual([c["service"] for c in calls], ["climate.set_temperature", "climate.read_back"])
         self.assertEqual((calls[0]["entity"], calls[0]["data"], calls[0]["status"], calls[0]["ok"]),
                          ("climate.kondei_1", {"temperature": 24}, 200, True))
+        self.assertEqual((calls[1]["entity"], calls[1]["ok"], calls[1]["state"]), ("climate.kondei_1", True, "cool"), "the state read back after the command")
         self.assertEqual(trace["room"], "Гостиная")
         self.assertTrue(data["text"])
 
@@ -283,6 +284,25 @@ class TraceTests(unittest.IsolatedAsyncioTestCase):
                 trace = self.traces()[before]
                 self.assertEqual((trace["layer"], trace["intent"]), ("grammar", "time.now"))
                 self.assertEqual(trace["errors"], ["reply not delivered: " + failure.__name__])
+
+
+class HaCacheMarkTests(unittest.IsolatedAsyncioTestCase):
+    """hacli serves its old cache with `X-Aisis-Cache: stale` while Home Assistant is down; the adapter hands that to the executors as `_stale`."""
+
+    async def test_a_stale_entity_is_marked_and_a_live_one_is_not(self):
+        from aiohttp import ClientSession, web
+        from types import SimpleNamespace
+
+        async def reply(request):
+            return web.json_response({"entity_id": "climate.x"}, headers={"X-Aisis-Cache": request.match_info["kind"]})
+
+        app = web.Application()
+        app.router.add_get("/api/states/{kind}", reply)
+        async with TestServer(app) as server, ClientSession() as session:
+            host = SimpleNamespace(intent_ha_url=str(server.make_url("")).rstrip("/"), _hacli=lambda: session)
+            self.assertEqual(await Adapter._ha_get_json(host, "/api/states/stale"), {"entity_id": "climate.x", "_stale": True})
+            self.assertEqual(await Adapter._ha_get_json(host, "/api/states/live"), {"entity_id": "climate.x"})
+
 
 
 if __name__ == "__main__":

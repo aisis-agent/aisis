@@ -220,7 +220,10 @@ class Adapter:
     async def _ha_get_json(self, path: str):
         async with self._hacli().get(self.intent_ha_url + path) as result:
             result.raise_for_status()
-            return await result.json(content_type=None)
+            data = await result.json(content_type=None)
+            if isinstance(data, dict) and result.headers.get("X-Aisis-Cache") == "stale":
+                data["_stale"] = True      # hacli's old cache while Home Assistant is down: not what the device reports
+            return data
 
     async def _ha_post_json(self, path: str, body: dict) -> ha_actions.HaReply:
         """POST through ha-cli: the answer carries ha-cli's verdict on the device state after the call (headers X-Aisis-*)."""

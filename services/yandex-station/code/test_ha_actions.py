@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 import re
@@ -70,21 +71,50 @@ class Now:
 
 
 class FakeHa:
-    def __init__(self, states=None, service_status=200, template_as_text=True, outage=False, service_reply=None):
+    def __init__(self, states=None, service_status=200, template_as_text=True, outage=False, service_reply=None,
+                 apply=True, lag=0, unreadable=False, stale=False):
         self.states = copy.deepcopy(STATES if states is None else states)
         self.service_status = service_status
         self.template_as_text = template_as_text
         self.outage = outage            # hacli answers every template with its cached registry TSV (status 200)
         self.service_reply = service_reply   # what hacli answers a service call (HaReply with its verdict); default: the plain status
+        self.apply = apply              # the unit takes a command Home Assistant accepted (False: accepted, the device does not change)
+        self.lag = lag                  # reads of one entity that still show its old state after a command
+        self.unreadable = unreadable    # reading one entity fails
+        self.stale = stale              # reading one entity answers hacli's old cache (X-Aisis-Cache: stale, marked `_stale` by the adapter)
+        self.hidden: dict[str, list] = {}
         self.gets = 0
+        self.entity_gets = 0
         self.template_posts = 0
         self.templates: list[str] = []
         self.services: list[tuple[str, dict]] = []
 
     async def get(self, path):
+        if path.startswith("/api/states/"):
+            self.entity_gets += 1
+            if self.unreadable:
+                raise OSError("unreadable")
+            entity_id = path.removeprefix("/api/states/")
+            hidden = self.hidden.get(entity_id)
+            if hidden and hidden[0] > 0:
+                hidden[0] -= 1
+                return copy.deepcopy(hidden[1])
+            seen = copy.deepcopy(next(s for s in self.states if s["entity_id"] == entity_id))
+            return {**seen, "_stale": True} if self.stale else seen
         assert path == "/api/states"
         self.gets += 1
-        return self.states
+        return copy.deepcopy(self.states)      # a JSON answer, not the fake's own dicts: what the executor caches must not change the device
+
+    def _apply(self, path, body):
+        entity = next(s for s in self.states if s["entity_id"] == body["entity_id"])
+        if self.lag:
+            self.hidden.setdefault(body["entity_id"], [self.lag, copy.deepcopy(entity)])
+        if path.endswith("climate/set_hvac_mode"):
+            entity["state"] = body["hvac_mode"]
+        elif path.endswith("climate/set_temperature"):
+            entity["attributes"]["temperature"] = body["temperature"]
+            if "hvac_mode" in body:
+                entity["state"] = body["hvac_mode"]
 
     async def post(self, path, body):
         if path == "/api/template":
@@ -96,6 +126,8 @@ class FakeHa:
             ids = AREA_ENTITIES.get(area, [])
             return HaReply(200, json.dumps(ids) if self.template_as_text else ids)
         self.services.append((path, body))
+        if self.service_status == 200 and self.apply and path.startswith("/api/services/climate/"):
+            self._apply(path, body)
         return self.service_reply or HaReply(self.service_status)
 
 
@@ -110,8 +142,12 @@ class Base(unittest.IsolatedAsyncioTestCase):
     def make(self, **kw):
         self.ha = FakeHa(**kw)
         self.now = Now()
-        self.actions = LivingRoomActions(self.ha.get, self.ha.post, ttl=60.0, clock=self.now)
+        self.slept: list[float] = []
+        self.actions = LivingRoomActions(self.ha.get, self.ha.post, ttl=60.0, clock=self.now, sleep=self.sleep)
         return self.actions
+
+    async def sleep(self, seconds):
+        self.slept.append(seconds)
 
     def svc(self):
         return [(p.removeprefix("/api/services/"), b) for p, b in self.ha.services]
@@ -194,10 +230,10 @@ class Climate(Base):
         reply = await a.run("ha.climate", {"room": "living", "mode": "cool", "temperature": None})
         self.assertEqual(reply, ha_actions.REPLY_CLIMATE_UNAVAILABLE)
 
-    async def test_empty_command(self):
+    async def test_unknown_mode_is_not_understood(self):
         a = self.make()
-        self.assertEqual(await a.run("ha.climate", {"room": None, "mode": None, "temperature": None}),
-                         ha_actions.REPLY_UNKNOWN_COMMAND)
+        self.assertEqual(await a.run("ha.climate", {"room": None, "mode": "boil", "temperature": None}), ha_actions.REPLY_UNKNOWN_COMMAND)
+        self.assertEqual(self.ha.services, [])
 
 
 class ClimateDelta(Base):
@@ -247,6 +283,176 @@ class ClimateDelta(Base):
         reply = await a.run("ha.climate_delta", {"room": None, "direction": 1, "delta": {"amount": 2, "unit": "процент"}})
         self.assertEqual(reply, ha_actions.REPLY_BAD_DELTA)
         self.assertEqual(self.ha.services, [])
+
+
+class AirConditionerOff(Base):
+    """An air conditioner that is off and is asked for a mode, a setpoint or just «включи» is switched on (the owner, tg#31285: if it is
+    off, it has to be turned on), and the answer says what the unit reports afterwards, not what was asked."""
+
+    def unit(self, **attrs):
+        """kondei_1 in the living room: off, 20 degrees in the room, setpoint 22."""
+        base = {"current_temperature": 20, "temperature": 22}
+        base.update(attrs)
+        return [climate("climate.kondei_1", state="off", **base)]
+
+    async def say(self, args, **kw):
+        a = self.make(states=self.unit(**kw.pop("attrs", {})), **kw)
+        return await a.run("ha.climate", {"room": "living", "mode": None, "temperature": None, **args})
+
+    async def test_a_mode_phrase_switches_an_off_unit_on_in_that_mode(self):
+        reply = await self.say({"mode": "heat"})
+        self.assertEqual(self.svc(), [("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "heat"})])
+        self.assertEqual(reply, "Кондиционер включён на обогрев, 22 градуса.")
+
+    async def test_a_setpoint_phrase_switches_an_off_unit_on_then_sets_it(self):
+        reply = await self.say({"temperature": 26})
+        self.assertEqual(self.svc(), [("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "heat"}),
+                                      ("climate/set_temperature", {"entity_id": "climate.kondei_1", "temperature": 26})])
+        self.assertEqual(reply, "Кондиционер включён на обогрев, 26 градусов.")
+        self.assertEqual(await self.say({"temperature": 18}), "Кондиционер включён на охлаждение, 18 градусов.")
+        self.assertEqual(self.svc()[0][1]["hvac_mode"], "cool")
+
+    async def test_a_setpoint_near_the_room_temperature_starts_the_unit_in_the_mode_it_ran_last(self):
+        for last in ("heat", "cool"):
+            reply = await self.say({"temperature": 23}, attrs={"current_temperature": 23, "last_hvac_mode": last})
+            self.assertEqual(self.svc()[0], ("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": last}), last)
+            self.assertEqual(reply, "Кондиционер включён на %s, 23 градуса." % {"heat": "обогрев", "cool": "охлаждение"}[last])
+
+    async def test_a_unit_that_knows_neither_the_room_temperature_nor_its_last_mode_starts_automatic(self):
+        reply = await self.say({"temperature": 25}, attrs={"current_temperature": None})
+        self.assertEqual(self.svc()[0], ("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "auto"}))
+        self.assertEqual(reply, "Кондиционер включён в автоматическом режиме, 25 градусов.")
+
+    async def test_a_delta_phrase_switches_an_off_unit_on(self):
+        a = self.make(states=self.unit())
+        reply = await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None})
+        self.assertEqual(self.svc(), [("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "heat"}),
+                                      ("climate/set_temperature", {"entity_id": "climate.kondei_1", "temperature": 23})])
+        self.assertEqual(reply, "Кондиционер включён на обогрев, 23 градуса.")
+
+    async def test_a_plain_include_switches_an_off_unit_on_in_its_last_mode(self):
+        reply = await self.say({}, attrs={"last_hvac_mode": "cool"})
+        self.assertEqual(self.svc(), [("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "cool"})])
+        self.assertEqual(reply, "Кондиционер включён на охлаждение, 22 градуса.")
+
+    async def test_a_plain_include_of_a_unit_without_a_last_mode_starts_automatic(self):
+        reply = await self.say({})
+        self.assertEqual(self.svc(), [("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "auto"})])
+        self.assertEqual(reply, "Кондиционер включён в автоматическом режиме, 22 градуса.")
+
+    async def test_a_plain_include_of_a_running_unit_calls_nothing(self):
+        a = self.make()
+        reply = await a.run("ha.climate", {"room": "living", "mode": None, "temperature": None})
+        self.assertEqual(self.ha.services, [])
+        self.assertEqual(reply, "Кондиционер уже включён: охлаждение, 24 градуса.")
+
+    async def test_a_stale_cached_state_does_not_hide_an_off_unit(self):
+        """The list of states is cached for a minute; the unit was switched off meanwhile: «включи» must read the unit, not the list."""
+        self.make(states=self.unit(last_hvac_mode="heat"))
+        stale = copy.deepcopy(self.unit(last_hvac_mode="heat"))
+        stale[0]["state"] = "cool"
+
+        async def get(path):
+            return copy.deepcopy(stale) if path == "/api/states" else await self.ha.get(path)
+
+        a = LivingRoomActions(get, self.ha.post, ttl=60.0, clock=self.now, sleep=self.sleep)
+        self.assertEqual(await a.run("ha.climate", {"room": "living", "mode": None, "temperature": None}),
+                         "Кондиционер включён на обогрев, 22 градуса.")
+
+    async def test_a_unit_that_turned_unavailable_is_not_commanded(self):
+        self.make(states=[climate("climate.kondei_1", state="unavailable")])
+        listed = copy.deepcopy(self.unit())
+
+        async def get(path):
+            return copy.deepcopy(listed) if path == "/api/states" else await self.ha.get(path)
+
+        a = LivingRoomActions(get, self.ha.post, ttl=60.0, clock=self.now, sleep=self.sleep)
+        self.assertEqual(await a.run("ha.climate", {"room": "living", "mode": "heat", "temperature": None}),
+                         ha_actions.REPLY_CLIMATE_UNAVAILABLE)
+        self.assertEqual(self.ha.services, [])
+
+    async def test_a_state_that_shows_up_late_is_waited_for(self):
+        reply = await self.say({"mode": "heat"}, lag=2)
+        self.assertEqual(reply, "Кондиционер включён на обогрев, 22 градуса.")
+        self.assertEqual(len(self.slept), 2)
+
+    async def test_a_unit_that_does_not_change_is_not_reported_as_switched_on(self):
+        reply = await self.say({"mode": "heat"}, apply=False)
+        self.assertEqual(reply, ha_actions.REPLY_NOT_CONFIRMED)
+        self.assertEqual(len(self.svc()), 1, "the command was sent")
+
+    async def test_an_unreadable_state_is_not_reported_as_done(self):
+        self.assertEqual(await self.say({"mode": "heat"}, unreadable=True), ha_actions.REPLY_UNVERIFIED)
+
+    async def test_a_queued_command_is_not_verified(self):
+        reply = await self.say({"mode": "heat"}, service_status=202)
+        self.assertEqual(reply, ha_actions.REPLY_QUEUED)
+        self.assertEqual(self.ha.entity_gets, 1, "only the read before the command")
+
+    async def test_a_running_unit_asked_for_a_mode_keeps_the_old_wording_when_the_state_shows_it(self):
+        a = self.make()
+        self.assertEqual(await a.run("ha.climate", {"room": "living", "mode": "heat", "temperature": 30}), "Обогрев, 30 градусов.")
+
+    async def test_consecutive_deltas_queued_during_an_outage_add_up(self):
+        """hacli serves its old cached setpoint while Home Assistant is down: the fresh read must not undo the queued 25 before the next «теплее»."""
+        a = self.make(service_status=202, stale=True)
+        for _ in range(2):
+            self.assertEqual(await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None}), ha_actions.REPLY_QUEUED)
+        self.assertEqual([body["temperature"] for path, body in self.ha.services if path.endswith("set_temperature")], [25, 26])
+
+    async def test_hacli_serving_its_old_cache_does_not_authorise_already_on(self):
+        """The old cache says the unit runs while it was switched off: that is no reading, «включи» sends the command and verifies nothing."""
+        self.make(states=self.unit(last_hvac_mode="heat"), stale=True)
+        cached = copy.deepcopy(self.unit(last_hvac_mode="heat"))
+        cached[0]["state"] = "cool"
+
+        async def old_cache(path):
+            return {**cached[0], "_stale": True} if path.startswith("/api/states/") else cached
+
+        a = LivingRoomActions(old_cache, self.ha.post, ttl=60.0, clock=self.now, sleep=self.sleep)
+        self.assertEqual(await a.run("ha.climate", {"room": "living", "mode": None, "temperature": None}), ha_actions.REPLY_UNVERIFIED)
+        self.assertEqual(self.svc(), [("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "heat"})])
+
+    async def test_a_setpoint_wakes_a_unit_whose_state_could_not_be_read(self):
+        a = self.make(states=[climate("climate.kondei_1", state="cool", temperature=22, current_temperature=20, last_hvac_mode="heat")], unreadable=True)
+        await a.run("ha.climate", {"room": "living", "mode": None, "temperature": 26})
+        self.assertEqual([name for name, _ in self.svc()], ["climate/set_hvac_mode", "climate/set_temperature"])
+        self.ha.services.clear()
+        a = self.make(states=[climate("climate.kondei_1", state="cool", temperature=22, current_temperature=20, last_hvac_mode="heat")], unreadable=True)
+        await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None})
+        self.assertEqual([name for name, _ in self.svc()], ["climate/set_hvac_mode", "climate/set_temperature"])
+
+    async def test_a_setpoint_set_after_the_outage_is_not_overwritten_by_the_queued_one(self):
+        """Queued 25 during an outage, Home Assistant recovers, someone sets 22: «теплее» reads the live 22."""
+        a = self.make(service_status=202, stale=True)
+        await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None})
+        self.ha.services.clear()
+        self.ha.stale, self.ha.service_status = False, 200
+        self.ha.states[0]["attributes"]["temperature"] = 22
+        await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None})
+        self.assertEqual([body["temperature"] for path, body in self.ha.services if path.endswith("set_temperature")], [23])
+
+    async def test_overlapping_deltas_add_up_when_the_device_reports_late(self):
+        async def yielding(seconds):
+            await asyncio.sleep(0)
+
+        self.make(lag=2)
+        a = LivingRoomActions(self.ha.get, self.ha.post, ttl=60.0, clock=self.now, sleep=yielding)
+        replies = await asyncio.gather(*[a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None}) for _ in range(2)])
+        self.assertEqual([body["temperature"] for path, body in self.ha.services if path.endswith("set_temperature")], [25, 26])
+        self.assertTrue(all("градус" in r for r in replies), replies)
+
+    async def test_a_state_that_could_not_be_read_does_not_authorise_already_on(self):
+        """The cache says the unit runs, the read fails: «включи» sends the command and says only what could be checked."""
+        reply = await self.say({}, unreadable=True)
+        self.assertEqual(len(self.svc()), 1, "the command is sent: a guess is not a reason to do nothing")
+        self.assertEqual(reply, ha_actions.REPLY_UNVERIFIED)
+
+    async def test_a_missing_setpoint_does_not_confirm_a_setpoint(self):
+        """A running unit in fan mode reports no setpoint; an accepted command that changed nothing must not be announced as «ставлю 23»."""
+        a = self.make(states=[climate("climate.kondei_1", state="fan_only", temperature=None)], apply=False)
+        self.assertEqual(await a.run("ha.climate", {"room": "living", "mode": None, "temperature": 23}), ha_actions.REPLY_NOT_CONFIRMED)
+
 
 
 class Lights(Base):
@@ -388,7 +594,7 @@ class SpeakerRoom(Base):
     async def test_the_climate_of_the_speakers_room_and_its_absence(self):
         self.make()
         self.assertEqual(await self.heard_by(SECOND_FLOOR, "ha.climate_delta", {"room": None, "direction": 1, "delta": None}),
-                         "Делаю теплее, 23 градуса.")
+                         "Кондиционер включён на обогрев, 23 градуса.")      # kondei_2 is off: the command switches it on
         self.assertEqual([body["entity_id"] for _, body in self.svc()], ["climate.kondei_2", "climate.kondei_2"])
         self.ha.services.clear()
         self.assertEqual(await self.heard_by(BEDROOM, "ha.climate_delta", {"room": None, "direction": 1, "delta": None}),
