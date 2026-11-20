@@ -5,7 +5,9 @@ facts the gateway does have are the arrival times of the audio frames), but the 
 activation stream opens with the audio the station buffered before its spotter fired, sent faster than real time (the
 «history», 2.32 s with a 0.04 s spread over 98 of 103 sessions in the gateway journal 2026-11-10 … 11-17), then live audio. A
 follow-up turn (no wake word) is live from the first frame. The name ends 0.2-0.4 s before the end of the history; the
-request's first word can start 0.08 s after the name, so neither the end of the history nor a fixed trim is a safe cut.
+request's first word can start 0.08 s after the name, so neither the end of the history nor a fixed trim is a safe cut. The end
+of the history is only known while the burst holds nothing but the history: a socket opened late sends the first live speech
+inside the burst (2026-11-20 11:18: 3.65 s in 0.18 s), the lead grows past any history and the window would sit on the request.
 
 `history_ms` reads the burst from arrival times, `locate` finds the pause that follows the name in the frame levels of the
 history and `Gate` holds the first audio of a stream until both are known, then hands on only what follows the name. When
@@ -21,7 +23,7 @@ from typing import NamedTuple
 FRAME_MS = 20
 DECIDE_AFTER_MS = 600          # the burst is over by then (the station's 2.3 s arrive within ~0.4 s); the decision needs live audio behind it
 MIN_HISTORY_MS = 1500          # a lead shorter than any real history is a stream that is simply live
-MAX_HISTORY_MS = 3500          # a longer lead is a fast sender, not the station's history
+MAX_HISTORY_MS = 2450          # a longer lead has live speech in the burst (a late socket, a catch-up) or is a fast sender: the longest history measured is 2.43 s (2.41 s since the cut went live): a lead of +0.1 s over the mean already puts 6% of short-pause splices at risk (bench_wake_window.py gate)
 LOOKAHEAD_MS = 100             # frame levels are computed this far past the history's end
 PEAK_BEFORE_MS = 1000          # the name's loudest frame lies this far before the end of the history …
 PEAK_UNTIL_MS = 330            # … and no later than this (the request's first word may be louder and starts 0.22 s before the end)
@@ -128,7 +130,7 @@ class Gate:
         if self.decided:
             return chunk
         self.held.extend(chunk)
-        if elapsed_ms >= DECIDE_AFTER_MS or self.audio_ms() > MAX_HISTORY_MS + LOOKAHEAD_MS:   # the latter: no history is this long, nothing to wait for
+        if elapsed_ms >= DECIDE_AFTER_MS or self.audio_ms() - elapsed_ms > MAX_HISTORY_MS:   # the latter: more audio ahead of the clock than any history holds, nothing to wait for
             return self.decide(elapsed_ms)
         return b""
 
@@ -144,6 +146,12 @@ class Gate:
         return out
 
     def decide(self, elapsed_ms: int) -> bytes:
+        lead = self.audio_ms() - elapsed_ms
+        if lead > MAX_HISTORY_MS:
+            # Live speech is inside the burst: where the history ends is unknown, and a window laid on a guess sat on the request's
+            # first word (2026-11-20 11:18: its stressed vowel was taken for the name and the cut removed the word). Nothing is cut.
+            self.history, self.located = lead, Located(None, "burst")
+            return self.pass_all()
         history = self.history = history_ms(self.audio_ms(), elapsed_ms)
         if history is None:
             return self.pass_all()

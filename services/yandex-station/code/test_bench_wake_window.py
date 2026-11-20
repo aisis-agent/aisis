@@ -1,5 +1,8 @@
 """The back-test's own arithmetic (bench_wake_window.py): the journal parser, the splice geometry and the leak/loss verdict.
 The recognizer is never called here."""
+import os
+import shutil
+import tempfile
 import unittest
 
 import bench_wake_window as bench
@@ -91,6 +94,67 @@ class Splice(unittest.TestCase):
     def test_the_stream_is_long_enough_to_close_the_last_cut(self):
         pcm, _, request_start = bench.splice(self.clip(380, 30)[:-6 * bench.FRAME * 2], self.clip(700, 25), 2330, 300, 150, 1.0)
         self.assertGreaterEqual(len(pcm) // (2 * bench.RATE) * 1000, 2330 + wake_window.LOOKAHEAD_MS)
+
+    def test_live_audio_inside_the_burst_makes_a_lead_longer_than_the_history_and_nothing_is_cut(self):
+        """The 2026-11-20 11:18 layout: the burst holds the history and 1.16 s of the request. The gate sees a 3.5 s lead and keeps the stream whole."""
+        pcm, _, _ = bench.splice(self.clip(380, 30)[:-6 * bench.FRAME * 2], self.clip(700, 25), 2330, 300, 150, 1.0)
+        self.assertIsNotNone(bench.cut_of(pcm, 2330).end_ms, "the same stream with only the history in the burst is cut behind the name")
+        found = bench.cut_of(pcm, 2330, extra_ms=1158)
+        self.assertIsNone(found.end_ms)
+        self.assertEqual(found.reason, "burst")
+
+    def test_the_delivery_gives_the_gate_the_lead_it_was_asked_for(self):
+        pcm, _, _ = bench.splice(self.clip(380, 30)[:-6 * bench.FRAME * 2], self.clip(700, 25), 2330, 300, 150, 1.0)
+        gate = bench.deliver(pcm, 2330)
+        self.assertAlmostEqual(gate.history, 2330, delta=5)
+        self.assertTrue(gate.decided)
+
+
+class Arithmetic(unittest.TestCase):
+    """The recognizer-free verdict of a cut against the splice's true layout (name ends at 2000 ms, request starts at 2200 ms)."""
+
+    def verdict(self, end_ms, reason=""):
+        return bench.geometry(wake_window.Located(end_ms, reason), name_end_ms=2000, request_start_ms=2200)
+
+    def test_a_cut_in_the_pause_is_clean(self):
+        self.assertEqual(self.verdict(2040), "clean")
+
+    def test_a_cut_that_takes_a_voiced_frame_of_the_request_is_a_loss(self):
+        self.assertEqual(self.verdict(2220), "loss")
+
+    def test_a_cut_just_in_front_of_the_request_is_tight(self):
+        self.assertEqual(self.verdict(2180), "tight")
+        self.assertEqual(self.verdict(2200), "tight", "the first voiced frame survives, its soft onset is at risk")
+
+    def test_a_cut_well_inside_the_name_is_a_leak(self):
+        self.assertEqual(self.verdict(1900), "leak")
+        self.assertEqual(self.verdict(1970), "clean", "30 ms of the name's decay is under the room noise")
+
+    def test_no_cut_says_why(self):
+        self.assertEqual(self.verdict(None, "burst"), "not_cut:burst")
+
+
+class RemovedPrefix(unittest.TestCase):
+    """Which stored clip is the head the gateway cut off a replayed session (a name the recogniser heard alone is a stream utterance)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        for name in ("cut.opus", "heard.opus"):
+            open(os.path.join(self.dir, name), "wb").close()
+        self.addCleanup(shutil.rmtree, self.dir)
+
+    def row(self, ident, ts, path, reason):
+        return (ident, ts, path, 1.0, 100, 4.0, "activation", reason)
+
+    def test_only_the_clip_the_cut_itself_stored_is_the_removed_head(self):
+        clips = [self.row("heard", 101.0, "heard.opus", "wake"), self.row("cut", 100.4, "cut.opus", "wake_window")]
+        self.assertEqual(bench.removed_prefix(clips, 100.0, self.dir)[0], "cut")
+
+    def test_a_name_heard_alone_is_not_a_removed_head(self):
+        self.assertIsNone(bench.removed_prefix([self.row("heard", 101.0, "heard.opus", "wake")], 100.0, self.dir))
+
+    def test_a_removed_head_of_another_session_is_not_taken(self):
+        self.assertIsNone(bench.removed_prefix([self.row("cut", 120.0, "cut.opus", "wake_window")], 100.0, self.dir))
 
 
 if __name__ == "__main__":

@@ -55,6 +55,21 @@ def pcm_of(levels, rate=RATE):
     return samples.tobytes()
 
 
+def delayed_connect():
+    """Levels of the stream of 2026-11-20 11:18 (the owner: «Алиса, включить кондиционер на втором этаже», recorded as clip tg#31246).
+    The station opened its socket late, so the burst held the history and the first second of the request: 3.65 s at once. The name
+    ends at 2.0 s, then 0.44 s of quiet; the request's first word has a weak onset (two 40 ms puffs at a fifth of its peak), its
+    stressed vowel at 2.72-3.08 s and 80 ms of quiet behind it; the rest of the request follows. The true history ended at 2.32 s."""
+    out = room(250, 1.0)
+    out[0:3] = [14.0, 9.0, 6.0]
+    out[85:100] = burst(15, 60.0)        # the name, 1700-2000 ms
+    out[124:126] = [8.0, 8.0]            # the request's first word, its onset, 2480-2520 ms
+    out[134:136] = [8.0, 8.0]            # 2680-2720 ms
+    out[136:154] = burst(18, 42.0)       # its stressed vowel and end, 2720-3080 ms
+    out[162:221] = burst(59, 25.0)       # the rest of the request, 3240-4420 ms
+    return out
+
+
 class HistoryBurst(unittest.TestCase):
     def test_the_history_is_the_audio_that_arrived_ahead_of_real_time(self):
         self.assertEqual(wake_window.history_ms(audio_ms=2920, elapsed_ms=600), 2320)
@@ -66,6 +81,12 @@ class HistoryBurst(unittest.TestCase):
     def test_a_lead_that_is_not_a_station_history_is_not_one(self):
         self.assertIsNone(wake_window.history_ms(audio_ms=7600, elapsed_ms=600))     # a sender that is simply fast
         self.assertIsNone(wake_window.history_ms(audio_ms=1500, elapsed_ms=600))     # 0.9 s: shorter than any real history
+
+    def test_a_lead_that_holds_live_speech_is_not_a_history(self):
+        """3.65 s arrived within 0.18 s: the history (2.32 s) and the first 1.3 s of the request. That is 3.48 s ahead of the clock, far
+        longer than any history the station sent (2.02-2.43 s); read as one, the window sits 1.2 s too late (2026-11-20 11:18)."""
+        self.assertIsNone(wake_window.history_ms(audio_ms=3654, elapsed_ms=176))
+        self.assertIsNone(wake_window.history_ms(audio_ms=2900 + 300, elapsed_ms=600))   # 2.6 s ahead: 0.3 s of the request already in it
 
 
 class NameEnd(unittest.TestCase):
@@ -227,6 +248,36 @@ class Gate(unittest.TestCase):
         gate = wake_window.Gate(RATE)
         self.assertEqual(gate.push(pcm, 0), pcm)
         self.assertIsNone(gate.removed)
+
+    def test_a_burst_that_holds_live_speech_behind_the_history_is_not_cut(self):
+        """2026-11-20 11:18: the socket opened late and 3.65 s arrived within 0.18 s. Read as a 3.48 s «history» the window sat on the
+        request's first word, its stressed vowel was taken for the name and the cut removed the whole word («включить») with the real
+        name. A lead longer than any history is a burst whose end nobody knows: the audio goes on whole, the text-level strip answers."""
+        pcm = self.stream(delayed_connect())
+        gate = wake_window.Gate(RATE)
+        out = bytearray()
+        pos = 0
+        for ms, at in ((1200, 120), (1200, 150), (1254, 176)):
+            size = RATE * 2 * ms // 1000
+            out.extend(gate.push(pcm[pos:pos + size], at))
+            pos += size
+        self.assertEqual(bytes(out), pcm[:pos], "nothing is held once the lead is known to be too long")
+        out.extend(gate.push(pcm[pos:], 400))
+        self.assertEqual(bytes(out), pcm)
+        self.assertIsNone(gate.removed)
+        self.assertEqual(gate.located.reason, "burst", "the gateway log says why nothing was cut")
+        self.assertAlmostEqual(gate.history, 3478, delta=2)
+
+    def test_the_same_speech_with_only_the_history_in_the_burst_is_cut_behind_the_name(self):
+        """The control of the test above: the name's position is the same, the socket opened on time, so the lead is the history."""
+        pcm = self.stream(delayed_connect())
+        gate = wake_window.Gate(RATE)
+        out, removed = self.play(gate, pcm, burst_ms=HISTORY)
+        self.assertIsNotNone(removed)
+        self.assertEqual(removed + out, pcm)
+        cut_ms = len(removed) * 1000 // (2 * RATE)
+        self.assertGreaterEqual(cut_ms, 2000)
+        self.assertLessEqual(cut_ms, 2440, "the request's first word starts at 2.48 s")
 
     def test_a_stream_that_ends_before_the_decision_is_released_whole(self):
         pcm = self.stream(history(2040, gap_ms=140, total_ms=HISTORY))
