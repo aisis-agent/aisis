@@ -1,5 +1,6 @@
 // What the deployed quasar layer would answer WITHOUT a model for each phrase of the labelled corpora, as one JSON line
-// per phrase: {"text", "handled", "via"}. The grammar back-test reads the result (quasar-replay.jsonl next to the
+// per phrase: {"text", "handled", "via", "action"}; `action` is what the handler resolved the phrase to (the device and state, the volume
+// step, the media key, ...) so a reader can tell «включи свет» from «выключи свет». The grammar back-test reads the result (quasar-replay.jsonl next to the
 // corpora) to know which phrases the container already serves, so the "combined route" number is the production route
 // and not a guess from an older build's log.
 //
@@ -41,16 +42,22 @@ for (const [area, ids] of areaBy) {
 }
 const reg = { areaByEntity, entities, fetchedAt: Date.now() } as never
 
-function handledBy (text: string): string | null {
-  if (endDialog.parseEndDialog(text) !== null) return 'end-dialog'
+function handledBy (text: string): { via: string, action: unknown } | null {
+  const endDialogAction = endDialog.parseEndDialog(text)
+  if (endDialogAction !== null) return { via: 'end-dialog', action: endDialogAction }
   const math = ha.evaluateMath(text.toLowerCase().replace(/ё/g, 'е'))
-  if (math !== null) return 'math'
-  if (tvApps.parseTvAppIntent(text) !== null) return 'tv-app'
-  if (tvApps.parseFireplaceIntent(text) !== null) return 'fireplace'
-  if (musicParse.parseMediaControl(text) !== null) return 'media-key'
+  if (math !== null) return { via: 'math', action: math }
+  const tvApp = tvApps.parseTvAppIntent(text)
+  if (tvApp !== null) return { via: 'tv-app', action: tvApp }
+  const fireplace = tvApps.parseFireplaceIntent(text)
+  if (fireplace !== null) return { via: 'fireplace', action: fireplace }
+  const mediaKey = musicParse.parseMediaControl(text)
+  if (mediaKey !== null) return { via: 'media-key', action: mediaKey }
   const decision = ha.decideFastIntent(text, reg)
-  if (decision.tier !== 'llm' && decision.tier !== 'math') return `fast-${decision.tier}`
-  if (musicParse.parseMusicIntent(text) !== null || musicParse.parseBareMusicName(text) !== null) return 'music'
+  if (decision.tier !== 'llm' && decision.tier !== 'math') return { via: `fast-${decision.tier}`, action: decision }   // the whole decision: a state query carries its scope outside `resolved`
+  const music = musicParse.parseMusicIntent(text)
+  const bareName = music !== null ? music : musicParse.parseBareMusicName(text)
+  if (music !== null || bareName !== null) return { via: 'music', action: bareName }
   return null
 }
 
@@ -62,8 +69,8 @@ for (const name of readdirSync(dir).filter(file => file.endsWith('.jsonl') && !f
     const text = String((JSON.parse(line) as { text?: unknown }).text ?? '').trim()
     if (text === '' || seen.has(text)) continue
     seen.add(text)
-    let via: string | null = null
-    try { via = handledBy(text) } catch { via = null }
-    console.log(JSON.stringify({ handled: via !== null, text, via }))
+    let handled: { via: string, action: unknown } | null = null
+    try { handled = handledBy(text) } catch { handled = null }
+    console.log(JSON.stringify({ handled: handled !== null, text, via: handled?.via ?? null, action: handled?.action ?? null }))
   }
 }
