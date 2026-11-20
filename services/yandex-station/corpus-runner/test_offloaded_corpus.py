@@ -437,5 +437,37 @@ class ResultIdentityTests(unittest.TestCase):
                 gate.validate_python_runtime(value)
 
 
+class SourceClosureTests(unittest.TestCase):
+    def manifest(self, paths):
+        provider_hash = "a" * 64
+        files = [{"path": path, "sha256": provider_hash, "bytes": 1, "mode": 0o644} for path in sorted(paths)]
+        shims = ["/node_modules/.pnpm/tsx/node_modules/.bin/esbuild",
+                 "/node_modules/.pnpm/esbuild/node_modules/.bin/esbuild"]
+        return {"baseline_image": "image", "overlay_revision": {"commit": "c" * 40, "tree": "d" * 40},
+                "fixtures": [{"name": name, "sha256": checksum} for name, checksum in gate.FIXTURES.items()],
+                "inventory": {"schema": "aisis-candidate-source-metadata/v1", "forbidden_paths": [],
+                              "baseline_image_id": "image", "maintained_overlay_merge": "c" * 40,
+                              "maintained_overlay_tree": "d" * 40, "source_files": files,
+                              "provider_postimage_sha256": provider_hash, "packages": [], "links": [],
+                              "excluded_package_paths": [{"path": path, "sha256": "b" * 64, "bytes": 1}
+                                                         for path in shims]}}
+
+    def validate(self, paths):
+        roots = {"tsx": "/node_modules/.pnpm/tsx", "esbuild": "/node_modules/.pnpm/esbuild"}
+        with patch.object(gate, "validate_package_roots", return_value=roots), \
+                patch.object(gate, "validate_links"):
+            gate.validate_inventory(self.manifest(paths))
+
+    def test_negation_module_is_part_of_the_declared_source_closure(self):
+        self.assertIn("/src/backend/negation.ts", gate.SOURCE_PATHS)
+        self.validate(gate.SOURCE_PATHS)
+
+    def test_an_image_without_or_with_an_extra_source_file_is_rejected(self):
+        for paths in (gate.SOURCE_PATHS - {"/src/backend/negation.ts"},
+                      gate.SOURCE_PATHS | {"/src/backend/not-declared.ts"}):
+            with self.subTest(count=len(paths)), self.assertRaisesRegex(ValueError, "source closure differs"):
+                self.validate(paths)
+
+
 if __name__ == "__main__":
     unittest.main()
