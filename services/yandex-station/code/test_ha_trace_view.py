@@ -61,7 +61,7 @@ class ClipPost(Journal):
     def test_the_clip_the_quasar_layer_handled_shows_what_ha_cli_verified(self):
         self.journal.write(ACTION)
         lines = self.post_lines([HOOK_TRACE])
-        self.assertIn("🧭 не обработано адаптером", lines)          # the adapter's hook declined: the quasar layer answered
+        self.assertIn("🧭 грамматика не знает эту фразу → дальше решал квазар (быстрый интент или ИИ)", lines)   # the hook declined: the quasar layer answered
         self.assertIn("🔧 HA light.turn_off light.studiia → проверено: light.studiia выкл за 0.9 с", lines)
 
     def test_a_call_the_adapter_traced_is_not_shown_twice(self):
