@@ -74,6 +74,8 @@ jobs:
         run: python3 -m unittest test_claude_cache_integration
       - name: quasar intent-grammar overlay patch applier tests
         run: python3 -m unittest discover -s services/yandex-station/overlays/intent-grammar -p "test_*.py"
+      - name: quasar ha-verify-wording overlay patch applier tests
+        run: python3 -m unittest discover -s services/yandex-station/overlays/ha-verify-wording -p "test_*.py"
       - name: failover watchdog component tests
         run: python3 -m unittest discover -s services/yandex-station/bluegreen -p "test_*.py"
       - name: quasar corpus runner rule tests (canned -> llm only for the emergency domain)
