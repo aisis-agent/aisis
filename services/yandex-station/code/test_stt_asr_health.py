@@ -8,6 +8,7 @@ wrongly" and nothing else.
 """
 import asyncio
 import json
+import os
 import sys
 import types
 import unittest
@@ -163,6 +164,130 @@ class AsrProbeTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(calls[0][0], "en")
         self.assertEqual(calls[0][1]["profile"], "home")
+
+
+class FakeControlSocket:
+    """The wyoming-whisper offload control socket answering `status`."""
+
+    def __init__(self, tmp, state):
+        self.path = f"{tmp}/ctl.sock"
+        self.state = state
+        self.asked = []
+
+    async def handle(self, reader, writer):
+        self.asked.append(json.loads(await reader.readline()))
+        writer.write(json.dumps({"ok": True, "state": self.state, "idle_s": 12.5, "leases": [{"id": "x"}] * (self.state == "pinned")}).encode() + b"\n")
+        await writer.drain()
+        writer.close()
+
+
+class AsrProbeOffloadTest(unittest.TestCase):
+    """Idle-unloaded or lent whisper (docs/superpowers/specs/2026-11-18-vram-offload-design.md): no verdict, never a restart."""
+
+    probe = AsrProbeTest.probe
+
+    def probe_with_ctl(self, state, mode="healthy"):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            ctl = FakeControlSocket(tmp, state)
+            env = {}
+
+            fake = FakeRecognizer(mode)
+
+            async def run():
+                server = await asyncio.start_server(fake.handle, "127.0.0.1", 0)
+                port = server.sockets[0].getsockname()[1]
+                env.update({"AISIS_WYOMING_URI": f"tcp://127.0.0.1:{port}", "AISIS_WHISPER_CTL_SOCKET": ctl.path})
+                gateway = stt_wyoming.STTGateway(env=env, archive=False)
+                ctl_server = await asyncio.start_unix_server(ctl.handle, path=ctl.path)
+                async with TestClient(TestServer(gateway.app())) as client:
+                    response = await client.get("/healthz/asr")
+                    body = await response.json()
+                server.close()
+                ctl_server.close()
+                return response.status, body
+
+            status, body = asyncio.run(run())
+            return status, body, fake, ctl
+
+    def test_unloaded_and_pinned_are_202_and_the_probe_sends_nothing(self):
+        for state in ("unloaded", "pinned"):
+            status, body, fake, ctl = self.probe_with_ctl(state)
+            self.assertEqual((status, body["skipped"]), (202, state))
+            self.assertEqual(fake.audio_bytes, 0)               # the probe must not reload the model
+            self.assertEqual(ctl.asked, [{"op": "status"}])
+
+    def test_a_loaded_recognizer_is_probed_as_before(self):
+        status, body, fake, _ = self.probe_with_ctl("loaded")
+        self.assertEqual(status, 200)
+        self.assertEqual(fake.audio_bytes, stt_wyoming.PROBE_PCM_BYTES)
+
+    def test_a_gpu_lent_error_event_is_202_not_a_restart(self):
+        status, body, _, _ = self.probe(f"raw:" + json.dumps({"type": "error", "data": {"text": "lent", "code": "gpu-lent"}}))
+        self.assertEqual((status, body), (202, {"skipped": "gpu-lent"}))
+
+    def test_a_model_unloaded_error_event_is_202_unloaded(self):
+        """The model idle-unloaded between the status and the probe: the daemon refuses the probe instead of reloading for it."""
+        status, body, _, _ = self.probe("raw:" + json.dumps({"type": "error", "data": {"text": "unloaded", "code": "model-unloaded"}}))
+        self.assertEqual((status, body), (202, {"skipped": "unloaded"}))
+
+    def test_a_socket_that_is_not_configured_is_never_consulted(self):
+        """An unloaded local whisper must not hide a broken recognizer at another address: no AISIS_WHISPER_CTL_SOCKET, no lookup."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(f"{tmp}/vram-offload")
+            ctl = FakeControlSocket(tmp, "unloaded")
+            ctl.path = f"{tmp}/vram-offload/wyoming-whisper.sock"
+
+            async def run(env):
+                server = await asyncio.start_unix_server(ctl.handle, path=ctl.path)
+                try:
+                    return await stt_wyoming.whisper_ctl_status(env)
+                finally:
+                    server.close()
+
+            self.assertIsNone(asyncio.run(run({"AISIS_WYOMING_URI": "tcp://127.0.0.1:10301", "XDG_RUNTIME_DIR": tmp})))
+            self.assertEqual(ctl.asked, [])
+            self.assertEqual(asyncio.run(run({"AISIS_WHISPER_CTL_SOCKET": ctl.path}))["state"], "unloaded")
+
+    def test_a_malformed_control_reply_is_no_status(self):
+        for reply in ('{"ok":true,"state":"unloaded","leases":1}', '{"ok":true,"state":5}', '[]', 'nope', '{"ok":"yes","state":"pinned"}'):
+            async def handle(reader, writer, reply=reply):
+                await reader.readline()
+                writer.write(reply.encode() + b"\n")
+                await writer.drain()
+                writer.close()
+
+            async def run():
+                import tempfile
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = f"{tmp}/ctl.sock"
+                    server = await asyncio.start_unix_server(handle, path=path)
+                    try:
+                        return await stt_wyoming.whisper_ctl_status({"AISIS_WHISPER_CTL_SOCKET": path})
+                    finally:
+                        server.close()
+
+            self.assertIsNone(asyncio.run(run()), reply)
+
+    def test_a_missing_control_socket_changes_nothing(self):
+        status, _, _, _ = self.probe(env={"AISIS_WYOMING_URI": "tcp://127.0.0.1:1", "AISIS_WHISPER_CTL_SOCKET": "/nonexistent/ctl.sock"},
+                                     recognizer=self.ok_recognizer)
+        self.assertEqual(status, 200)
+
+    def test_the_probe_carries_the_probe_context(self):
+        calls = []
+
+        async def recognizer(uri, pcm, rate, language, **extras):
+            calls.append(extras["context"])
+            return ""
+
+        self.probe(env={"AISIS_WYOMING_URI": "tcp://127.0.0.1:1"}, recognizer=recognizer)
+        self.assertEqual(calls, [{"aisis_probe": True}])
+
+    @staticmethod
+    async def ok_recognizer(uri, pcm, rate, language, **extras):
+        return ""
 
 
 if __name__ == "__main__":
