@@ -68,7 +68,7 @@ SOURCE_PATHS = {
     "/src/backend/entity-index.ts", "/src/backend/fuzzy-ru.ts", "/src/backend/grammar-hook.ts",
     "/src/backend/intent-catalog.ts", "/src/backend/music-intents.ts",
     "/src/backend/music-parse.ts", "/src/backend/semantic-shadow.ts",
-    "/src/backend/settings-voice.ts", "/src/backend/speaker-room.ts",
+    "/src/backend/settings-voice.ts", "/src/backend/speaker-room.ts", "/src/backend/negation.ts",
     "/package.json", "/pnpm-lock.yaml", "/pnpm-workspace.yaml", "/tsconfig.json",
 }
 PACKAGE_NAMES = {
