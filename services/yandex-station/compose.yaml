@@ -19,9 +19,9 @@ services:
   # Replaced by bluegreen/ (aisis-voice project: blue/green + switch); kept only as a manual fallback.
   quasar:
     profiles: [legacy]
-    image: aisis-quasar:restore-20261107
+    image: aisis-quasar:from-locked-source
     build:
-      context: ${AISIS_QUASAR_SOURCE:?run prepare-upstream.sh}
+      context: ${AISIS_QUASAR_SOURCE:?run scripts/prepare-quasar-source.sh}
     restart: unless-stopped
     network_mode: host
     environment:

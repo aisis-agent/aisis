@@ -149,8 +149,8 @@ The baselines are `/src/backend/ha-intents.ts` and `/src/backend/asr-correct.ts`
 | `ha-intents.ts` after the speaker-room overlay | `81fac5ca320c639471382b58fbf466f701b88ccf50beda895e75a443737e405b` | `f4ab25c368fc5d6a39d280dcfa298eb3a11e261261fc9dae3dd7d82f36a494c3` |
 | `asr-correct.ts` | `6587bc9624ff8268efd59589a73197882228e7ec12c20145ede656c75e27e5c5` | `1f337435e1c4cebd6edf43480330229e128ad035afb3c80fa6664cd319afc48d` |
 
-`grammar-hook.ts` is new (SHA-256 of the file next to the script). The quasar overlay source is not versioned in this
-repository (it lives in the images), so the patches are applied to the captured files instead of copying 1,400 lines here.
+`grammar-hook.ts` is new (SHA-256 of the file next to the script). The quasar source is versioned in
+[aisis-quasar](https://github.com/alex-mextner/aisis-quasar) (`grammar-hook.ts`, `asr-correct.ts` and the patched `ha-intents.ts` are in the tree at tag `aisis-pre-weather-20261117`); this overlay is the audited patch folded into it, so the patches apply only to the older baselines instead of copying 1,400 lines here.
 After a later deploy rebuilt either file the baseline hash changes and `prepare_overlay.py` refuses until the patch is
 rebased: it must never be applied blind.
 

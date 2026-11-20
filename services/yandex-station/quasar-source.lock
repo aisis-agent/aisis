@@ -1,0 +1,9 @@
+# Pinned source of the quasar-server image AISIS runs (read by scripts/prepare-quasar-source.sh).
+# Advance it in the PR that deploys a quasar change: commit the change to aisis-quasar, tag it, update the four values.
+repo=https://github.com/alex-mextner/aisis-quasar
+tag=aisis-volume-zero-e859a37b
+commit=b1cb840e565a2d7cdf3ec5ff9d463836ffaef203
+# Production image whose sources this commit reproduces (scripts/verify_quasar_image.py compares them byte for byte).
+# The id is the immutable identity; the tag is only its name on this host.
+image=aisis-quasar:volume-zero-e859a37b
+image_id=sha256:de0480613e23dadad99952f2e54ec86ed2f31e844841a6a1b9103859762523fe

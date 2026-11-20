@@ -73,13 +73,16 @@ the station's `media_player` in Home Assistant (its entity id ends in the statio
 area the registry reports for every entity, `area_name(device_id(entity))`). A room in
 the phrase wins («включи свет на кухне» from the Studio speaker lights the kitchen). A station HA does not place in
 one of the home's rooms keeps the old default (Гостиная). To move a speaker to another room change the area of its
-device in HA (an area set only on the player entity is not read); the registry cache refreshes within a minute. The code is the `overlays/speaker-room` source overlay
-(the quasar layer lives in the image, not in this repository): `overlays/speaker-room/prepare_overlay.py --baseline DIR
---output-dir NEW` patches the exact production sources (`docker cp aisis-quasar-prod-<active>:/src/. DIR`, hash-checked)
-then prebuild the immutable candidate and follow the [isolated corpus evidence protocol](corpus-runner/README.md).
-Deploy that tested image with `bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"`;
-`overlays/speaker-room/run_tests.sh` runs `tests/*.mts` against
-the overlay applied to the active image's sources, in scratch containers with no network.
+device in HA (an area set only on the player entity is not read); the registry cache refreshes within a minute. The code is
+`src/backend/speaker-room.ts`, `src/routers/uniproxy/spotter-clips.ts` and hunks of `ha-intents.ts`, `input-handler.ts` and
+`uniproxy-connection.ts` in [aisis-quasar](https://github.com/alex-mextner/aisis-quasar) (the quasar layer is its own repository,
+see [Quasar source](#quasar-source)); the `overlays/speaker-room` source overlay is the audited patch that was folded into it at tag
+`aisis-pre-weather-20261117` and only applies to the older, hash-pinned baseline.
+A change to the quasar layer ships as before (overlay candidate, [isolated corpus evidence protocol](corpus-runner/README.md),
+`bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"`) and, in the same PR, is committed to
+aisis-quasar, tagged and pinned in `quasar-source.lock`;
+`overlays/speaker-room/run_tests.sh` runs `tests/*.mts` against the overlay applied to the baseline container's sources,
+in scratch containers with no network.
 
 One-time setup on the host: `scripts/install-weather-cli.sh` (clones weather-cli to `~/xp/weather-cli`, links
 `~/.local/bin/weather`, writes `~/.config/weather-cli/config.json` from `WEATHER_LAT/LON/TZ` when given, otherwise
@@ -89,6 +92,41 @@ CLI shows up as `weather_failed reason=weather_cli_not_found` in the adapter log
 its stderr). Without a place config every answer depends on Home Assistant being up (the home zone is read from it). weather-cli
 reads Home Assistant through `aisis-ha-cli` (`WEATHER_HA_URL`, default `AISIS_HACLI_URL`); ha-cli forwards the
 query string, which `weather.get_forecasts?return_response` needs.
+
+## Quasar source
+
+The quasar-server source of the running image is the public fork
+[alex-mextner/aisis-quasar](https://github.com/alex-mextner/aisis-quasar) (GPL-3.0, upstream
+[v3rt3p/quasar-server](https://github.com/v3rt3p/quasar-server)). `quasar-source.lock` pins its repository, tag, 40-hex commit and the
+production image (name and immutable id) whose sources that commit reproduces; today `aisis-volume-zero-e859a37b`.
+This is the recovery and audit path of https://github.com/alex-mextner/aisis/issues/108: a lost image or host is rebuilt from the
+tag, and `verify_quasar_image.py` proves a running image carries exactly those sources.
+
+```bash
+export AISIS_QUASAR_SOURCE=$(scripts/prepare-quasar-source.sh)   # clean checkout at the locked commit; refuses a tag that moved or any stray file
+python3 scripts/verify_quasar_image.py <image id or tag>          # /src and the root manifests == the checkout, byte for byte (exit 0/1, 2 = error)
+docker build -t aisis-quasar:recovery-<date> "$AISIS_QUASAR_SOURCE"   # upstream Dockerfile, from scratch (disaster recovery)
+```
+
+Not yet supported: **deploying** an image built that way. The corpus-evidence protocol only accepts a candidate that is exactly one
+`COPY src /src` layer over a base image with overlay provenance (`deploy.sh` `build_image overlay`), which a from-scratch build is
+not; teaching the protocol a checkout-built candidate is part of https://github.com/alex-mextner/aisis/issues/188. Until then the
+overlay path above is the only deploy path and nothing in it changed. `verify_quasar_image.py` only reads the image
+(`docker create --pull=never` + `docker cp`, no run, no environment). The Home Assistant token is passed at run time
+(`AISIS_HA_TOKEN` or an untracked `/src/ha.config.json`), never read from the repository.
+
+| Public repository | What | Base and license |
+|---|---|---|
+| [aisis-quasar](https://github.com/alex-mextner/aisis-quasar) | quasar-server with the AISIS patches as commits, one tag per deployed image | v3rt3p/quasar-server `fefcd58`, GPL-3.0 |
+| [aisis-station-kit](https://github.com/alex-mextner/aisis-station-kit) | patch on eQuasar (`aisis-station-kit.service`) with a script that applies it to the pinned upstream | krevetkqqq/lite-kit `8a82ff3`, MIT |
+| [aisis-androidtv-remote](https://github.com/alex-mextner/aisis-androidtv-remote) | Home Assistant native Android TV Remote integration with IME fixes | Home Assistant Core 2026.9.3 extract, Apache-2.0 |
+
+The `overlays/` directories stay for changes that are not in aisis-quasar yet; the four already deployed (`speaker-room`,
+`intent-grammar`, `weather-via-cli`, `volume-zero`) are folded into the fork's tags and no longer apply to the current image (their
+hash pins refuse it). The `weather-via-cli` baseline (`entity-index.ts`, sha256 `73474b5c…`) is byte-identical to the tree at tag
+`aisis-pre-weather-20261117`; its patched file (`c24efb90…`) is the one at `aisis-bg-weather-via-cli-20261117`. The intent-grammar
+patched files (`asr-correct.ts` `1f337435…`, `ha-intents.ts` after speaker-room `f4ab25c3…`, `grammar-hook.ts` `f6f6021e…`) are
+the ones at `aisis-pre-weather-20261117`.
 
 ## Ops runbook
 
@@ -102,7 +140,7 @@ query string, which `weather.get_forecasts?return_response` needs.
   `dsp-bench-venv/`, `bluegreen-state/`, `corpus/`, `models/`, `prompts/`,
   `releases/`, `voice-archive/`, `dashboard-ui/`, `pm-deps/`, `dialogs.sqlite3`,
   `ha-state-cache.json`, …), `~/.config/aisis/` (runtime.env, whisper-prompt.env,
-  fish.key, per-feature json), `~/.cache/aisis/` (quasar-server source, fillers),
+  fish.key, per-feature json), `~/.cache/aisis/` (quasar-source checkout, fillers),
   `~/.local/state/aisis/` (adapter/pm sqlite, quasar-prod container state).
   Secrets (fish.key, runtime.env, *.env with tokens, sqlite) are never committed.
 - **Blue/green deploys**: prebuild one immutable candidate, export its reviewed
