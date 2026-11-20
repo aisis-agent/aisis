@@ -18,6 +18,7 @@ import asyncio
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 import utterance_trace
@@ -67,7 +68,15 @@ REPLY_BAD_DELTA = "Не понял, на сколько изменить тем�
 REPLY_NO_COLOR = "Эта лампа не меняет цвет."
 REPLY_NO_BRIGHTNESS = "Эта лампа не регулируется по яркости."
 REPLY_LIGHT_UNAVAILABLE = "Свет сейчас недоступен."
-REPLY_QUEUED = "Дом перезагружается, команду выполню, когда он вернётся."
+# What is said after a command is decided by what was OBSERVED (ha-cli verifies every call against the device state): the state said
+# yes, the state said no, or nothing could be read. A cause (a restart, an outage) is only named when ha-cli observed it.
+REPLY_QUEUED = "Home Assistant недоступен, команду выполню, когда он вернётся."
+REPLY_QUEUED_STARTING = "Home Assistant запускается, команду выполню, когда он вернётся."
+REPLY_QUEUED_UNKNOWN = "Не получилось проверить ответ Home Assistant, команда ждёт в очереди."
+REPLY_UNVERIFIED = "Не получилось проверить ответ Home Assistant."
+REPLY_NOT_CONFIRMED = "Команду отправил, но не вижу, чтобы устройство её выполнило."
+REPLY_DEVICE_UNAVAILABLE = "Home Assistant видит это устройство недоступным."
+REPLY_REJECTED = "Home Assistant отклонил команду."
 REPLY_FAILED = "Не удалось выполнить команду умного дома."
 REPLY_TEMPERATURE = "Ставлю {temp}."
 REPLY_MODE_TEMPERATURE = "{mode}, {temp}."
@@ -78,18 +87,50 @@ REPLY_BRIGHTNESS = "Яркость {percent}."
 # After a climate command the unit's state is read back: it takes a moment to report (an IR unit is optimistic, a cloud one lags).
 CONFIRM_READS = 4
 CONFIRM_PAUSE_S = 0.5
-REPLY_NOT_CONFIRMED = "Команду отправил, но не вижу, чтобы устройство её выполнило."
-REPLY_UNVERIFIED = "Не получилось проверить ответ Home Assistant."
 
 _UNAVAILABLE = ("unavailable", "unknown")
 
 
-class _Outcome(Exception):
-    """Abort a command with the sentence to speak (no such device, Home Assistant failed)."""
+@dataclass(frozen=True)
+class HaReply:
+    """What a POST to ha-cli answered. `verify` is ha-cli's verdict on the device state after the call (hacli.py, ha_verify.py):
+    {"result": ok|failed|unknown|skipped, "reason", "ms", "attempts", "after": {entity: state}}; None from a proxy that does not
+    verify. `ha`: Home Assistant's own outcome as ha-cli saw it (an HTTP status or an error kind), `down`: the evidence that
+    Home Assistant is gone, on a call that was queued."""
+    status: int
+    body: Any = None
+    verify: dict | None = None
+    action: str | None = None
+    ha: str | None = None
+    down: str | None = None
 
-    def __init__(self, reply: str) -> None:
+    @classmethod
+    def from_response(cls, status: int, body: Any, headers: Any) -> "HaReply":
+        result = headers.get("X-Aisis-Verify")
+        verify = None
+        if result:
+            after = {}
+            for item in (headers.get("X-Aisis-Verified-State") or "").split(","):
+                entity, _, state = item.partition("=")
+                if entity and state:
+                    after[entity] = state
+            ms, attempts = headers.get("X-Aisis-Verify-Ms"), headers.get("X-Aisis-Verify-Attempts")
+            verify = {"result": result, "reason": headers.get("X-Aisis-Verify-Reason"),
+                      "ms": int(ms) if ms and ms.isdigit() else None, "attempts": int(attempts) if attempts and attempts.isdigit() else None,
+                      "after": after or None}
+            unchecked = [part for part in (headers.get("X-Aisis-Verify-Unchecked") or "").split(",") if part]
+            if unchecked:
+                verify["unchecked"] = unchecked
+        return cls(status, body, verify, headers.get("X-Aisis-Action"), headers.get("X-Aisis-Ha-Status"), headers.get("X-Aisis-Down"))
+
+
+class _Outcome(Exception):
+    """Abort a command with the sentence to speak (no such device, Home Assistant failed) and the reason code of that sentence."""
+
+    def __init__(self, reply: str, why: str = "not_executed") -> None:
         super().__init__(reply)
         self.reply = reply
+        self.why = why
 
 
 def _plural(n: int, forms: tuple[str, str, str]) -> str:
@@ -117,11 +158,20 @@ def _num(value: Any) -> float | None:
 
 
 class _Command:
-    """The service calls of one voice command. hacli answers 202 when Home Assistant is down and it queued the call for the
-    recovery: the command goes on, so that every operation of it (all the entities, the mode and the setpoint) is queued."""
+    """The service calls of one voice command. hacli answers 202 when it OBSERVED Home Assistant gone and queued the call for the
+    recovery: the command goes on, so that every operation of it (all the entities, the mode and the setpoint) is queued.
+    `queued` is None, or the evidence of the outage hacli gave (empty from a proxy that gave none)."""
 
     def __init__(self) -> None:
-        self.queued = False
+        self.queued: str | None = None
+        self.verified = 0           # calls whose device state was read and was as expected
+        self.partial = 0            # calls whose state matched but part of the request (a colour the lamp cannot show) could not be checked
+        self.unverified = 0         # calls Home Assistant acknowledged without a verdict
+        self.failure: _Outcome | None = None   # the first independent call that was not confirmed: spoken once the others were sent
+
+    def raise_failure(self) -> None:
+        if self.failure is not None:
+            raise self.failure
 
 
 class _Plan:
@@ -162,7 +212,7 @@ def speaker_area(areas: dict[str, str], station: str | None) -> str | None:
 
 class HaActions:
     def __init__(self, get_json: Callable[[str], Awaitable[Any]],
-                 post_json: Callable[[str, dict], Awaitable[tuple[int, Any]]],
+                 post_json: Callable[[str, dict], Awaitable[HaReply]],
                  ttl: float = 60.0, clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         self._get = get_json
@@ -174,6 +224,10 @@ class HaActions:
         self._areas: dict[str, tuple[float, list[str]]] = {}
         self._registry: tuple[float, dict[str, str]] | None = None
         self._climate_turn = asyncio.Lock()      # one climate command at a time: a «теплее» reads, sends and confirms before the next reads
+
+    @staticmethod
+    def _queued_reply(evidence: str) -> str:
+        return {"": REPLY_QUEUED_UNKNOWN, "starting": REPLY_QUEUED_STARTING}.get(evidence, REPLY_QUEUED)
 
     async def run(self, executor: str, args: dict, station: str | None = None) -> str:
         """`station`: the speaker that heard the command, for a command that names no room."""
@@ -195,12 +249,25 @@ class HaActions:
             else:
                 reply = await handler(area, args, command)
         except _Outcome as out:
-            utterance_trace.note(outcome=out.reply)
+            utterance_trace.note(outcome=out.reply, reply_why=out.why)
+            if command.queued is not None:
+                # Other calls of the command were queued for Home Assistant's return: the failure is not the whole story.
+                return f"{out.reply} {self._queued_reply(command.queued)}"
             return out.reply
         except Exception as err:
             utterance_trace.error("ha: " + type(err).__name__)
+            utterance_trace.note(reply_why="ha_exception")
             return REPLY_FAILED
-        return REPLY_QUEUED if command.queued else reply
+        if command.queued is not None:
+            utterance_trace.note(reply_why="ha_down_observed" if command.queued else "ha_queued_unverified")
+            return self._queued_reply(command.queued)
+        if not command.verified and not command.partial and not command.unverified:
+            utterance_trace.note(reply_why="not_executed")     # a reply that needed no Home Assistant call at all
+        elif command.partial:
+            utterance_trace.note(reply_why="ha_partially_verified")
+        else:
+            utterance_trace.note(reply_why="ha_verified" if command.verified and not command.unverified else "ha_acknowledged")
+        return reply
 
     async def _room(self, room: str | None, station: str | None) -> str:
         """The HA area the command is about: the room said, else the room of the speaker that heard it."""
@@ -222,7 +289,7 @@ class HaActions:
             return self._states[1]
         raw = await self._get("/api/states")
         if not isinstance(raw, list):
-            raise _Outcome(REPLY_FAILED)
+            raise _Outcome(REPLY_FAILED, "ha_read_failed")
         states = {s["entity_id"]: s for s in raw if isinstance(s, dict) and isinstance(s.get("entity_id"), str)}
         self._states = (now, states)
         return states
@@ -231,10 +298,10 @@ class HaActions:
         now = self._clock()
         if self._registry and now - self._registry[0] < self._ttl:
             return self._registry[1]
-        status, body = await self._post("/api/template", {"template": REGISTRY_TEMPLATE})
-        if status != 200:
-            raise _Outcome(REPLY_FAILED)
-        areas = _registry(body)
+        reply = await self._post("/api/template", {"template": REGISTRY_TEMPLATE})
+        if reply.status != 200:
+            raise _Outcome(REPLY_FAILED, "ha_read_failed")
+        areas = _registry(reply.body)
         self._registry = (now, areas)
         return areas
 
@@ -247,9 +314,10 @@ class HaActions:
         # string literal. json.dumps escapes the double quote, the backslash and control characters, which Jinja's string
         # tokenizer decodes back; an apostrophe or `') if … else area_entities('` in a name stays inside the string.
         template = f"{{{{ area_entities({json.dumps(area, ensure_ascii=False)}) | tojson }}}}"
-        status, body = await self._post("/api/template", {"template": template})
-        if status != 200:
-            raise _Outcome(REPLY_FAILED)
+        reply = await self._post("/api/template", {"template": template})
+        if reply.status != 200:
+            raise _Outcome(REPLY_FAILED, "ha_read_failed")
+        body = reply.body
         try:
             parsed = json.loads(body) if isinstance(body, str) else body
         except ValueError:
@@ -257,7 +325,7 @@ class HaActions:
             registry = _registry(body)
             parsed = [entity_id for entity_id, name in registry.items() if name == area] if registry else None
         if not isinstance(parsed, list):
-            raise _Outcome(REPLY_FAILED)
+            raise _Outcome(REPLY_FAILED, "ha_read_failed")
         ids = [e for e in parsed if isinstance(e, str)]
         self._areas[area] = (now, ids)
         return ids
@@ -272,17 +340,47 @@ class HaActions:
         fields = {"service": f"{domain}.{service}", "entity": body.get("entity_id"),
                   "data": {k: v for k, v in body.items() if k != "entity_id"} or None}
         try:
-            status, _ = await self._post(f"/api/services/{domain}/{service}", body)
+            reply = await self._post(f"/api/services/{domain}/{service}", body)
         except Exception as err:
             utterance_trace.call("ha", **fields, ok=False, error=type(err).__name__, ms=int((time.monotonic() - started) * 1000))
-            raise _Outcome(REPLY_FAILED)
-        ok = 200 <= status < 300
-        utterance_trace.call("ha", **fields, status=status, ok=ok, queued=True if status == 202 else None,
+            raise _Outcome(REPLY_UNVERIFIED, "ha_unreachable")
+        verify = reply.verify or {}
+        result = verify.get("result")
+        ok = reply.status == 202 or result == "ok" or (result not in ("failed", "unknown") and 200 <= reply.status < 300)
+        utterance_trace.call("ha", **fields, status=reply.status, ok=ok, queued=True if reply.status == 202 else None,
+                             verify=reply.verify, aid=reply.action, ha=reply.ha, down=reply.down,
                              ms=int((time.monotonic() - started) * 1000))
-        if status == 202:
-            command.queued = True
-        elif not ok:
-            raise _Outcome(REPLY_FAILED)
+        if reply.status == 202:
+            command.queued = reply.down or ""
+        elif result == "ok":
+            if verify.get("unchecked"):
+                command.partial += 1
+            else:
+                command.verified += 1
+        elif result == "failed":
+            unavailable = verify.get("reason") == "device_unavailable"
+            raise _Outcome(REPLY_DEVICE_UNAVAILABLE if unavailable else REPLY_NOT_CONFIRMED,
+                           "ha_device_unavailable" if unavailable else "ha_not_confirmed")
+        elif result == "unknown":
+            raise _Outcome(REPLY_UNVERIFIED, "ha_unverified")
+        elif 400 <= reply.status < 500:
+            raise _Outcome(REPLY_REJECTED, "ha_rejected")
+        elif 200 <= reply.status < 300:
+            command.unverified += 1
+        else:
+            raise _Outcome(REPLY_FAILED, "ha_error")
+
+    async def _each(self, command: _Command, call: Awaitable[Any]) -> tuple[bool, Any]:
+        """One of several calls that do not depend on each other (the lamps of a room, the units of an area): a call that was not
+        confirmed does not stop the others, the first such failure is spoken after all of them were sent. An unreachable ha-cli
+        still stops the command: every further call would wait for the same timeout."""
+        try:
+            return True, await call
+        except _Outcome as outcome:
+            if outcome.why == "ha_unreachable":
+                raise
+            command.failure = command.failure or outcome
+            return False, None
 
     # -- climate --------------------------------------------------------------------------------------------------
 
@@ -382,14 +480,14 @@ class HaActions:
         utterance_trace.call("ha", service="climate.read_back", entity=entity_id, ok=False, attempts=CONFIRM_READS,
                              state=None if seen is None else seen.get("state"))
         if seen is None:
-            raise _Outcome(REPLY_UNVERIFIED)
+            raise _Outcome(REPLY_UNVERIFIED, "ha_unverified")
         if seen.get("state") in _UNAVAILABLE:
-            raise _Outcome(REPLY_CLIMATE_UNAVAILABLE)
-        raise _Outcome(REPLY_NOT_CONFIRMED)
+            raise _Outcome(REPLY_CLIMATE_UNAVAILABLE, "ha_device_unavailable")
+        raise _Outcome(REPLY_NOT_CONFIRMED, "ha_not_confirmed")
 
     async def _settle(self, command: _Command, plans: list["_Plan"]) -> list[dict]:
         """What each unit reports after the command. Nothing is read for a queued command (Home Assistant is down) or for a unit that got none."""
-        if command.queued:
+        if command.queued is not None:
             return []
         return [await self._confirm(p.entity["entity_id"], p.mode, p.temp) if p.sent else p.entity for p in plans]
 
@@ -446,18 +544,26 @@ class HaActions:
                 mode = self._wake_mode(entity, None) if was_off else None
                 if was_off and mode is None:
                     return REPLY_MODE_UNSUPPORTED
-                if mode is not None:
-                    await self._service(command, "climate", "set_hvac_mode", {"entity_id": entity["entity_id"], "hvac_mode": mode})
-                plans.append(_Plan(entity, was_off, mode, None, sent=mode is not None))
+                if mode is None:
+                    plans.append(_Plan(entity, was_off, None, None, sent=False))
+                else:
+                    sent, _ = await self._each(command, self._service(command, "climate", "set_hvac_mode",
+                                                                      {"entity_id": entity["entity_id"], "hvac_mode": mode}))
+                    if sent:
+                        plans.append(_Plan(entity, was_off, mode, None))
             elif temperature is None:
-                await self._service(command, "climate", "set_hvac_mode", {"entity_id": entity["entity_id"], "hvac_mode": hvac})
-                entity["state"] = hvac
-                plans.append(_Plan(entity, was_off, hvac, None))
+                sent, _ = await self._each(command, self._service(command, "climate", "set_hvac_mode",
+                                                                  {"entity_id": entity["entity_id"], "hvac_mode": hvac}))
+                if sent:
+                    entity["state"] = hvac
+                    plans.append(_Plan(entity, was_off, hvac, None))
             else:
-                spoken, mode = await self._set_temperature(command, entity, temperature, hvac)
-                plans.append(_Plan(entity, was_off, mode, spoken))
+                sent, result = await self._each(command, self._set_temperature(command, entity, temperature, hvac))
+                if sent:
+                    plans.append(_Plan(entity, was_off, result[1], result[0]))
+        command.raise_failure()
         seen = await self._settle(command, plans)
-        if command.queued:
+        if command.queued is not None:
             return REPLY_QUEUED
         if not any(p.sent for p in plans):
             return self._reply_already_on(seen[0])
@@ -495,12 +601,14 @@ class HaActions:
                     return REPLY_NO_CURRENT_TEMP
                 continue
             was_off = self._is_off(entity)
-            result, mode = await self._set_temperature(command, entity, base + direction * amount)
-            plans.append(_Plan(entity, was_off, mode, result))
+            sent, result = await self._each(command, self._set_temperature(command, entity, base + direction * amount))
+            if sent:
+                plans.append(_Plan(entity, was_off, result[1], result[0]))
+        command.raise_failure()
         if not plans:
             return REPLY_NO_CURRENT_TEMP
         seen = await self._settle(command, plans)
-        if command.queued:
+        if command.queued is not None:
             return REPLY_QUEUED
         woken = [state for p, state in zip(plans, seen) if p.was_off]
         if woken:
@@ -538,8 +646,9 @@ class HaActions:
                 body = {"color_name": color}
             else:
                 continue
-            await self._service(command, "light", "turn_on", {"entity_id": light["entity_id"], **body})
+            await self._each(command, self._service(command, "light", "turn_on", {"entity_id": light["entity_id"], **body}))
             done += 1
+        command.raise_failure()
         if not done:
             return REPLY_NO_COLOR
         return REPLY_COLOR.format(color=COLOR_NAMES[color].capitalize())
@@ -554,8 +663,10 @@ class HaActions:
             modes = (light.get("attributes") or {}).get("supported_color_modes")
             if modes is not None and set(modes) <= {"onoff"}:
                 continue
-            await self._service(command, "light", "turn_on", {"entity_id": light["entity_id"], "brightness_pct": percent})
+            await self._each(command, self._service(command, "light", "turn_on",
+                                                    {"entity_id": light["entity_id"], "brightness_pct": percent}))
             done += 1
+        command.raise_failure()
         if not done:
             return REPLY_NO_BRIGHTNESS
         return REPLY_BRIGHTNESS.format(percent=f"{percent} {_plural(percent, ('процент', 'процента', 'процентов'))}")

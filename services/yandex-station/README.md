@@ -128,6 +128,43 @@ hash pins refuse it). The `weather-via-cli` baseline (`entity-index.ts`, sha256 
 patched files (`asr-correct.ts` `1f337435…`, `ha-intents.ts` after speaker-room `f4ab25c3…`, `grammar-hook.ts` `f6f6021e…`) are
 the ones at `aisis-pre-weather-20261117`.
 
+### A command is done when the device says so (ha-cli verification)
+
+2026-11-19 21:21 «выключи свет»: the light was off 0.85 s after the command, Home Assistant's own HTTP answer took longer than the
+2 s ha-cli then allowed, ha-cli treated the silence as «Home Assistant is down», queued the call (and replayed it behind the
+speaker's back) and the quasar layer announced «Умный дом перезагружается»: a reboot nobody observed (HA's log is continuous since
+04:33). Rule since: after any state-changing call the outcome is read from the DEVICE STATE, and what is said never names a cause
+that was not observed.
+
+- **Where**: `hacli.py` runs every `POST /api/services/<domain>/<service>` against `ha_verify.py` (per domain: light/switch/fan on-off,
+  brightness and colour temperature, climate mode and setpoint, media volume/mute/play/pause, cover, lock, number/select;
+  `entity_id: all` for lights/switches/fans through one template read). While the call is in flight it polls the target states
+  and answers as soon as they are as expected; when Home Assistant's answer is an error or never comes it checks the state anyway.
+  A call with nothing to check (tts, scripts, scenes, area/device targets) is answered as Home Assistant answered it.
+- **Answers** (all inside `CALL_BUDGET_S` = 2.5 s, the callers abort at 3 s): `200` + `X-Aisis-Verify: ok` (state as expected,
+  `X-Aisis-Verified-State`, `X-Aisis-Verify-Ms`); `502` + `failed` (Home Assistant answered, the device did not follow, or is
+  `unavailable`; `X-Aisis-Ha-Status` is what Home Assistant said); `504` + `unknown` (no state could be read: silence, never a
+  restart); `202` + `X-Aisis-Queue`, `X-Aisis-Eta`, `X-Aisis-Down: refused|reset|dns|unreachable|starting` only when Home Assistant
+  was OBSERVED gone (refused/reset/502-504/«starting» on the call AND on a second look) — the call then waits for its return
+  and is replayed and checked; `4xx` Home Assistant's own rejection. `X-Aisis-Action` is the journal id of the action.
+- **Availability** (`/health`: `status` up|slow|down, `last_error`): one unanswered request is `slow`, `down` needs evidence or 5 s
+  of silence; only down windows are measured into `ha-outages.json` (they feed the recovery ETA), a slow answer is not an outage.
+- **Adapter** (`ha_actions.py`): the reply is chosen from the verdict: «Яркость 40 процентов.» when verified, «Команду отправил,
+  но не вижу, чтобы устройство её выполнило.» when Home Assistant said yes and the device did not move, «Не получилось проверить
+  ответ Home Assistant.» when nothing could be read, «Home Assistant недоступен, команду выполню, когда он вернётся.» only on an
+  observed outage. The utterance trace keeps per call `verify`, `aid`, `ha`, `down` and per reply `reply_why` (reason code).
+- **Logs**: one JSON line per action, availability change and replay: `journalctl --user -u aisis-ha-cli -g ha_action` or
+  `~/.local/share/aisis/ha-actions.jsonl` (+ `.1`, `.2`, 1 MB each, lines ≤ 1800 chars, scalar arguments only, no tokens, long texts
+  as `(N chars)`). Fields: `service`, `entities`, `expect`, `before`, `call` {status|error, ms; `pending` when the caller was answered
+  first, the end follows as an `ha_response` line}, `verify` {result, reason, attempts, ms, after, wrong}, `reply` {status, why}, `ms`.
+  The clip post and the session page show them (`проверено: light.x выкл за 0.8 с` / `не подтверждено: …`) by time, and by journal
+  id for the adapter's own calls. `ha_fakes.py` is the fake Home Assistant of the tests; `test_ha_replay.py` replays the clip through
+  an isolated adapter + ha-cli + fake Home Assistant.
+- **Quasar layer**: its own Home Assistant calls (`ha-intents.ts`, in the image) get the verdict from the same headers: `200` is a verified
+  success; it still reads `202` as «перезагружается» and any other non-2xx as «Не удалось выполнить команду»; an overlay that says what
+  ha-cli observed (`X-Aisis-Verify`, `X-Aisis-Down`) instead is the open follow-up. `deploy.sh unit ha-cli hacli.py` installs `ha_verify.py` and
+  `ha_action_log.py` with it.
+
 ## Ops runbook
 
 - **Deploy units**: `scripts/install-systemd-units.sh` (repo root) copies every

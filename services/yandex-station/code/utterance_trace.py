@@ -14,7 +14,11 @@ Record (JSON, all keys optional except v/ts/via/text):
   declined why the decision was not run by the adapter («owner: quasar», «not configured», ...)
   asked    clarify | reprompt | brain: the reply is a question that waits for an answer; joined: the clarification text this phrase was joined to
   reply, listen, suppressed (reprompt_cooldown, ...)
-  calls    [{"kind": "ha"|"weather-cli"|"music"|"timer", ...fields, "ok": bool, "ms": int}]
+  reply_why  the reason code of the reply of a Home Assistant command (ha_verified | ha_not_confirmed | ha_unverified | ha_down_observed | ...,
+           ha_action_log.WHY_RU); the sentence names only what ha-cli observed on the device
+  calls    [{"kind": "ha"|"weather-cli"|"music"|"timer", ...fields, "ok": bool, "ms": int}]; an "ha" call also carries
+           verify {"result": ok|failed|unknown|skipped, "reason", "ms", "after"} (ha-cli's verdict on the device state after the call),
+           aid (the ha-cli journal id of the action), ha (Home Assistant's own outcome: HTTP status or error kind), down (outage evidence)
   jev      {"mode", "decision", "reason", "confidence", "ms", "acted"}
   brain    {"provider", "slot", "model", "attempts": [{"result", "seconds"}], "ms"}
   stages_ms {"grammar": .., "skills": .., "jev": .., "brain": .., "total": ..}

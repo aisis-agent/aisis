@@ -166,4 +166,6 @@ services:
     command: [python3, -B, /app/hacli.py]
     volumes:
       - ${AISIS_CODE_DIR:-${HOME}/xp/aisis/services/yandex-station/code}/hacli.py:/app/hacli.py:ro
+      - ${AISIS_CODE_DIR:-${HOME}/xp/aisis/services/yandex-station/code}/ha_action_log.py:/app/ha_action_log.py:ro
+      - ${AISIS_CODE_DIR:-${HOME}/xp/aisis/services/yandex-station/code}/ha_verify.py:/app/ha_verify.py:ro
       - ${AISIS_DATA_DIR:-${HOME}/.local/share/aisis}/ha-state-cache.json:/home/stage/.local/share/aisis/ha-state-cache.json:ro

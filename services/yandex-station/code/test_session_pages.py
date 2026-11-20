@@ -182,6 +182,16 @@ class Rendering(unittest.TestCase):
         self.assertTrue(timer["source"].startswith("  - id: timer.set"))
         self.assertIn(f"строки {timer['line']}–{timer['end']}", page)
 
+    def test_a_late_verdict_stays_with_the_utterance_that_made_the_call(self):
+        """The background look ends while the next phrase is being said: its record keeps the time of its own action."""
+        first = clip("20261117T160337-aaaaaa", NOW + 9, "sent", "первая фраза")
+        second = clip("20261117T160343-bbbbbb", NOW + 14, "sent", "вторая фраза")
+        late = {"kind": "late_verify", "ts": NOW + 9.6, "done_ts": NOW + 15.5, "id": "a1", "service": "climate.set_hvac_mode",
+                "entities": ["climate.ac"], "verify": {"result": "ok", "reason": "state_matched", "ms": 5200, "after": {"climate.ac": "cool"}}, "ms": 5200}
+        page = session_pages.render_session(None, [first, second], [], key="x", ha_actions=[late])
+        self.assertEqual(page.count("позже:"), 1)
+        self.assertLess(page.index("позже:"), page.index("вторая фраза"))
+
 
 class Ownership(unittest.TestCase):
     def test_a_call_belongs_to_the_same_dialog_whether_one_or_all_are_requested(self):

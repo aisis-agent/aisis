@@ -33,7 +33,8 @@ class QueryForwardingTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         with mock.patch.dict(os.environ, {"AISIS_HACLI_HA_URL": "http://127.0.0.1:1",
                                           "AISIS_HACLI_CACHE": cls.tmp.name + "/cache.json",
-                                          "AISIS_HACLI_OUTAGES": cls.tmp.name + "/outages.json"}):
+                                          "AISIS_HACLI_OUTAGES": cls.tmp.name + "/outages.json",
+                                          "AISIS_HACLI_JOURNAL": cls.tmp.name + "/journal.jsonl"}):
             import hacli
         cls.hacli = hacli
         # hacli reads its configuration at import: point the module at this class's stub for the class lifetime.
