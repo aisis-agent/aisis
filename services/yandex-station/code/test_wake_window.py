@@ -172,6 +172,73 @@ class NameEnd(unittest.TestCase):
                 self.assertLessEqual(found.end_ms, 2140)
 
 
+class SkipDetail(unittest.TestCase):
+    """When the window leaves the audio alone it says what it saw, so that the next miss is explained from the journal (2026-11-22 11:48:24:
+    `not_alone` on a name the stored cut shows alone; the gateway keeps no audio of a skipped history)."""
+
+    def detail(self, found):
+        return dict(item.split("=") for item in found.detail.split())
+
+    def test_a_quiet_history_reports_the_loudest_frame_and_the_room_floor(self):
+        found = wake_window.locate(room(HISTORY // 20 + 20, 1.0), HISTORY)
+        self.assertEqual(found.reason, "no_name")
+        seen = self.detail(found)
+        self.assertEqual(float(seen["peak"]), 1.0)
+        self.assertEqual(float(seen["floor"]), 1.0)
+
+    def test_speech_in_front_of_the_name_is_reported_with_its_place_and_level(self):
+        levels = room(HISTORY // 20 + 20, 1.0)
+        levels[90:106] = burst(16, 30.0)         # the name, 1800-2120 ms
+        levels[78:81] = [14.0, 14.0, 14.0]       # something said 0.7 s before it
+        found = wake_window.locate(levels, HISTORY)
+        self.assertEqual(found.reason, "not_alone")
+        seen = self.detail(found)
+        self.assertEqual(int(seen["start_ms"]), 1800)
+        self.assertEqual(float(seen["peak"]), 30.0)
+        self.assertEqual(float(seen["before"]), 14.0)
+        self.assertEqual(int(seen["before_ms"]), 1560)
+
+    def test_a_name_without_a_pause_reports_where_the_burst_starts(self):
+        found = wake_window.locate(history(2040, gap_ms=0), HISTORY)
+        self.assertEqual(found.reason, "no_pause")
+        seen = self.detail(found)
+        self.assertEqual(int(seen["start_ms"]), (2040 - 380))
+        self.assertGreater(float(seen["peak"]), 3.0)
+
+    def test_a_cut_has_no_detail_to_report(self):
+        self.assertEqual(wake_window.locate(history(2040, gap_ms=100), HISTORY).detail, "")
+
+
+class NameByPosition(unittest.TestCase):
+    """Where the window cannot find the name in the levels, the VAD's own utterance still shows it: everything inside the station's history
+    is older than the spotter trigger, so a short utterance that ended there is the name and never request content (gateway journal
+    2026-11-09 … 11-22: 24 real names end 92-612 ms in front of the history's end; no request does)."""
+
+    def test_a_short_utterance_that_ended_in_front_of_the_history_end_is_the_name(self):
+        for end in (HISTORY - 60, HISTORY - 170, HISTORY - 400, HISTORY - 700):
+            with self.subTest(end=end):
+                self.assertTrue(wake_window.name_by_position(HISTORY, end, 300))
+
+    def test_an_utterance_that_reaches_the_end_of_the_history_is_not_the_name(self):
+        """A request's first word starts up to 0.22 s before the end of the history and is at least 200 ms long."""
+        for end in (HISTORY - 40, HISTORY, HISTORY + 300):
+            with self.subTest(end=end):
+                self.assertFalse(wake_window.name_by_position(HISTORY, end, 300))
+
+    def test_a_noise_far_in_front_of_the_name_place_is_not_the_name(self):
+        self.assertFalse(wake_window.name_by_position(HISTORY, 100, 80))                      # the click every stream starts with
+        self.assertFalse(wake_window.name_by_position(HISTORY, HISTORY - 701, 300))
+
+    def test_more_than_a_name_of_speech_is_not_the_name(self):
+        self.assertTrue(wake_window.name_by_position(HISTORY, HISTORY - 200, 600))
+        self.assertFalse(wake_window.name_by_position(HISTORY, HISTORY - 200, 620))
+
+    def test_a_stream_without_a_station_history_has_no_name_place(self):
+        self.assertFalse(wake_window.name_by_position(None, 1900, 300))                       # a follow-up turn: live from the first frame
+        self.assertFalse(wake_window.name_by_position(3478, 3300, 300))                       # a burst with live speech in it: where the history ends is unknown
+        self.assertFalse(wake_window.name_by_position(1400, 1300, 300))                       # shorter than any history the station sent
+
+
 class RealSessions(unittest.TestCase):
     """Eight stored sessions (gateway journal + clip store, 2026-11-10 … 11-17): the frame levels of their archived cuts, the
     stretches between cuts filled with room noise (the archive keeps cuts only), and where a cut is right. «Right» was settled by

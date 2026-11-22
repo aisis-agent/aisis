@@ -12,7 +12,9 @@ inside the burst (2026-11-20 11:18: 3.65 s in 0.18 s), the lead grows past any h
 `history_ms` reads the burst from arrival times, `locate` finds the pause that follows the name in the frame levels of the
 history and `Gate` holds the first audio of a stream until both are known, then hands on only what follows the name. When
 the name cannot be located without guessing (no pause after it, speech running through the whole window, a quiet history) the
-audio is handed on whole and the text-level strip (wake_word.py) stays the fallback. Pure functions, standard library only.
+audio is handed on whole and the text-level strip (wake_word.py) stays the fallback; the journal line of such a stream says what the
+decision saw (`Located.detail`). `name_by_position` is the backstop behind it: a short VAD utterance that ended inside the history is the
+name whatever the levels said. Pure functions, standard library only.
 """
 from __future__ import annotations
 
@@ -39,6 +41,9 @@ MIN_PEAK = 8.0                 # RMS units of the station's uplink (a quiet room
 NAME_OVER_FLOOR = 2.5
 QUIET_OF_PEAK = 0.30
 QUIET_CAP_OF_PEAK = 0.60
+NAME_PLACE_MS = 700            # a name's last voiced frame lies at most this far in front of the history's end (24 real names: 92-612 ms, the VAD's hangover included)
+SPOTTER_MARGIN_MS = 60         # closer than this to the end it may be a request that starts in the last 0.22 s of the history (and is at least 200 ms long)
+MAX_NAME_SPEECH_MS = 600       # voiced time of a name seen by its place: the longest name cut by the window is 560 ms, more is a name with words in it
 
 
 class Located(NamedTuple):
@@ -46,12 +51,25 @@ class Located(NamedTuple):
     reason: str            # why not ("" when cut)
     voiced_ms: int = 0     # the name's burst, for the archive row of the removed audio
     start_ms: int = 0      # where the name's burst starts
+    detail: str = ""       # what the decision saw, for the journal line of a stream left alone ("" when cut or when there was nothing to measure)
 
 
 def history_ms(audio_ms: int, elapsed_ms: int) -> int | None:
     """Audio that arrived ahead of real time, when that looks like the station's history; else None."""
     lead = audio_ms - elapsed_ms
     return lead if MIN_HISTORY_MS <= lead <= MAX_HISTORY_MS else None
+
+
+def name_by_position(history: int | None, speech_end_ms: int, voiced_ms: int) -> bool:
+    """Is a VAD utterance of an activation stream the name by where it lies? The history is the audio the station buffered before its
+    spotter fired, so what was said wholly inside it is older than the trigger: the name (a speaker's other words in front of it are no
+    request either). `speech_end_ms` is where the utterance's last voiced frame ends in the stream, `history` the measured history
+    (None: a stream without one: a follow-up turn, a socket that opened late with live speech in the burst), `voiced_ms` its speech.
+    The window cannot always read the name from the frame levels (a soft first syllable, a name ending late, a quiet name); this needs only
+    the utterance the Endpoint made anyway."""
+    return (history is not None and MIN_HISTORY_MS <= history <= MAX_HISTORY_MS
+            and history - NAME_PLACE_MS <= speech_end_ms <= history - SPOTTER_MARGIN_MS
+            and voiced_ms <= MAX_NAME_SPEECH_MS)
 
 
 def frame_levels(pcm: bytes, rate: int) -> list[float]:
@@ -73,8 +91,9 @@ def locate(levels: list[float], history: int) -> Located:
     floor = body[len(body) // 4] if body else 0.0
     window = levels[lo:hi]
     peak = max(window)
+    seen = f"peak={peak:.1f} floor={floor:.1f}"
     if peak < max(MIN_PEAK, NAME_OVER_FLOOR * floor):
-        return Located(None, "no_name")
+        return Located(None, "no_name", detail=seen)
     at = lo + window.index(peak)
     quiet = min(QUIET_CAP_OF_PEAK * peak, max(QUIET_OF_PEAK * peak, 1.5 * floor + 1.0))
     start = at
@@ -86,8 +105,11 @@ def locate(levels: list[float], history: int) -> Located:
             gap += 1
             if gap > BRIDGE_FRAMES:
                 break
-    if any(v > quiet for v in levels[max(CLICK_MS // FRAME_MS, start - ALONE_MS // FRAME_MS):start]):
-        return Located(None, "not_alone")
+    first = max(CLICK_MS // FRAME_MS, start - ALONE_MS // FRAME_MS)
+    in_front = levels[first:start]
+    if any(v > quiet for v in in_front):
+        loudest = max(in_front)
+        return Located(None, "not_alone", detail=f"{seen} start_ms={start * FRAME_MS} before={loudest:.1f} before_ms={(first + in_front.index(loudest)) * FRAME_MS}")
     last = (history - LAST_PAUSE_MS) // FRAME_MS
     index = at
     while index <= last:
@@ -103,7 +125,7 @@ def locate(levels: list[float], history: int) -> Located:
             index = end + 1
         else:
             index += 1
-    return Located(None, "no_pause")
+    return Located(None, "no_pause", detail=f"{seen} start_ms={start * FRAME_MS}")
 
 
 class Gate:

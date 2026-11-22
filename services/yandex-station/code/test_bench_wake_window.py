@@ -110,6 +110,59 @@ class Splice(unittest.TestCase):
         self.assertTrue(gate.decided)
 
 
+class Position(unittest.TestCase):
+    """`position`: the stored gateway journal replayed through the place rule (wake_window.name_by_position): which VAD cuts of the activation
+    streams the window left alone are taken for the name. The recognizer is never called. Real lines of 2026-11-22 11:48 (the owner's
+    «Алиса» clip tg#31613 and the request behind it; the session after it, whose name the window cut; a follow-up turn)."""
+
+    JOURNAL = """\
+2026-11-22T11:48:24.863913+01:00 host python[1]: INFO:aisis.stt:stt_session_open
+2026-11-22T11:48:24.873058+01:00 host python[1]: INFO:aisis.stt:stt_init rate=48000
+2026-11-22T11:48:25.498104+01:00 host python[1]: INFO:aisis.stt:stt_wake_window history_ms=2329 skipped=not_alone
+2026-11-22T11:48:25.515223+01:00 host python[1]: INFO:aisis.stt:stt_finalize reason=vad pcm=122880B speech_frames=15 peak=79 rms=5 received=284160B frames=148 voiced_ms=300 floor=1.1 contrast=14.1
+2026-11-22T11:48:28.274681+01:00 host python[1]: INFO:aisis.stt:stt_finalize reason=vad pcm=232320B speech_frames=79 peak=79 rms=6 received=552960B frames=288 voiced_ms=1280 floor=0.9 contrast=9.4
+2026-11-22T11:48:28.603773+01:00 host python[1]: INFO:aisis.stt:stt_session_close bytes=583680B frames=304
+2026-11-22T11:48:33.766560+01:00 host python[1]: INFO:aisis.stt:stt_session_open
+2026-11-22T11:48:33.789963+01:00 host python[1]: INFO:aisis.stt:stt_init rate=48000
+2026-11-22T11:48:34.413103+01:00 host python[1]: INFO:aisis.stt:stt_wake_window history_ms=2287 cut_ms=2020 voiced_ms=180
+2026-11-22T11:48:36.754593+01:00 host python[1]: INFO:aisis.stt:stt_finalize reason=vad pcm=172800B speech_frames=36 peak=56 rms=3 received=508800B frames=265 voiced_ms=720 floor=0.9 contrast=8.9
+2026-11-22T11:48:37.053352+01:00 host python[1]: INFO:aisis.stt:stt_session_close bytes=537600B frames=280
+2026-11-22T11:48:44.415404+01:00 host python[1]: INFO:aisis.stt:stt_session_open
+2026-11-22T11:48:44.423994+01:00 host python[1]: INFO:aisis.stt:stt_init rate=48000
+2026-11-22T11:48:49.412978+01:00 host python[1]: INFO:aisis.stt:stt_finalize reason=finish pcm=264960B speech_frames=74 peak=55 rms=6 received=478080B frames=249 voiced_ms=1400 floor=1.5 contrast=7.3
+2026-11-22T11:48:49.766849+01:00 host python[1]: INFO:aisis.stt:stt_session_close bytes=478080B frames=249
+"""
+
+    def rows(self, **kwargs):
+        return bench.position_rows(bench.journal_sessions(self.JOURNAL), **kwargs)
+
+    def test_the_journal_keeps_what_the_window_decided_and_the_speech_of_each_cut(self):
+        skipped, cut, follow_up = bench.journal_sessions(self.JOURNAL)
+        self.assertEqual((skipped["window"], skipped["window_history_ms"]), ("not_alone", 2329))
+        self.assertEqual((cut["window"], cut["window_history_ms"]), ("cut", 2287))
+        self.assertIsNone(follow_up.get("window"))
+        self.assertEqual([c["voiced"] for c in skipped["cuts"]], [300, 1280])
+
+    def test_the_name_the_window_skipped_is_taken_by_its_place_and_the_request_behind_it_is_not(self):
+        rows = self.rows()
+        self.assertEqual([(row["window"], row["end_ms"], row["voiced_ms"], row["name"]) for row in rows],
+                         [("not_alone", 2160, 300, True), ("not_alone", 4960, 1280, False)])
+
+    def test_a_stream_the_window_cut_and_a_stream_without_history_have_no_rows(self):
+        self.assertEqual({row["opened"] for row in self.rows()}, {bench.journal_sessions(self.JOURNAL)[0]["open"]})
+
+    def test_a_stream_from_before_the_window_existed_is_judged_by_its_measured_lead(self):
+        journal = "\n".join(line for line in self.JOURNAL.splitlines() if "stt_wake_window" not in line)
+        sessions = bench.journal_sessions(journal)
+        rows = bench.position_rows(sessions)
+        self.assertEqual([(row["window"], row["name"]) for row in rows], [("-", True), ("-", False), ("-", False)])
+        self.assertEqual(rows[0]["history_ms"], round(1000 * sessions[0]["history"]))
+
+    def test_a_replayed_stretch_of_the_journal_can_be_left_out(self):
+        opened = bench.journal_sessions(self.JOURNAL)[0]["open"]
+        self.assertEqual(self.rows(exclude=[(opened - 1, opened + 1)]), [])
+
+
 class Arithmetic(unittest.TestCase):
     """The recognizer-free verdict of a cut against the splice's true layout (name ends at 2000 ms, request starts at 2200 ms)."""
 

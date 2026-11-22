@@ -280,6 +280,7 @@ class Utterance:
     swing: float = 0.0           # p90/p10 of the speech frames' RMS: speech rises and falls, hum/hiss/fan do not
     lead_pcm: bytes = b""        # the activation word the wake window cut off in front of this utterance: never recognised, still the speaker's voice
     lead_voiced_ms: int = 0
+    ended_ms: int = 0            # where in the audio handed to the Endpoint the utterance ends, its closing silence included (the stream's own time when nothing was cut from the head)
 
     @property
     def duration_ms(self):
@@ -390,6 +391,7 @@ class Endpoint:
         self.speech_frames = 0  # cumulative, unlike `voiced` which every flush resets
         self.silence = 0
         self.silence_limit = max(1, silence_ms // FRAME_MS)
+        self.frames = 0         # whole frames taken so far: where a cut ends is read at the frame that closed it, not at the end of the chunk that held it
 
     def boosted(self, frame, samples, peak):
         """VAD input: quiet frames lifted (never past full scale). webrtcvad is an energy model and
@@ -417,6 +419,7 @@ class Endpoint:
         while len(self.pending) >= self.frame_size:
             frame = bytes(self.pending[:self.frame_size])
             del self.pending[:self.frame_size]
+            self.frames += 1
             samples = array.array("h")
             samples.frombytes(frame)
             peak = max(map(abs, samples))
@@ -469,7 +472,7 @@ class Endpoint:
             trailing += 1
         voiced_rms = sorted(math.sqrt(energy / per_frame) for energy in voiced)
         return Utterance(
-            pcm=bytes(self.audio), rate=self.rate, voiced=len(voiced), trailing_ms=trailing * FRAME_MS,
+            pcm=bytes(self.audio), rate=self.rate, voiced=len(voiced), trailing_ms=trailing * FRAME_MS, ended_ms=self.frames * FRAME_MS,
             rms=int(math.sqrt(sum(energy for energy, _, _ in levels) / (len(levels) * per_frame))) if levels else 0,
             peak=max((peak for _, peak, _ in levels), default=0),
             voiced_rms=math.sqrt(sum(voiced) / (len(voiced) * per_frame)) if voiced else 0.0,
@@ -1101,7 +1104,7 @@ class STTGateway:
         gate = wake_window.Gate(16000, enabled=False)   # the real one is made when the sample rate arrives
         opened = self.clock()
         window_noted = False
-        name_lead = None   # (audio, voiced ms) of the cut name until the first real utterance after it takes it
+        name_lead = None   # (audio, voiced ms, where the age of the credit counts from) of the name until the first real utterance after it takes it
         fed = 0            # bytes handed to the endpoint: stream time after the cut, whatever the wall clock does (idle waits, stalls)
 
         def elapsed_ms():
@@ -1114,10 +1117,11 @@ class STTGateway:
             if gate.located is not None and not window_noted:
                 window_noted = True
                 if gate.removed is None:
-                    LOG.info("stt_wake_window history_ms=%d skipped=%s", gate.history, gate.located.reason)
+                    LOG.info("stt_wake_window history_ms=%d skipped=%s%s", gate.history, gate.located.reason,
+                             " " + gate.located.detail if gate.located.detail else "")
                 else:
                     unclear = WAKE_ONLY
-                    name_lead = (gate.name, gate.located.voiced_ms)
+                    name_lead = (gate.name, gate.located.voiced_ms, 0)   # `fed` starts behind the cut
                     endpoint.prime(gate.removed)
                     LOG.info("stt_wake_window history_ms=%d cut_ms=%d voiced_ms=%d", gate.history, len(gate.removed) * 1000 // (2 * gate.rate),
                              gate.located.voiced_ms)
@@ -1170,7 +1174,7 @@ class STTGateway:
                     await ws.close(code=1011, message=b"recognizer unavailable")
 
         def finalize(utt, reason):
-            nonlocal recognition, name_lead
+            nonlocal recognition, name_lead, unclear
             # Exactly one final per Quasar STT session. Native finish, VAD, and idle endpointing all
             # converge here; a VAD cut that fails the gate is dropped and the session keeps listening.
             # Level of everything received so far: tells "silence" (a follow-up window nobody
@@ -1182,8 +1186,18 @@ class STTGateway:
                 "%.1f" % utt.contrast if utt and utt.contrast is not None else "-")
             if final_sent:
                 return
+            if reason == "vad" and utt is not None and gate.removed is None \
+                    and wake_window.name_by_position(gate.history, utt.ended_ms - utt.trailing_ms, utt.voiced_ms):
+                # The window left this stream's audio alone (`stt_wake_window … skipped=`), yet the VAD cut a short utterance that ended inside the
+                # station's history, before its spotter fired: that is the name, whatever the levels looked like to the window. Same as a cut name: an
+                # activation event, never recognised, never a post of its own; the request that follows takes its length and voice.
+                LOG.info("stt_wake_position history_ms=%d end_ms=%d voiced_ms=%d", gate.history, utt.ended_ms - utt.trailing_ms, utt.voiced_ms)
+                unclear = WAKE_ONLY
+                name_lead = (utt.speech_pcm, utt.voiced_ms, utt.ended_ms - utt.trailing_ms)   # `fed` starts at the stream's start: the history in front of the name is no wait
+                self.archive(utt, {"trigger": "vad", "status": voiceclips.ACTIVATION, "reason": "wake_position", "transcript": None})
+                return
             if utt is not None and name_lead is not None and utt.voiced_ms >= LEAD_MIN_OWN_MS \
-                    and fed * 1000 // (2 * utt.rate) - utt.duration_ms <= LEAD_MAX_AGE_MS:
+                    and fed * 1000 // (2 * utt.rate) - utt.duration_ms - name_lead[2] <= LEAD_MAX_AGE_MS:
                 # The first stretch of real speech after the cut is the request: it counts the name's length and voice, as the pair did before
                 # the cut. A blip (the VAD's hangover at the cut, a click) or noise the gate rejects neither borrows the name nor uses it up.
                 led = replace(utt, lead_pcm=name_lead[0], lead_voiced_ms=name_lead[1])

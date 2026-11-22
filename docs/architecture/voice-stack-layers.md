@@ -310,8 +310,10 @@ The adapter stores one record per call it was asked (`utterance_traces` in `dial
   reply «Таймер на …» or «Напомню через …». Timers work only when the adapter is configured with that TTS entity and
   player; without them the answer is «Таймеры и будильники я пока не умею.» Whether the live adapter has them configured is
   `UNKNOWN` (its environment was not read).
-- **The wake word alone.** On the device the spotter fires. The gateway's wake-window cut removes the name from the audio;
-  when what remains is only the name (or Whisper wrote it as «Алиса.», «Малис.»), it is an **activation event**: no final
+- **The wake word alone.** On the device the spotter fires. The gateway's wake-window cut removes the name from the audio; a
+  name the window could not locate (a pause of more than 0.8 s behind it makes the VAD cut it as an utterance of its own) is
+  taken by its place: a short utterance that ended inside the station's pre-trigger history is the name. When what remains is
+  only the name (or Whisper wrote it as «Алиса.», «Малис.»), it is an **activation event**: no final
   goes to quasar, the session keeps listening, and the clip is archived with `status='activation'`. If the text does reach
   the grammar, `smalltalk.wake` answers with a canned «Слушаю.»
 
