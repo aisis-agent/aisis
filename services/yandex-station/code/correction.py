@@ -30,13 +30,16 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 
+import extra_dict
 import utterance_trace
 from intent_grammar import ActiveContext, Decision
 
 MODES = ("off", "shadow", "on")
+LOG = logging.getLogger("aisis.correction")
 WINDOW_S = 30.0          # how long a question waits for its answer (the router's CLARIFY_WINDOW_S)
 DUPLICATE_S = 4.0        # the same utterance delivered again this soon after the question is the same delivery (hook, turn, no-op probe), not an answer
 COOLDOWN_S = 60.0        # after a dialog about a phrase, the same phrase opens no new dialog for this long: a wrong hearing that repeats cannot loop
@@ -182,7 +185,7 @@ class Correction:
 
     def __init__(self, classify: Callable[[str], Decision | None], decide_in: Callable[[str, ActiveContext], Decision | None],
                  hypotheses: Any | None = None, *, mode: str = "on", core: Any | None = None, policy: Any | None = None,
-                 window_s: float = WINDOW_S) -> None:
+                 window_s: float = WINDOW_S, extra_dict_mode: str = "off") -> None:
         if mode not in MODES or mode == "off":
             raise ValueError(f"correction mode must be shadow or on, got {mode!r}")
         self.mode = mode
@@ -191,7 +194,7 @@ class Correction:
         self.hypotheses = hypotheses
         self.core = core if core is not None else import_core()
         self.policy = policy if policy is not None else self.core.Policy()
-        self.confusables = self.core.load()
+        self.confusables, self.shadow_confusables = self._confusables(extra_dict_mode)
         self.window_s = window_s
         self.dialogs: dict[str, Dialog] = {}
         self.expired: dict[str, Dialog] = {}               # the dialog whose window ran out, until the next utterance reports it
@@ -279,10 +282,40 @@ class Correction:
         """The grammar reads the text, or any listed hypothesis, as an emergency or as speech to drop."""
         return self._protected(text) or (nbest is not None and any(self._protected(h.text) for h in nbest.hypotheses))
 
+    def _shadow_extra(self, text: str) -> None:
+        """Shadow mode of the extra dictionary (#268): the candidates its confusables would add for `text`, logged and never used."""
+        if self.shadow_confusables is None:
+            return
+        known = {candidate.text for candidate in self.confusables.candidates(text)}
+        added = [candidate.text for candidate in self.shadow_confusables.candidates(text) if candidate.text not in known]
+        if added:
+            LOG.info("extra_dict_would_correct mode=shadow layer=static kind=confusable before=%r after=%r", text, added[:3])
+
+    def _confusables(self, extra_mode: str) -> tuple[Any, Any | None]:
+        """(the confusables the engine decides with, the ones that only run in shadow): the core's own sets, plus the extra dictionary's
+        command and phrase entries (extra_dict.py) as an extra file for `load(extra=[...])`: in `on` they are the engine's, in `shadow`
+        they are only compared. A file the core refuses leaves the engine on its own sets."""
+        base = self.core.load()
+        if extra_mode == "off":
+            return base, None
+        try:
+            path = extra_dict.write_confusables(extra_dict.load(), extra_dict.cache_dir())
+            if path is None:
+                return base, None
+            extended = self.core.load(extra=[path])
+        except extra_dict.ExtraDictError as err:   # the same marker the gateway logs for a dictionary it cannot load
+            LOG.error("extra_dict_unusable error=%s", err)
+            return base, None
+        except Exception as err:   # an unwritable cache, data the core refuses
+            LOG.warning("extra_dict_confusables_unavailable class=%s error=%s", type(err).__name__, err)
+            return base, None
+        return (extended, None) if extra_mode == "on" else (base, extended)
+
     # ── the question ───────────────────────────────────────────────────────
     def consult(self, station: str, text: str, *, now: float, via_quasar: bool, noop: Mapping[str, Any] | None = None) -> Offer | None:
         """Does this utterance deserve a question? Builds the evidence, lets the core policy decide, and (mode `on`) opens the dialog.
         None: ask nothing, the normal route carries on. The verdict goes to the utterance trace either way (`trace.correction`)."""
+        self._shadow_extra(text)
         chain_until = self.chains.pop(station, 0.0)   # a repeat was asked and this is (the answer to) it: the one retry
         if self.quiet.get((station, self._canon(text)), 0.0) > now:
             return None
