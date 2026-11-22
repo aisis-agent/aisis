@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sqlite3
 import sys
 from collections import Counter, defaultdict
@@ -34,6 +35,7 @@ DEFAULT_LIMIT = 1000
 MAX_LIMIT = 5000
 MAX_EDITS = 3
 STATUSES = ("sent", "activation")
+CLIP_ID_TOKEN = re.compile(r"[0-9A-Za-z_-]+")   # a clip id named in an entry's note is a whole token there, never a piece of a longer one
 
 
 def open_readonly(db: str | os.PathLike[str]) -> sqlite3.Connection:
@@ -86,7 +88,7 @@ def replay(clips: list[dict[str, Any]], dictionary: extra_dict.Dictionary) -> di
             else:
                 report["n_changed_with_verdict_not_toward_truth"] += 1
                 outcome = "not_toward_truth"
-        own_source = any(clip["id"] in entry.note for entry in dictionary.entries if entry.id in {hit.entry for hit in found.hits})
+        own_source = any(clip["id"] in CLIP_ID_TOKEN.findall(entry.note) for entry in dictionary.entries if entry.id in {hit.entry for hit in found.hits})
         report["n_entry_source_clips"] += own_source   # a clip an entry was written from confirms nothing: the entry is its own evidence there
         report["corrected"].append({"id": clip["id"], "trigger": clip["trigger"], "verdict": verdict, "outcome": outcome, "before": clip["transcript"],
                                     "after": found.text, "routing_changed": changed_routing, "entries": sorted({hit.entry for hit in found.hits}),

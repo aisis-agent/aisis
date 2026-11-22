@@ -316,7 +316,7 @@ that was not observed.
   `journalctl --user -u aisis-station-stt | grep stt_hint_echo_shadow` and compare each line with the owner's clip verdicts before enforcing.
   Python-only: restart `aisis-station-stt`.
 - **Extra dictionary** (`code/extra_dict.py`, data `code/extra_dict_ru.json`, ticket #268; the runtime layer built from the home's own entity
-  names is #269): Whisper writes the wake word «Алиса» as another name («Олеса, включи свет.», clip 20261120T235150-330d2a). `wake_word.py` knows the
+  names, #269, is the last paragraph of this item): Whisper writes the wake word «Алиса» as another name («Олеса, включи свет.», clip 20261120T235150-330d2a). `wake_word.py` knows the
   grammar's `lexicon.wake` list and one sound rule (within two edits of «алиса», containing «ис», whole segment only), so «Олеса» (no «ис»),
   «Алекса» and «Олеся», the owner's examples, reached routing as a request. The file is a reviewed list of variants, each with the context it
   may be corrected in and the evidence it was added on; the code never guesses one.
@@ -332,8 +332,10 @@ that was not observed.
   приду», «Привет, Олеса», «Алекса пошёл домой» and a name after another sentence stay as they were heard (the last one is the one stored case of
   «Олеса»: not handled on purpose). The loader refuses, naming the file and the entry: an unknown key, kind or context, a duplicate id, a variant
   claimed twice, a variant that is another entry's canonical, a variant (of any kind) that is, or holds, a name of the grammar's `lexicon.wake` (so «Толиса»,
-  «Тариса», «Малис», «Лисы», all seen in the stored clips, are not repeated here, and no phrase can eat the activation word), a wake canonical
-  outside `lexicon.wake`, and evidence below the floors above.
+  «Тариса», «Малис», «Лисы», all seen in the stored clips, are not repeated here, and no phrase can eat the activation word), a variant that is, or (wake
+  kind) holds, a lead-in word («ну», «эй», «слушай», «ой», «а»: the split cuts those before it looks at the name), a canonical that does not start
+  and end with a letter or digit, a command or phrase canonical that holds a name of `lexicon.wake` (a correction never writes the activation word), a
+  wake canonical outside `lexicon.wake`, and evidence below the floors above.
   What it does: `judge_transcript` of the STT gateway replaces the variants in the heard text, then `wake_word.split` cuts the name as before, so
   the activation handling stays in one place («Олеся.» alone becomes an activation event, `rejected: wake_word`; «Олеса, включи свет.» becomes the request
   «Включи свет.» with the clip's `reason` `wake_cut:Алиса`). `command` and `phrase` entries are also written (atomically, to
@@ -341,12 +343,12 @@ that was not observed.
   core (`load(extra=[path])`): the repair dialog then offers the canonical for the heard variant (the sets work in both directions, as every
   confusables set does). A file the core refuses leaves the engine on its own sets (`extra_dict_confusables_unavailable class=... error=...`).
   `AISIS_EXTRA_DICT` (in `~/.config/aisis/runtime.env`, read by the STT gateway and the adapter) picks the mode: `shadow` (the default, also for an
-  unknown value) logs `extra_dict_would_correct mode=shadow layer=static kinds=... entries=... before=... after=... activation=...` (gateway) and
+  unknown value) logs `extra_dict_would_correct mode=shadow layer=static|dynamic kinds=... entries=... before=... after=... activation=...` (gateway) and
   `extra_dict_would_correct ... kind=confusable ...` (engine) and changes nothing sent downstream; `on` / `1` / `enforce` applies it
   (`extra_dict_corrected` in the log); `off` / `0` switches it off. A dictionary that cannot be loaded is logged (`extra_dict_unusable error=...`, by the
   gateway and by the engine) and the service runs without it. Count a shadow period with `journalctl --user -u aisis-station-stt | grep extra_dict_would_correct` and read each
   line before `on`. Python-only: restart `aisis-station-stt` and, for the engine's part (only when `AISIS_CORRECTION` is `shadow` or `on`), the
-  adapter; the data file is read at start.
+  adapter; the static file is read at start (the runtime layer below is re-read while the services run, no restart).
   Evidence (ledger read on 2026-11-22, read-only; `python3 bench_extra_dict.py mine` and `replay` reproduce it): 341 clips (2026-11-08 .. 11-22), 176
   with a transcript, 107 of them `sent` (the replay's set; the other 69 are captions the gateway dropped), owner verdicts in `clip_truth`: 5
   (2 corrected, 1 correct, 2 noise). «Алиса» opens 23 of the 176 transcripts. The other head words within three edits of «алиса»: «Толиса» 1 (at the
@@ -360,6 +362,26 @@ that was not observed.
   replay`): 1 clip corrected (the phrase's own source clip, which confirms nothing), 0 changed wrongly by an owner verdict; these are counts of one
   household's clips, not an accuracy figure. Known pre-existing risk, outside this file: the grammar's `lexicon.wake` holds the real word «Лисы», so
   «Лисы живут в лесу» loses its first word at the head (`wake_word.split`).
+  **Dynamic layer** (`code/extra_dict_dynamic.py`, ticket #269): a second layer, in the same format, built at runtime from the home itself and never
+  committed. Vocabulary: the friendly names and rooms of Home Assistant (`voice_vocab.fetch_catalog`, the read-only `/api/states` list and the area
+  template through ha-cli: nothing is actuated; names that carry a digit run, a dot, a colon, an at-sign, a slash or a long hexadecimal token are never
+  taken, so ids, addresses and serials cannot reach the file) and the imperatives and comparatives of the intent grammar (`on/off/set/play/cmd`
+  verbs, «громче», «тише», «теплее» ...). Evidence: the stored Whisper transcripts of `voice_clips` (`sent`, not the speaker's own spotter text),
+  read-only. An entry is a word that is none of the known words (the vocabulary, every word of the grammar bundle, the home's own names) but is
+  within `MIN_SIMILARITY` 0.84 of exactly one vocabulary word (it must beat the second best by 0.06) and was written in at least `MIN_SUPPORT` = 3
+  distinct clips: «люстара» for «люстра» (`command` for a verb, `phrase` for a name or room; source `observed`, context `anywhere`). Another form of
+  a vocabulary word (a different ending, one added or cut: «спальне», «гирлянды», «громчее») is a real word said every day and is never taken as a
+  mishearing. One or two occurrences make no correction, and the loader of a dynamic layer refuses an entry below that floor. The layer holds at
+  most 100 entries, 120 names and 64 KiB. `python3 extra_dict_dynamic.py refresh` builds it and installs it atomically (temp file, fsync, rename,
+  mode 0600) to `$XDG_CACHE_HOME/aisis/extra-dict/dynamic-ru.json` unless the content (everything but the time) is unchanged, which also makes a
+  refresh the «entity registry changed» check; a Home Assistant that cannot be read (exit 3), a layer that fails validation or the size cap, or a
+  failed write keeps the previous file. `aisis-extra-dict.timer` runs it 1 minute after boot and then hourly (`aisis-extra-dict.service`, oneshot, exit 3
+  counts as success; its drop-in runs it from the deploy-main worktree like the other services). The gateway and the engine read the layer through
+  `extra_dict.Live`: the static file plus the layer, re-read when the layer's file changes (looked at most every 30 s), a broken layer keeps the
+  previous dictionary (`extra_dict_dynamic_unusable`, logged once), and the merge order is fixed: static entries always win (a dynamic variant the
+  static file claims, or that is a static canonical, is dropped), and two dynamic entries for one variant resolve by support, then by canonical.
+  The shadow flag is the same: `extra_dict_would_correct ... layer=dynamic`. The engine rebuilds its confusables file when the dictionary changes.
+  Install: `scripts/install-systemd-units.sh` (it copies and enables the timer), then `python3 extra_dict_dynamic.py show` lists what the layer holds.
 - **Whisper prompt**: `aisis-whisper-prompt.timer` regenerates the recognizer's
   initial prompt every 6 h (code/refresh-whisper-prompt.sh -> `voice_vocab.py prompt`).
   It is home vocabulary only (fixed example commands, HA room and device names, library

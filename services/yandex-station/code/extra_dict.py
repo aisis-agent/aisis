@@ -27,10 +27,11 @@ import logging
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from functools import cached_property, lru_cache
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 import wake_word
 
@@ -49,8 +50,14 @@ MAX_VARIANTS = 50
 MAX_WORDS = 6
 MIN_CHARS = 3
 MIN_OBSERVED_COMMAND_N = 2   # a command or phrase seen once is an anecdote: it needs two stored clips unless the owner named it or ruled on it
+MIN_DYNAMIC_SUPPORT = 3      # the runtime layer's floor: distinct stored clips a mined variant needs (extra_dict_dynamic.py)
+DYNAMIC_FILE = "dynamic-ru.json"
+RECHECK_S = 30.0
+MAX_VOCABULARY = 200
+MAX_VOCABULARY_CHARS = 64
 ENTRY_KEYS = frozenset(("id", "kind", "canonical", "context", "variants", "evidence"))
 TOP_KEYS = frozenset(("version", "locale", "note", "entries"))
+DYNAMIC_KEYS = TOP_KEYS | {"generated", "vocabulary"}
 EVIDENCE_KEYS = frozenset(("source", "note"))
 SLUG = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 WORD = re.compile(r"[a-zа-яё0-9]+", re.IGNORECASE)
@@ -88,6 +95,7 @@ class Entry:
     variants: tuple[Variant, ...]
     source: str
     note: str
+    layer: str = "static"
 
 
 class Hit(NamedTuple):
@@ -98,6 +106,7 @@ class Hit(NamedTuple):
     after: str      # what replaced it
     start: int
     end: int
+    layer: str = "static"
 
 
 class Corrected(NamedTuple):
@@ -171,7 +180,7 @@ class Dictionary:
             return None
         if entry.context == "address" and not _addressed(rest):
             return None
-        return Hit(entry.id, entry.kind, variant.text, text[start:end], entry.canonical, start, end)
+        return Hit(entry.id, entry.kind, variant.text, text[start:end], entry.canonical, start, end, entry.layer)
 
     # ── command and phrase variants ────────────────────────────────────────
     def _phrase_hits(self, text: str, words: list[re.Match], folded: list[str], taken: list[Hit]) -> list[Hit]:
@@ -187,7 +196,7 @@ class Dictionary:
                     continue
                 if entry.context == "standalone" and (not _only_names_before(text[:start], taken) or text[end:].strip(wake_word.SEPARATORS)):
                     continue
-                found.append(Hit(entry.id, entry.kind, variant.text, text[start:end], _case_of(text[start:end], entry.canonical), start, end))
+                found.append(Hit(entry.id, entry.kind, variant.text, text[start:end], _case_of(text[start:end], entry.canonical), start, end, entry.layer))
         return found
 
 
@@ -241,23 +250,31 @@ def _case_of(heard: str, canonical: str) -> str:
 
 # ── the file ─────────────────────────────────────────────────────────────────
 
-def parse(raw: Any, name: str = str(DATA)) -> Dictionary:
-    """The validated dictionary of an already parsed JSON document; any defect raises ExtraDictError naming `name` and the entry."""
+def parse(raw: Any, name: str = str(DATA), layer: str = "static") -> Dictionary:
+    """The validated dictionary of an already parsed JSON document; any defect raises ExtraDictError naming `name` and the entry.
+
+    `layer` is `static` (the reviewed file: at least one entry) or `dynamic` (the runtime layer of extra_dict_dynamic.py: command and phrase entries
+    observed at least MIN_DYNAMIC_SUPPORT times, plus its `generated` and `vocabulary` records; it may hold no entry at all).
+    """
+    if layer not in ("static", "dynamic"):
+        raise ValueError(f"layer must be static or dynamic, got {layer!r}")
     if not isinstance(raw, dict):
         raise ExtraDictError(f"{name}: the top level must be an object")
-    _keys(raw, TOP_KEYS, {"version", "locale", "entries"}, name)
+    _keys(raw, TOP_KEYS if layer == "static" else DYNAMIC_KEYS, {"version", "locale", "entries"} | (set() if layer == "static" else {"generated", "vocabulary"}), name)
     if type(raw["version"]) is not int or raw["version"] != VERSION:
         raise ExtraDictError(f"{name}: version {raw['version']!r} is not the supported {VERSION}")
     if raw["locale"] != LOCALE:
         raise ExtraDictError(f"{name}: locale {raw['locale']!r} is not {LOCALE!r}")
+    if layer == "dynamic":
+        _provenance(raw, name)
     entries_raw = raw["entries"]
-    if not isinstance(entries_raw, list) or not 0 < len(entries_raw) <= MAX_ENTRIES:
-        raise ExtraDictError(f"{name}: entries must be a list of 1..{MAX_ENTRIES} entries")
+    if not isinstance(entries_raw, list) or not (layer == "dynamic" or entries_raw) or len(entries_raw) > MAX_ENTRIES:
+        raise ExtraDictError(f"{name}: entries must be a list of {0 if layer == 'dynamic' else 1}..{MAX_ENTRIES} entries")
     entries: list[Entry] = []
     ids: set[str] = set()
     claimed: dict[str, str] = {}
     for position, item in enumerate(entries_raw):
-        entry = _entry(item, position, name)
+        entry = _entry(item, position, name, layer)
         if entry.id in ids:
             raise ExtraDictError(f"{name}: entry {entry.id!r}: the id is used twice")
         ids.add(entry.id)
@@ -274,6 +291,19 @@ def parse(raw: Any, name: str = str(DATA)) -> Dictionary:
     return Dictionary(raw["version"], tuple(entries))
 
 
+def _provenance(raw: dict, name: str) -> None:
+    """The `generated` and `vocabulary` records of a dynamic layer: plain facts about how it was made, bounded."""
+    generated, vocabulary = raw["generated"], raw["vocabulary"]
+    if (not isinstance(generated, dict) or set(generated) != {"at", "vocabulary", "min_support"} or type(generated["at"]) is not int
+            or not isinstance(generated["vocabulary"], str) or type(generated["min_support"]) is not int):
+        raise ExtraDictError(f"{name}: generated must be {{at, vocabulary, min_support}}")
+    if not isinstance(vocabulary, dict) or set(vocabulary) != {"verbs", "names"}:
+        raise ExtraDictError(f"{name}: vocabulary must be {{verbs, names}}")
+    for key, words in vocabulary.items():
+        if not isinstance(words, list) or len(words) > MAX_VOCABULARY or not all(isinstance(word, str) and len(word) <= MAX_VOCABULARY_CHARS for word in words):
+            raise ExtraDictError(f"{name}: vocabulary.{key} must be a list of at most {MAX_VOCABULARY} short strings")
+
+
 def _keys(item: dict, allowed: frozenset[str], required: set[str], where: str) -> None:
     unknown = sorted(set(item) - allowed)
     missing = sorted(required - set(item))
@@ -281,7 +311,7 @@ def _keys(item: dict, allowed: frozenset[str], required: set[str], where: str) -
         raise ExtraDictError(f"{where}: unknown keys {unknown}, missing keys {missing}")
 
 
-def _entry(item: Any, position: int, name: str) -> Entry:
+def _entry(item: Any, position: int, name: str, layer: str) -> Entry:
     where = f"{name}: entry #{position}"
     if not isinstance(item, dict):
         raise ExtraDictError(f"{where}: must be an object")
@@ -295,25 +325,32 @@ def _entry(item: Any, position: int, name: str) -> Entry:
         raise ExtraDictError(f"{where}: kind {kind!r} is not one of {KINDS}")
     if context not in CONTEXTS[kind]:
         raise ExtraDictError(f"{where}: context {context!r} is not one of {CONTEXTS[kind]} for kind {kind!r}")
+    if layer == "dynamic" and (kind == "wake" or context != "anywhere" or not entry_id.startswith("dyn-")):
+        raise ExtraDictError(f"{where}: a dynamic entry is a command or phrase, context anywhere, id dyn-...")
     canonical = item["canonical"]
-    if not isinstance(canonical, str) or not canonical.strip() or not 0 < len(fold(canonical).split()) <= MAX_WORDS or canonical != canonical.strip():
-        raise ExtraDictError(f"{where}: canonical must be 1..{MAX_WORDS} words")
+    if (not isinstance(canonical, str) or not canonical.strip() or not 0 < len(fold(canonical).split()) <= MAX_WORDS
+            or not canonical[0].isalnum() or not canonical[-1].isalnum()):
+        raise ExtraDictError(f"{where}: canonical must be 1..{MAX_WORDS} words, from a letter or digit to a letter or digit")
     if kind == "wake" and fold(canonical) not in wake_word.lexicon():
         raise ExtraDictError(f"{where}: the canonical {canonical!r} of a wake entry must be a name of the grammar's lexicon.wake")
+    if kind != "wake" and wake_word.lexicon().intersection(fold(canonical).split()):
+        raise ExtraDictError(f"{where}: the canonical {canonical!r} of a {kind} entry holds a name of the grammar's lexicon.wake: a correction never writes the activation word")
     evidence = item["evidence"]
     if not isinstance(evidence, dict):
         raise ExtraDictError(f"{where}: evidence must be an object")
     _keys(evidence, EVIDENCE_KEYS, {"source"}, f"{where}: evidence")
     source = evidence["source"]
-    if source not in SOURCES:
-        raise ExtraDictError(f"{where}: evidence.source {source!r} is not one of {SOURCES}")
+    if source not in SOURCES or (layer == "dynamic" and source != "observed"):
+        raise ExtraDictError(f"{where}: evidence.source {source!r} is not one of {SOURCES if layer == 'static' else ('observed',)}")
     note = evidence.get("note", "")
     if not isinstance(note, str) or len(note) > 600:
         raise ExtraDictError(f"{where}: evidence.note must be a string of at most 600 characters")
     variants = _variants(item["variants"], where, source, kind)
+    if layer == "dynamic" and any(variant.n < MIN_DYNAMIC_SUPPORT for variant in variants):
+        raise ExtraDictError(f"{where}: a dynamic variant needs n >= {MIN_DYNAMIC_SUPPORT}: one or two occurrences make no correction")
     if fold(canonical) in {variant.text for variant in variants}:
         raise ExtraDictError(f"{where}: a variant equals the canonical")
-    return Entry(entry_id, kind, canonical, context, variants, source, note)
+    return Entry(entry_id, kind, canonical, context, variants, source, note, layer)
 
 
 def _variants(raw: Any, where: str, source: str, kind: str) -> tuple[Variant, ...]:
@@ -338,19 +375,22 @@ def _variants(raw: Any, where: str, source: str, kind: str) -> tuple[Variant, ..
             raise ExtraDictError(f"{where}: variant {text!r}: an observed {kind} needs n >= {MIN_OBSERVED_COMMAND_N}")
         if wake_word.lexicon().intersection(text.split()):
             raise ExtraDictError(f"{where}: variant {text!r} holds a name of the grammar's lexicon.wake: the activation word is never (part of) a variant")
+        lead_in = LEAD_INS.intersection(text.split()) if kind == "wake" else {text} & LEAD_INS
+        if lead_in:
+            raise ExtraDictError(f"{where}: variant {text!r} is or holds a lead-in word ({', '.join(sorted(LEAD_INS))}): wake_word cuts those in front of a name")
         seen.add(text)
         out.append(Variant(text, n))
     return tuple(out)
 
 
-def load(path: str | os.PathLike[str] | None = None) -> Dictionary:
-    """The committed dictionary (or `path`), validated; an unreadable or invalid file raises ExtraDictError."""
+def load(path: str | os.PathLike[str] | None = None, layer: str = "static") -> Dictionary:
+    """The committed dictionary (or the file at `path`, a static file or a dynamic `layer`), validated; an unreadable or invalid file raises ExtraDictError."""
     target = Path(path) if path is not None else DATA
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ExtraDictError(f"{target}: cannot be read as JSON ({type(exc).__name__})") from exc
-    return parse(raw, str(target))
+    return parse(raw, str(target), layer)
 
 
 def load_or_none() -> Dictionary | None:
@@ -360,6 +400,92 @@ def load_or_none() -> Dictionary | None:
     except ExtraDictError as exc:
         LOG.error("extra_dict_unusable error=%s", exc)
         return None
+
+
+def dynamic_path() -> Path:
+    """Where `extra_dict_dynamic.py refresh` installs the runtime layer (never committed)."""
+    return cache_dir() / DYNAMIC_FILE
+
+
+def merge(static: Dictionary, *layers: Dictionary) -> Dictionary:
+    """`static` with the dynamic `layers` under it, in one deterministic order: every static entry stays and wins every conflict.
+
+    A dynamic variant is dropped when the static file already claims it, when it is the canonical of a static entry or of another surviving dynamic
+    entry, or when a stronger dynamic entry claims it (higher n, then the canonical, then the id: the result never depends on the order of the layers).
+    """
+    claimed = {variant.text for entry in static.entries for variant in entry.variants}
+    canonicals = {fold(entry.canonical) for entry in static.entries}
+    candidates = sorted(((entry, variant) for layer in layers for entry in layer.entries for variant in entry.variants),
+                        key=lambda pair: (-pair[1].n, fold(pair[0].canonical), pair[0].id, pair[1].text))
+    winners: dict[str, tuple[Entry, Variant]] = {}
+    for entry, variant in candidates:
+        if variant.text not in claimed and variant.text not in canonicals and variant.text not in winners:
+            winners[variant.text] = (entry, variant)
+    dynamic_canonicals = {fold(entry.canonical) for entry, _ in winners.values()}
+    kept: dict[str, list[Variant]] = {}
+    entries: dict[str, Entry] = {}
+    for entry, variant in winners.values():
+        if variant.text in dynamic_canonicals:
+            continue
+        entries.setdefault(entry.id, entry)
+        kept.setdefault(entry.id, []).append(variant)
+    dynamic = [replace(entries[entry_id], variants=tuple(sorted(variants, key=lambda variant: (-variant.n, variant.text))))
+               for entry_id, variants in kept.items()]
+    dynamic.sort(key=lambda entry: (-entry.variants[0].n, entry.id))
+    return Dictionary(static.version, (*static.entries, *dynamic))
+
+
+class Live:
+    """The merged dictionary the services read: the static file plus the dynamic layer, re-read when the layer's file changes.
+
+    The layer is looked at most every `recheck_s` seconds and parsed only when its (mtime, size) changed. A layer that cannot be read or fails
+    validation is logged once and the previous merged dictionary stays; a layer that disappears leaves the static dictionary alone.
+    `version` counts the dictionaries handed out, so a holder of derived data (the engine's confusables) knows when to rebuild it.
+    """
+
+    def __init__(self, static: Dictionary, path: str | os.PathLike[str] | None = None, clock: Callable[[], float] = time.monotonic,
+                 recheck_s: float = RECHECK_S) -> None:
+        self._static = static
+        self._path = Path(path) if path is not None else dynamic_path()
+        self._clock = clock
+        self._recheck = recheck_s
+        self._checked = float("-inf")
+        self._stamp: tuple[int, int] | None = None
+        self._merged = static
+        self.version = 0
+
+    @classmethod
+    def from_disk(cls) -> "Live | None":
+        """A Live over the committed static file, or None (logged as `extra_dict_unusable`) when that file is unusable."""
+        static = load_or_none()
+        return cls(static) if static is not None else None
+
+    def get(self) -> Dictionary:
+        now = self._clock()
+        if now - self._checked >= self._recheck:
+            self._checked = now
+            self._reload()
+        return self._merged
+
+    def _reload(self) -> None:
+        try:
+            status = self._path.stat()
+            stamp: tuple[int, int] | None = (status.st_mtime_ns, status.st_size)
+        except OSError:
+            stamp = None
+        if stamp == self._stamp:
+            return
+        previous, self._stamp = self._stamp, stamp
+        if stamp is None:
+            self._merged = self._static
+        else:
+            try:
+                self._merged = merge(self._static, load(self._path, layer="dynamic"))
+            except ExtraDictError as exc:
+                LOG.warning("extra_dict_dynamic_unusable keeping the previous dictionary: %s", exc)
+                return
+        if stamp is not None or previous is not None:
+            self.version += 1
 
 
 # ── the stt-cli core: a phonetic extra confusables file ──────────────────────

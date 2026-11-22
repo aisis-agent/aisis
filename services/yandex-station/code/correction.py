@@ -31,6 +31,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 
@@ -194,7 +195,12 @@ class Correction:
         self.hypotheses = hypotheses
         self.core = core if core is not None else import_core()
         self.policy = policy if policy is not None else self.core.Policy()
-        self.confusables, self.shadow_confusables = self._confusables(extra_dict_mode)
+        self._base = self.core.load()
+        self._extra = self._live(extra_dict_mode)
+        self._extra_mode = extra_dict_mode
+        self._built = -1                                    # the extra dictionary's version the confusables below were made from
+        self._sets: tuple[Any, Any | None] = (self._base, None)
+        self._sync_extra()
         self.window_s = window_s
         self.dialogs: dict[str, Dialog] = {}
         self.expired: dict[str, Dialog] = {}               # the dialog whose window ran out, until the next utterance reports it
@@ -282,34 +288,65 @@ class Correction:
         """The grammar reads the text, or any listed hypothesis, as an emergency or as speech to drop."""
         return self._protected(text) or (nbest is not None and any(self._protected(h.text) for h in nbest.hypotheses))
 
+    @property
+    def confusables(self) -> Any:
+        """The confusables the engine decides with: the core's own sets, plus the extra dictionary's command and phrase entries in mode `on`."""
+        self._sync_extra()
+        return self._sets[0]
+
+    @property
+    def shadow_confusables(self) -> Any | None:
+        """The core's sets extended with the extra dictionary's entries, compared and logged in mode `shadow`, never used."""
+        self._sync_extra()
+        return self._sets[1]
+
     def _shadow_extra(self, text: str) -> None:
         """Shadow mode of the extra dictionary (#268): the candidates its confusables would add for `text`, logged and never used."""
-        if self.shadow_confusables is None:
+        shadow = self.shadow_confusables
+        if shadow is None:
             return
         known = {candidate.text for candidate in self.confusables.candidates(text)}
-        added = [candidate.text for candidate in self.shadow_confusables.candidates(text) if candidate.text not in known]
+        added = [candidate.text for candidate in shadow.candidates(text) if candidate.text not in known]
         if added:
-            LOG.info("extra_dict_would_correct mode=shadow layer=static kind=confusable before=%r after=%r", text, added[:3])
+            LOG.info("extra_dict_would_correct mode=shadow layer=%s kind=confusable before=%r after=%r", self._extra_layers(), text, added[:3])
 
-    def _confusables(self, extra_mode: str) -> tuple[Any, Any | None]:
-        """(the confusables the engine decides with, the ones that only run in shadow): the core's own sets, plus the extra dictionary's
-        command and phrase entries (extra_dict.py) as an extra file for `load(extra=[...])`: in `on` they are the engine's, in `shadow`
-        they are only compared. A file the core refuses leaves the engine on its own sets."""
-        base = self.core.load()
+    def _live(self, extra_mode: str) -> extra_dict.Live | None:
+        """The extra dictionary the engine follows (the static file plus the runtime layer, #269), or None: off, or a static file that cannot be loaded."""
         if extra_mode == "off":
-            return base, None
+            return None
         try:
-            path = extra_dict.write_confusables(extra_dict.load(), extra_dict.cache_dir())
-            if path is None:
-                return base, None
-            extended = self.core.load(extra=[path])
+            return extra_dict.Live(extra_dict.load())
         except extra_dict.ExtraDictError as err:   # the same marker the gateway logs for a dictionary it cannot load
             LOG.error("extra_dict_unusable error=%s", err)
-            return base, None
+            return None
+
+    def _extra_layers(self) -> str:
+        dictionary = self._extra.get() if self._extra is not None else None
+        return ",".join(sorted({entry.layer for entry in dictionary.of_kind("command", "phrase")})) if dictionary is not None else "static"
+
+    def _sync_extra(self) -> None:
+        """Rebuild the extra confusables when the dictionary behind them changed (the runtime layer was refreshed); a no-op otherwise."""
+        if self._extra is None:
+            return
+        dictionary = self._extra.get()
+        if self._extra.version != self._built:
+            self._built = self._extra.version
+            self._sets = self._extended(dictionary)
+
+    def _extended(self, dictionary: extra_dict.Dictionary) -> tuple[Any, Any | None]:
+        """(the confusables the engine decides with, the ones that only run in shadow): the core's own sets, plus the dictionary's command and
+        phrase entries as an extra file for `load(extra=[...])`: in `on` they are the engine's, in `shadow` they are only compared. A file the
+        core refuses leaves the engine on its own sets."""
+        try:
+            with tempfile.TemporaryDirectory(prefix="aisis-extra-confusables-") as directory:   # private to this process: a refresh elsewhere cannot swap the file between the write and the load
+                path = extra_dict.write_confusables(dictionary, directory)
+                if path is None:
+                    return self._base, None
+                extended = self.core.load(extra=[path])
         except Exception as err:   # an unwritable cache, data the core refuses
             LOG.warning("extra_dict_confusables_unavailable class=%s error=%s", type(err).__name__, err)
-            return base, None
-        return (extended, None) if extra_mode == "on" else (base, extended)
+            return self._base, None
+        return (extended, None) if self._extra_mode == "on" else (self._base, extended)
 
     # ── the question ───────────────────────────────────────────────────────
     def consult(self, station: str, text: str, *, now: float, via_quasar: bool, noop: Mapping[str, Any] | None = None) -> Offer | None:

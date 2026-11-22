@@ -488,8 +488,9 @@ def apply_extra_dict(heard, named, dictionary, mode):
     if not corrected.hits:
         return named
     changed = wake_word.split(corrected.text)
-    LOG.info("extra_dict_%s mode=%s layer=static kinds=%s entries=%s before=%r after=%r activation=%s", "corrected" if mode == "on" else "would_correct", mode,
-             ",".join(sorted({hit.kind for hit in corrected.hits})), ",".join(sorted({hit.entry for hit in corrected.hits})), heard, corrected.text, changed.only)
+    LOG.info("extra_dict_%s mode=%s layer=%s kinds=%s entries=%s before=%r after=%r activation=%s", "corrected" if mode == "on" else "would_correct", mode,
+             ",".join(sorted({hit.layer for hit in corrected.hits})), ",".join(sorted({hit.kind for hit in corrected.hits})),
+             ",".join(sorted({hit.entry for hit in corrected.hits})), heard, corrected.text, changed.only)
     return changed if mode == "on" else named
 
 
@@ -585,8 +586,8 @@ class STTGateway:
         self.hypothesis_background = set()
         # The prompt a stock wyoming-whisper was started with (its env file; the gateway never sees it on the wire): what a hint echo is compared with.
         self.prompt_file = hint_echo.PromptFile(self.env.get("AISIS_WHISPER_PROMPT_ENV"))
-        # The extra dictionary of typical mishearings (extra_dict.py, #268): read once at start; one that cannot be loaded is logged and the gateway runs without it.
-        self.extra = extra_dict.load_or_none() if self.tuning.extra_dict != "off" else None
+        # The extra dictionary of typical mishearings (extra_dict.py, #268/#269): the static file read at start plus the runtime layer, re-read when its file changes; one that cannot be loaded is logged and the gateway runs without it.
+        self.extra = extra_dict.Live.from_disk() if self.tuning.extra_dict != "off" else None
 
     def live_tuning(self):
         """The startup tuning with the dashboard's end-of-speech wait and level front-end overrides; read per conversation, no restart."""
@@ -937,7 +938,7 @@ class STTGateway:
         out.asr_ms = int((time.monotonic() - began) * 1000)
         if recognizer_pcm is not utt.speech_pcm and tuning.ab_percent > 0 and random.random() * 100 < tuning.ab_percent:
             self.ab_probe(utt.speech_pcm, rate, out.heard, info["gain_db"], utt.voiced_rms)
-        out.rejected, named = judge_transcript(out.heard, utt, self.extra, tuning.extra_dict)
+        out.rejected, named = judge_transcript(out.heard, utt, self.extra.get() if self.extra is not None else None, tuning.extra_dict)
         if out.rejected is None and tuning.hint_echo != "off" and hint_echo.is_echo(named.clean, self.prompt_hint()):
             if tuning.hint_echo == "enforce":
                 out.rejected, named = hint_echo.REJECTED, None

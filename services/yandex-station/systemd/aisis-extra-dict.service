@@ -1,0 +1,11 @@
+[Unit]
+Description=AISIS rebuild the dynamic layer of the STT extra dictionary from the Home Assistant names and the stored clips
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/xp/aisis/services/yandex-station/code
+EnvironmentFile=-%h/.config/aisis/runtime.env
+ExecStart=%h/.local/share/aisis/venv/bin/python %h/xp/aisis/services/yandex-station/code/extra_dict_dynamic.py refresh
+# A Home Assistant that cannot be read (exit 3) keeps the previous layer: not a failure of this unit.
+SuccessExitStatus=3
+Nice=19
