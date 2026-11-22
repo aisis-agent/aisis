@@ -29,7 +29,7 @@ import re
 import tempfile
 import time
 from dataclasses import dataclass, replace
-from functools import cached_property, lru_cache
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
@@ -61,10 +61,8 @@ DYNAMIC_KEYS = TOP_KEYS | {"generated", "vocabulary"}
 EVIDENCE_KEYS = frozenset(("source", "note"))
 SLUG = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 WORD = re.compile(r"[a-zа-яё0-9]+", re.IGNORECASE)
-VOCATIVE = ",.!?:;…-—–"
+VOCATIVE = ",.!?:;…-—–"   # the dash stays here: a variant is never an ordinary sentence subject («Олеса — тише»); wake_word.VOCATIVE has none
 LEAD_INS = wake_word.LEAD_INS
-VERB_LISTS = ("cmd_verbs", "on_verb", "off_verb", "set_verb", "play_verb")
-VERB_FLOOR = frozenset(("включи", "выключи", "поставь"))   # only when the grammar bundle cannot be read
 
 
 class ExtraDictError(ValueError):
@@ -217,20 +215,7 @@ def _addressed(rest: str) -> bool:
     if rest.lstrip(" \t\r\n")[:1] in VOCATIVE:
         return True
     following = WORD.search(rest)
-    return following is not None and fold(following.group()) in command_verbs()
-
-
-@lru_cache(maxsize=1)
-def command_verbs() -> frozenset[str]:
-    """The imperatives of the intent grammar's lexicon (on/off, set, play, cmd verbs), folded; a small floor when the bundle cannot be read."""
-    try:
-        with open(wake_word.BUNDLE, encoding="utf-8") as bundle:
-            lexicon = json.load(bundle)["data"]["lexicon"]
-        words = {str(word).lstrip("=").lower().replace("ё", "е") for key in VERB_LISTS for word in lexicon[key]}
-        return frozenset(words) or VERB_FLOOR
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        LOG.warning("extra_dict_verbs_unreadable class=%s", type(exc).__name__)
-        return VERB_FLOOR
+    return following is not None and fold(following.group()) in wake_word.command_verbs()
 
 
 def _match(text: str, words: list[re.Match], folded: list[str], first: int, variant: str) -> tuple[int, int] | None:

@@ -360,8 +360,9 @@ that was not observed.
   command-word confusion has a verdict or a second clip yet, so none is in the file; `ключи свет` (the lost start of «включи» and «выключи») is
   deliberately not an entry: either reading is possible and the repair policy asks instead. Replay of the 107 sent clips (`bench_extra_dict.py
   replay`): 1 clip corrected (the phrase's own source clip, which confirms nothing), 0 changed wrongly by an owner verdict; these are counts of one
-  household's clips, not an accuracy figure. Known pre-existing risk, outside this file: the grammar's `lexicon.wake` holds the real word «Лисы», so
-  «Лисы живут в лесу» loses its first word at the head (`wake_word.split`).
+  household's clips, not an accuracy figure. «Лисы» and «Алисы» are real words as well as names of `lexicon.wake` (`wake_word.REAL_WORDS`): at the head of a request they are cut
+  only when addressed (a comma, stop or colon right behind, or an imperative of the grammar), so «Лисы живут в лесу» keeps its first word and
+  «Лисы, включи свет» loses it; as the whole utterance they stay an activation.
   **Dynamic layer** (`code/extra_dict_dynamic.py`, ticket #269): a second layer, in the same format, built at runtime from the home itself and never
   committed. Vocabulary: the friendly names and rooms of Home Assistant (`voice_vocab.fetch_catalog`, the read-only `/api/states` list and the area
   template through ha-cli: nothing is actuated; names that carry a digit run, a dot, a colon, an at-sign, a slash or a long hexadecimal token are never

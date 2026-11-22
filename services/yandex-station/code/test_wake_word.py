@@ -2,6 +2,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import bench_asr_archive as bench
 import clipfeed
@@ -59,6 +60,34 @@ class WakeWordSplitTests(unittest.TestCase):
         self.assertEqual(self.split("Алиса, Яндекс — это чья компания?"), ("Яндекс — это чья компания?", "Алиса", False))
         self.assertEqual(self.split("Алиса, лисы опасны для человека?"), ("Лисы опасны для человека?", "Алиса", False))
         self.assertEqual(self.split("Алиса, алиса, стоп"), ("Стоп", "Алиса, алиса", False))
+
+    def test_a_real_word_of_the_lexicon_is_cut_only_when_it_is_addressed(self):
+        """«лисы» and «алисы» are in lexicon.wake and are ordinary words too (ticket #282): «Лисы живут в лесу» keeps its first word."""
+        for text in ("Лисы живут в лесу", "Алисы нет дома", "Лисы — хищные животные", "Алисы нет дома, она ушла.", "лисы опасны для человека?"):
+            with self.subTest(text=text):
+                self.assertEqual(self.split(text), (text, "", False))
+        for text, want, head in (("Лисы, включи свет", "Включи свет", "Лисы"), ("Лисы включи свет", "Включи свет", "Лисы"),
+                                 ("Алисы, какая погода?", "Какая погода?", "Алисы"), ("Эй, лисы, стоп!", "Стоп!", "Эй, лисы"),
+                                 ("Алисы: включи музыку", "Включи музыку", "Алисы")):
+            with self.subTest(text=text):
+                self.assertEqual(self.split(text), (want, head, False))
+        self.assertEqual(self.split("Лисы."), ("", "Лисы", True))   # the stored activation: the whole segment
+        self.assertEqual(self.split("Алисы!"), ("", "Алисы", True))
+
+    def test_a_comparative_or_pause_right_behind_a_real_word_is_a_request(self):
+        for text, want in (("Алисы громче", "Громче"), ("Лисы тише", "Тише"), ("Алисы пауза", "Пауза")):
+            with self.subTest(text=text):
+                self.assertEqual(self.split(text)[0], want)
+
+    def test_the_verbs_come_from_the_grammar_and_a_floor_when_it_cannot_be_read(self):
+        verbs = wake_word.command_verbs()
+        self.assertTrue({"включи", "запусти", "громче"} <= verbs)
+        wake_word.command_verbs.cache_clear()
+        try:
+            with mock.patch.object(wake_word, "BUNDLE", "/nonexistent/ru.json"), self.assertLogs("aisis.wake_word", level="WARNING"):
+                self.assertEqual(wake_word.command_verbs(), wake_word.VERB_FLOOR | frozenset(wake_word.VOICE_WORDS))
+        finally:
+            wake_word.command_verbs.cache_clear()
 
     def test_the_lexicon_is_the_grammars_one(self):
         """One list of names: the intent grammar's lexicon. A word it knows is cut here too."""
