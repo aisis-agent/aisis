@@ -48,8 +48,8 @@ FIXTURES = {
     "check_reminder_layers.py": "7a3e1a4ad8721ae5a76d799d6cb168786924bfb5de033dbeaf9ddadcfc2d597a",
 }
 MAINTAINED_RUNNERS = {"run_corpus.mts", "expected_kind.mjs", "check_reminder_layers.py"}
-ADAPTER_REVISION = {"source_commit": "2d01d514bdf89d81a892871b42851f68a330ec93",
-                    "source_tree": "6b224aaa8f6363ce554969c2e9aff73b0d9cb261"}
+ADAPTER_REVISION = {"source_commit": "98b2b08e08b1169b2da7629652ac5bdd9b94e942",
+                    "source_tree": "88380d40c45fc364b366f09b9dd2be75d9097469"}
 ADAPTER_FILES = {
     "intent_grammar/__init__.py": "eacc35556edec256ac9c029ae1f2af467d7fc19bdb6a66358e9836455382f0c9",
     "intent_grammar/grammar.py": "14c4d4bc93b36f604bf839b66224ba325874ea1e2d0efe51e7e106e15c25a9d9",
@@ -57,8 +57,8 @@ ADAPTER_FILES = {
     "intent_grammar/pattern.py": "8ced88ef290369c6dfe62cd218eb9f4faf494633e4537dbb89f3e2e514df87ed",
     "intent_grammar/numerals.py": "c1f292178318a2ee8e3d0fbb454c89d8280f43929c52fc0d98017442f87e1e9c",
     "intent_grammar/timewords.py": "008f82b0cd9641a6be127e8aa4d457775cfa6080a29b4657d6f92e90fa5e1d7b",
-    "intent_grammar/grammar/ru.json": "2ebd4e02fe97c81348f0fa9f583947520f14703e1a7869cd66cbdefcf64925a7",
-    "intent_grammar/grammar/ru.yaml": "3e326c4a22f8b8b730da71419b74434f857a544388b1161a98f6f5fbd4cb1947",
+    "intent_grammar/grammar/ru.json": "74a2211ca7eb3e618c62e562c06ad5a8c91c181d74018670af2585fba7261c87",
+    "intent_grammar/grammar/ru.yaml": "8be6cd5086e7bfe90310175adbfe759548365c886b1594818e251f400ca2cee2",
 }
 SOURCE_PATHS = {
     "/src/backend/ha-intents.ts", "/src/backend/turn-memory.ts",

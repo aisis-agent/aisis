@@ -1,0 +1,123 @@
+{"text": "Тоже неплохо. А что ты умеешь?", "intent": "assistant.capabilities", "kind": "real"}
+{"text": "что ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что ты можешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что ты можешь делать", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что ты умеешь делать", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что ты вообще умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "а что ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что ты умеешь еще", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что еще ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "Алиса, что ты умеешь?", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "Алиса, а что ты можешь?", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "Яндекс, что ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "Малис, что ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "Олиса, что ты можешь делать", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "Ладно, а что ты умеешь?", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "Понятно. Что ты умеешь?", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "Хорошо, а что ты можешь?", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "Круто, что ты умеешь делать", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "Отлично. А что ты можешь?", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "слушай, а что ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "ну и что ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "а что ты умеешь, пожалуйста", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "так что ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "эй, что ты умеешь делать", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "расскажи, что ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "скажи, что ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "покажи, что ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "перечисли, что ты умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "расскажи о своих возможностях", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "назови свои команды", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "расскажи мне о своих возможностях", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "какие у тебя возможности", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "какие у тебя есть команды", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "какие команды ты знаешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "какие есть команды", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "какие у тебя функции", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "какие у тебя навыки", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что у тебя можно попросить", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что можно попросить", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что можно сказать", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что тебя можно спросить", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "чем ты можешь помочь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "чем можешь помочь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "помощь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "справка", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "подсказка", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "ты что-нибудь умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "ты вообще что-нибудь умеешь", "intent": "assistant.capabilities", "kind": "authored"}
+{"text": "что ты умеешь со светом", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "light"}}
+{"text": "что ты умеешь делать со светом", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "light"}}
+{"text": "что можно сделать со светом", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "light"}}
+{"text": "а что ты умеешь с лампочками", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "light"}}
+{"text": "что ты умеешь делать с кондиционером", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "climate"}}
+{"text": "что можно с кондиционером", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "climate"}}
+{"text": "что ты умеешь по части климата", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "climate"}}
+{"text": "Алиса, что ты умеешь с кондиционером", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "climate"}}
+{"text": "что ты умеешь с таймерами", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "timers"}}
+{"text": "умеешь ли ты ставить таймеры", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "timers"}}
+{"text": "ты умеешь ставить будильник", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "timers"}}
+{"text": "умеешь ставить напоминания", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "timers"}}
+{"text": "что ты умеешь по части музыки", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "music"}}
+{"text": "ты умеешь включать музыку", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "music"}}
+{"text": "умеешь ли ты играть музыку", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "music"}}
+{"text": "что ты умеешь с погодой", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "weather"}}
+{"text": "умеешь ли ты узнавать погоду", "intent": "assistant.capabilities_topic", "kind": "authored", "slots": {"topic": "weather"}}
+{"text": "а ещё", "intent": "assistant.capabilities_more", "kind": "authored"}
+{"text": "что ещё", "intent": "assistant.capabilities_more", "kind": "authored"}
+{"text": "а что ещё", "intent": "assistant.capabilities_more", "kind": "authored"}
+{"text": "и что ещё", "intent": "assistant.capabilities_more", "kind": "authored"}
+{"text": "ещё что-нибудь", "intent": "assistant.capabilities_more", "kind": "authored"}
+{"text": "а ещё что-нибудь", "intent": "assistant.capabilities_more", "kind": "authored"}
+{"text": "Какой кондиционер включил?", "intent": "home.climate_status", "kind": "real"}
+{"text": "какой кондиционер включён", "intent": "home.climate_status", "kind": "authored"}
+{"text": "какой кондиционер включен", "intent": "home.climate_status", "kind": "authored"}
+{"text": "какие кондиционеры включены", "intent": "home.climate_status", "kind": "authored"}
+{"text": "какой кондиционер сейчас работает", "intent": "home.climate_status", "kind": "authored"}
+{"text": "какие кондиционеры работают", "intent": "home.climate_status", "kind": "authored"}
+{"text": "какой кондей включён", "intent": "home.climate_status", "kind": "authored"}
+{"text": "какой кондиционер включила", "intent": "home.climate_status", "kind": "authored"}
+{"text": "какой кондиционер включили", "intent": "home.climate_status", "kind": "authored"}
+{"text": "включён ли кондиционер", "intent": "home.climate_status", "kind": "authored"}
+{"text": "включен ли кондиционер", "intent": "home.climate_status", "kind": "authored"}
+{"text": "работает ли кондиционер", "intent": "home.climate_status", "kind": "authored"}
+{"text": "выключен ли кондиционер", "intent": "home.climate_status", "kind": "authored"}
+{"text": "кондиционер включён", "intent": "home.climate_status", "kind": "authored"}
+{"text": "кондиционер работает", "intent": "home.climate_status", "kind": "authored"}
+{"text": "кондиционеры включены", "intent": "home.climate_status", "kind": "authored"}
+{"text": "все кондиционеры выключены", "intent": "home.climate_status", "kind": "authored"}
+{"text": "Алиса, какой кондиционер включён?", "intent": "home.climate_status", "kind": "authored"}
+{"text": "скажи, включён ли кондиционер", "intent": "home.climate_status", "kind": "authored"}
+{"text": "слушай, а кондиционер сейчас работает", "intent": "home.climate_status", "kind": "authored"}
+{"text": "подскажи, какой кондиционер включён", "intent": "home.climate_status", "kind": "authored"}
+{"text": "что с кондиционером", "intent": "home.climate_status", "kind": "authored"}
+{"text": "что там с кондиционером", "intent": "home.climate_status", "kind": "authored"}
+{"text": "как там кондиционер", "intent": "home.climate_status", "kind": "authored"}
+{"text": "что с кондеем", "intent": "home.climate_status", "kind": "authored"}
+{"text": "какой статус у кондиционера", "intent": "home.climate_status", "kind": "authored"}
+{"text": "состояние кондиционера", "intent": "home.climate_status", "kind": "authored"}
+{"text": "какой статус у кондея", "intent": "home.climate_status", "kind": "authored"}
+{"text": "Алиса, какой статус у кондея", "intent": "home.climate_status", "kind": "authored"}
+{"text": "включён ли кондиционер на втором этаже", "intent": "home.climate_status", "kind": "authored", "slots": {"room": "upstairs"}}
+{"text": "включен ли кондиционер наверху", "intent": "home.climate_status", "kind": "authored", "slots": {"room": "upstairs"}}
+{"text": "кондиционер на втором этаже включён", "intent": "home.climate_status", "kind": "authored", "slots": {"room": "upstairs"}}
+{"text": "работает ли кондиционер на втором этаже", "intent": "home.climate_status", "kind": "authored", "slots": {"room": "upstairs"}}
+{"text": "что с кондиционером наверху", "intent": "home.climate_status", "kind": "authored", "slots": {"room": "upstairs"}}
+{"text": "кондиционер на кухне включён", "intent": "home.climate_status", "kind": "authored", "slots": {"room": "kitchen"}}
+{"text": "включён ли кондиционер в гостиной", "intent": "home.climate_status", "kind": "authored", "slots": {"room": "living"}}
+{"text": "в каком режиме кондиционер", "intent": "home.climate_status", "kind": "authored", "slots": {"aspect": "mode"}}
+{"text": "какой режим на кондиционере", "intent": "home.climate_status", "kind": "authored", "slots": {"aspect": "mode"}}
+{"text": "в каком режиме кондиционер на втором этаже", "intent": "home.climate_status", "kind": "authored", "slots": {"aspect": "mode"}}
+{"text": "на сколько градусов стоит кондиционер", "intent": "home.climate_status", "kind": "authored", "slots": {"aspect": "temp"}}
+{"text": "на сколько выставлен кондиционер", "intent": "home.climate_status", "kind": "authored", "slots": {"aspect": "temp"}}
+{"text": "какая температура на кондиционере", "intent": "home.climate_status", "kind": "authored", "slots": {"aspect": "temp"}}
+{"text": "сколько градусов на кондиционере", "intent": "home.climate_status", "kind": "authored", "slots": {"aspect": "temp"}}
+{"text": "как давно работает кондиционер", "intent": "home.climate_status", "kind": "authored", "slots": {"aspect": "since"}}
+{"text": "сколько работает кондиционер", "intent": "home.climate_status", "kind": "authored", "slots": {"aspect": "since"}}
+{"text": "давно включён кондиционер", "intent": "home.climate_status", "kind": "authored", "slots": {"aspect": "since"}}
+{"text": "кондиционер на втором этаже", "intent": "home.climate_bare", "kind": "authored"}
+{"text": "кондиционер наверху", "intent": "home.climate_bare", "kind": "authored"}
+{"text": "кондиционер", "intent": "home.climate_bare", "kind": "authored"}
+{"text": "кондей на втором этаже", "intent": "home.climate_bare", "kind": "authored"}
+{"text": "Алиса, кондиционер на втором этаже", "intent": "home.climate_bare", "kind": "authored"}

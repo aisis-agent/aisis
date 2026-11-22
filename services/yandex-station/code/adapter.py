@@ -244,6 +244,7 @@ class Adapter:
         return intent_route.IntentRouter(grammar, self.skills, self.timers, ha,
                                          catchall=self.env.get("AISIS_INTENT_CATCHALL", "on") != "off",
                                          hypotheses=self.hypotheses,
+                                         status_bare="on" if self.env.get("AISIS_STATUS_BARE", "shadow").lower() == "on" else "shadow",
                                          correction_mode=self.correction_mode if self.correction_mode in ("shadow", "on") else "off",
                                          extra_dict_mode=extra_dict.parse_mode(self.env.get("AISIS_EXTRA_DICT")))
 

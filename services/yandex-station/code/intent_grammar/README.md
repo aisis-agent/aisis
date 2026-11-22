@@ -176,6 +176,13 @@ number, 1..10 like `volume.set`) or `percent` (1..100, the unit is required). An
 `climate.warmer`'s, and a bare «прибавь на тридцать» is no number of levels. `intent_route.volume_from` turns the args into the overlay's
 `target` (level / 10 or percent / 100), `steps` or `deltaLevels`; an action that carries none or several of the units does nothing.
 
+### Information intents
+
+`assistant.capabilities*` (post phase) and `home.climate_status` / `home.climate_bare` (`pre`) are `tier: query` intents whose executors (`skill.capabilities`, `ha.climate_status`)
+build the answer from live data in the adapter (`capabilities.py`, `home_status.py`). They carry no `reply`. The air conditioner in every case («у кондея»,
+«с кондеем») is the lexicon set `ac_forms`; `ac_words` stays as it is, the quasar overlay `ac-defer-to-adapter` pins it. `home.climate_bare` is declined by the router
+until `AISIS_STATUS_BARE=on`. The phrase fixture `grammar/info-ru.jsonl` is read by `test_info_intents.py`; it is not part of the private corpus.
+
 ## Back-test
 
 Corpus directory: `$AISIS_INTENT_CORPUS_DIR`, else `~/.local/share/aisis/corpus/` (private, never in git). Files:
