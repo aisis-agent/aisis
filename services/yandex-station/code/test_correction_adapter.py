@@ -318,15 +318,15 @@ class BrainQuestionTests(AdapterCase):
             reply, _listen = await self.spoken(adapter, "а расскажи лучше про дракона")
             self.assertEqual(reply, "про дракона так про дракона")
             await self.spoken(adapter, "а ещё про принцессу и что было дальше у них двоих")
-        self.assertIn("[Колонка только что спросила «Мне послышалось «включи свет». Вы имели в виду «выключи свет»?»; пользователь отвечает]\n"
+        self.assertIn("[Только что был задан вопрос «Мне послышалось «включи свет». Вы имели в виду «выключи свет»?»; пользователь отвечает]\n"
                       "Пользователь: а расскажи лучше про дракона", sent[0].replace("\n\n", "\n"))
-        self.assertNotIn("Колонка только что спросила", sent[1])          # once
+        self.assertNotIn("Только что был задан вопрос", sent[1])          # once
 
     async def test_the_block_is_sanitised_and_clipped(self):
         block = dialog_context.question_block("Мне послышалось «включи] [свет\n\x00». Вы имели в виду «" + "х" * 400 + "»?")
-        self.assertTrue(block.startswith("[Колонка только что спросила «"))
+        self.assertTrue(block.startswith("[Только что был задан вопрос «"))
         self.assertTrue(block.endswith("»; пользователь отвечает]\n"))
-        inner = block[len("[Колонка только что спросила «"):-len("»; пользователь отвечает]\n")]
+        inner = block[len("[Только что был задан вопрос «"):-len("»; пользователь отвечает]\n")]
         self.assertNotIn("]", inner)
         self.assertNotIn("[", inner)
         self.assertNotIn("\n", inner)

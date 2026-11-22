@@ -11,6 +11,17 @@ databases, models, corpora, prompts, voice archive, blue/green state) is **NOT i
 the repo**; it lives under `~/.local/share/aisis/` (plus `~/.config/aisis/`,
 `~/.cache/aisis/`, `~/.local/state/aisis/`).
 
+## Wording: who does what
+
+The Yandex Station is **microphones, a loudspeaker and a wake-word spotter**, nothing else (a commands spotter on the device also
+recognises a few phrases and uploads their recording). It knows nothing and decides nothing: every text the system shows or says
+(the clip feed, session pages, the dashboard, the brain's prompts, docs) says WHAT was done and WHICH aisis layer did it, in the
+passive voice or by the layer's name, never «колонка сама …» / «ход колонки». The layers: the gate and the STT gateway (recognition),
+the adapter (the grammar, its handlers `voice_skills.py` for weather and «включи музыку», arithmetic, Jev, the brain), the quasar
+fast-intent layer (our server, reached through the hook), Home Assistant actions. aisis uses **no Yandex Alice skills**, so the word
+«навык» names nothing in a label: the trace layer `skill` reads «встроенный обработчик», `via: turn` (the adapter's call over the
+processor socket) reads «текстовый запрос к адаптеру». `test_neutral_wording.py` pins the label tables.
+
 ## Dependency chain
 
 ```text
@@ -68,8 +79,8 @@ speaker. A heard phrase is tried in this order; the first layer that recognises 
    plays (also a phone's AirPlay stream) alone, else queue 25 random tracks of the Music Assistant library;
    «продолжи» stays the media key for what was stopped);
 3. the ChatGPT brain (pm). It has no tools: its persona block (`user_prompt.CAPABILITIES` plus the
-   fragments from `~/.local/share/aisis/prompts/`) tells it what the speaker does and forbids the made-up
-   «не могу, скажи штатной командой колонки».
+   fragments from `~/.local/share/aisis/prompts/`) tells it that these commands are handled before it, forbids the made-up
+   «не могу, скажи штатной командой» and names no executor of a command.
 
 **Which room.** A phrase that names no room («включи свет», «яркость 30», «включи кондиционер») is about the room of
 the speaker that heard it. The fast-intent layer gets the station id of the connection (`StationInfo.duid`), finds
@@ -369,11 +380,11 @@ that was not observed.
   Commands the speaker recognises on the device itself (its commands spotter: «включи свет», «громче», «пауза») arrive
   as text only, so the STT gateway never hears them. Quasar forwards the spotter-log recording the station uploads
   next to each of them to the gateway (`POST /spotter-clip`, `spotter_clips.py`), which archives it as a clip with
-  `trigger='spotter'` (the transcript is the speaker's own recognition, not Whisper's) linked to the text dialog nearest in
-  time (one of the same station first); the feed posts it like any other utterance, captioned «распознано самой колонкой».
+  `trigger='spotter'` (the transcript is the commands spotter's, not Whisper's) linked to the text dialog nearest in
+  time (one of the same station first); the feed posts it like any other utterance, captioned «распознано споттером команд».
 - **How an utterance was processed (diagnostics, session links)**: the adapter writes one record per call it answers into
   `utterance_traces` of `dialogs.sqlite3` (`utterance_trace.py`; the quasar hook's `/intent/decide` call is `via: hook`,
-  the speaker's turn `via: turn`): layer (grammar / skill / calc / jev / brain / error / none), the grammar's decision with
+  the adapter's text request `via: turn`): layer (grammar / skill / calc / jev / brain / error / none; shown as «встроенный обработчик» for `skill`), the grammar's decision with
   its parameters (intent, tier, priority band, confidence, slots, executor and arguments), why a decision was not run
   by the adapter, the clarification or reprompt it asked (and the phrase it was joined to), calls (Home Assistant
   service + entity + data + status, weather-cli, music, timers), Jev's verdict, the brain's provider/slot/model/attempts,
@@ -543,7 +554,7 @@ never read aloud.
   **Shadow only in this change:** nothing reads the stored evidence yet (the consumers arrive with the correction-FSM change), and
   with `AISIS_HYP_ENABLED` unset there is no opinion, hence no publish and no wait.
 - **Spotter path.** `POST /spotter-clip` runs the same decode on the uploaded audio after answering it and publishes with
-  `source: "spotter"`; it cannot prevent the action the speaker already took, it is evidence for diagnostics and the next layer.
+  `source: "spotter"`; it cannot prevent the action already taken, it is evidence for diagnostics and the next layer.
 - **Kept with the clip.** `clip_hypotheses(clip_id, ts, source, primary_text, nbest, ms)` in `dialogs.sqlite3` (read with
   `voiceclips.hypotheses_of`), one row per archived clip that has an opinion, removed with the clip by the retention pruning.
 - **Fail-open.** A missing core or engine, a worker that dies, times out or hangs, or an adapter that is down changes neither the

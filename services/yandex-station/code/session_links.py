@@ -5,8 +5,8 @@ Tailscale. The address is therefore never invented: `AISIS_DASHBOARD_URL` wins, 
 Tailscale IPv4) from `tailscale status --self`. When neither can be read, `base_url()` is None and the callers say so instead
 of printing a dead link.
 
-  /session/<dialog id>      one session (a dialog of the speaker): activation, requests, how each was processed
-  /session/clip/<clip id>   the same page for a clip that has no dialog (rejected as noise, a command the speaker ran alone)
+  /session/<dialog id>      one session (one dialog): activation, requests, how each was processed
+  /session/clip/<clip id>   the same page for a clip that has no dialog (rejected as noise, a command recognised by the commands spotter)
   /grammar#intent-<id>      the definition of a grammar intent on the intents page
 """
 from __future__ import annotations

@@ -136,13 +136,13 @@ engine whether this utterance deserves a question (a second opinion the gateway 
 `/intent/decide` may carry `deviceId`, `rerun: true` and `noop`; the response may carry route `rerun` (`text` = the corrected phrase the overlay runs as if spoken) and `context: true`
 (the dialog is open). An accepted alternative is run here when this adapter owns its executor; handed to the overlay as `rerun` when it announced support and the action is not risky; and
 otherwise asked for again («Скажите ещё раз: выключи свет.»). An unrelated command, an unmatched reply, an emergency phrase and a timeout all leave the dialog and take the normal route
-(the unmatched reply reaches the brain with `[Колонка только что спросила «…»; пользователь отвечает]`). `docs/specs/140-local-voice-speaker.md` has the decision record.
+(the unmatched reply reaches the brain with `[Только что был задан вопрос «…»; пользователь отвечает]`). `docs/specs/140-local-voice-speaker.md` has the decision record.
 
 A compound runs only when every clause is something the adapter itself can run (`executable`), checked before the first clause runs: a compound
 that ends in `none` has changed nothing. Without timers configured a timer phrase, alone or in a compound made only of timer clauses, answers «не умею»;
 a compound with any other clause goes to the old path whole.
 Timer and alarm starts, sets and cancels run in arrival order, and one **utterance** delivered twice within five seconds runs once (the quasar hook and the
-speaker's own turn can both carry it; so the second «отмени таймер» does not answer «Таймеров нет» to a cancel that worked). One slot remembers the last
+adapter's text request can both carry it; so the second «отмени таймер» does not answer «Таймеров нет» to a cancel that worked). One slot remembers the last
 utterance that ran such an action with its reply (a compound unless one of its clauses is a Home Assistant one or «повтори»: those depend on the speaking station, and Home Assistant may fail behind a reply that still says «готово», so a repeated one runs again, timer clause included); it is replayed only for the same utterance, after the actions in flight have finished;
 any other utterance that runs an action empties it, and a failed, declined or queued result is never stored; duplicates in flight share one execution (a compound with a Home Assistant or «повтори» clause only within the same station).
 Nothing else is deduplicated: Home Assistant actions and queries run every time. A voice reminder is cancelled by `reminder.cancel` («отмени напоминание»);
