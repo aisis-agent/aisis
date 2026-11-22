@@ -60,8 +60,8 @@ comes from the enclosing 0700 directory, not from changing hash-relevant modes.
   "adapter_layer": {
     "schema": "aisis-adapter-layer-source/v1",
     "source_repo": "https://github.com/alex-mextner/aisis",
-    "source_commit": "98b2b08e08b1169b2da7629652ac5bdd9b94e942",
-    "source_tree": "88380d40c45fc364b366f09b9dd2be75d9097469",
+    "source_commit": "14dc36aeaf1d50d3e4b0f526a1de4d4e5bd226e0",
+    "source_tree": "2c66cc091fb64d2e27bf2ebcb94ec216e517e4f8",
     "files": [{"repo_path": "services/yandex-station/code/intent_grammar/__init__.py", "archive_path": "verification/adapter/intent_grammar/__init__.py", "sha256": "<64 hex>", "bytes": 322, "mode": 420, "git_blob": "<40 hex>"}]
   }
 }
