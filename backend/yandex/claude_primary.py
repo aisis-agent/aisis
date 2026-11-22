@@ -2,7 +2,8 @@
 """AISIS JSON command: three Claude API credentials, guarded ChatGPT web last.
 
 No tools/actions are supplied to Claude. No browser controls are changed.
-Credential values and provider response bodies never appear in diagnostics.
+Credential values and provider response bodies never appear in diagnostics; the only provider text kept is one
+sanitized error line (at most 200 characters, keys, ids and e-mail addresses masked) in the usage ledger and key-pause event.
 Default storage contains hashes/status only. Bounded private context is opt-in.
 """
 from __future__ import annotations
@@ -12,6 +13,7 @@ import asyncio
 from collections import defaultdict
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import fcntl
 import hashlib
@@ -122,7 +124,8 @@ def diagnostic(event: dict) -> None:
 
 
 def write_usage(row: dict) -> None:
-    """One append per native attempt. No body, prompt, answer, header dump or credential is stored."""
+    """One append per native attempt. No body, prompt, answer, header dump or credential is stored; a rejected
+    attempt keeps only the sanitized one-line provider error."""
     root = Path(os.environ.get('AISIS_CLAUDE_STATE_DIR',
                                str(Path.home() / '.local/state/aisis-yandex/claude')))
     path = Path(os.environ.get('AISIS_CLAUDE_USAGE_DB', str(root / 'usage.sqlite3')))
@@ -144,7 +147,13 @@ def write_usage(row: dict) -> None:
                 response_id TEXT, stop_reason TEXT, http_status INTEGER, outcome TEXT NOT NULL,
                 input_tokens INTEGER, output_tokens INTEGER, cache_read_input_tokens INTEGER,
                 cache_creation_input_tokens INTEGER, cache_creation_5m_input_tokens INTEGER,
-                cache_creation_1h_input_tokens INTEGER)''')
+                cache_creation_1h_input_tokens INTEGER, error_excerpt TEXT)''')
+            if 'error_excerpt' not in {col[1] for col in db.execute('PRAGMA table_info(provider_requests)')}:
+                try:
+                    db.execute('ALTER TABLE provider_requests ADD COLUMN error_excerpt TEXT')
+                except sqlite3.OperationalError as exc:   # another writer upgraded the table between the check and here
+                    if 'duplicate column' not in str(exc):
+                        raise
             db.execute('CREATE INDEX IF NOT EXISTS provider_requests_time ON provider_requests(started_at)')
             names = tuple(row)
             db.execute('INSERT INTO provider_requests (' + ','.join(names) + ') VALUES (' +
@@ -188,9 +197,15 @@ class RouterError(Exception):
 
 
 class Failover(RouterError):
-    def __init__(self, code: str, cooldown_seconds: float):
+    """A key cannot answer now. `resume_at` is the provider's own absolute resume time (epoch seconds); `escalate` asks the
+    router for the backoff ladder because billing failed and the provider named no time."""
+    def __init__(self, code: str, cooldown_seconds: float, *, resume_at: float | None = None,
+                 escalate: bool = False, excerpt: str | None = None):
         super().__init__(code)
         self.cooldown_seconds = cooldown_seconds
+        self.resume_at = resume_at
+        self.escalate = escalate
+        self.excerpt = excerpt
 
 
 def digest(text: str) -> str:
@@ -333,45 +348,129 @@ class Settings:
             raise RouterError('invalid_router_settings') from None
 
 
-def retry_after(headers: dict, default: float = 60.0) -> float:
+def retry_after_seconds(headers: dict, now: float) -> float | None:
+    """The provider's finite `Retry-After` (seconds or HTTP date) as a wait from `now`; None when absent or malformed."""
     raw = next((v for k, v in headers.items() if k.lower() == 'retry-after'), None)
     if raw is None:
-        return default
+        return None
     try:
         value = float(raw)
     except (TypeError, ValueError):
         try:
-            value = parsedate_to_datetime(str(raw)).timestamp() - time.time()
+            value = parsedate_to_datetime(str(raw)).timestamp() - now
         except (ValueError, TypeError, OverflowError):
-            return default
+            return None
+    return value if math.isfinite(value) else None
+
+
+def retry_after(headers: dict, default: float = 60.0, now: float | None = None) -> float:
     # Provider (pinned, TLS-verified origin) says how long to wait: never retry early.
-    return max(default, value) if math.isfinite(value) else default
+    value = retry_after_seconds(headers, time.time() if now is None else now)
+    return default if value is None else max(default, value)
 
 
 BILLING_PHRASES = ('credit balance is too low', 'you have reached your specified api usage limits',
                    'you have reached your specified workspace api usage limits', 'this organization has been disabled')
+# A key out of credit is paused until the provider's own resume time; without one the pause grows with each failed re-probe.
+BILLING_BACKOFF = (3600, 3 * 3600, 12 * 3600, 24 * 3600)
+MIN_BILLING_PAUSE = 60
+MAX_BILLING_PAUSE = 62 * 86400   # a resume time further away than any monthly usage limit is not believed
+RESUME_DATE_RE = re.compile(r'\b(\d{4})-(\d{2})-(\d{2})(?:(?:T|\s+at\s+|\s+)(\d{1,2}):(\d{2})(?::(\d{2}))?)?')
+EXCERPT_MASKS = ((re.compile(r'sk-[A-Za-z0-9_-]{8,}'), '[key]'),
+                 (re.compile(r'[\w.+-]+@[\w-]+(?:\.[\w-]+)+'), '[email]'),
+                 (re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b'), '[id]'),
+                 (re.compile(r'\b[a-z]{2,10}_[A-Za-z0-9]{8,}\b'), '[id]'),
+                 (re.compile(r'\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{24,}\b'), '[id]'))
+EXCERPT_LIMIT = 200
+
+
+def error_message(body: Any) -> str | None:
+    error = body.get('error') if isinstance(body, dict) else None
+    message = error.get('message') if isinstance(error, dict) else None
+    return message if isinstance(message, str) else None
+
+
+def error_excerpt(body: Any) -> str | None:
+    """The provider's error sentence as one short line with keys, ids and e-mail addresses masked; None when there is none."""
+    message = error_message(body)
+    if message is None:
+        return None
+    message = message[:4 * EXCERPT_LIMIT]   # bounded before the masks run: the body may be 1 MiB
+    for pattern, mask in EXCERPT_MASKS:
+        message = pattern.sub(mask, message)
+    line = ' '.join(re.sub(r'[\x00-\x1f\x7f]', ' ', message).split())
+    if not line:
+        return None
+    return line if len(line) <= EXCERPT_LIMIT else line[:EXCERPT_LIMIT - 1] + '…'
 
 
 def is_billing_error(body: Any) -> bool:
-    error = body.get('error', {}) if isinstance(body, dict) else {}
-    message = error.get('message', '') if isinstance(error, dict) else ''
-    return isinstance(message, str) and any(part in message.lower() for part in BILLING_PHRASES)
+    message = error_message(body)
+    return message is not None and any(part in message.lower() for part in BILLING_PHRASES)
 
 
-def key_failure(status: int, headers: dict, body: Any) -> Failover | None:
+def message_resume_time(body: Any) -> float | None:
+    """«... regain access on 2026-12-01 at 00:00 UTC»: the first ISO date of the provider's message (UTC; midnight without a time)."""
+    match = RESUME_DATE_RE.search(error_message(body) or '')
+    if match is None:
+        return None
+    year, month, day, hour, minute, second = (int(part) if part else 0 for part in match.groups())
+    try:
+        return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def header_wait(headers: dict, now: float) -> float | None:
+    """Seconds until the latest time the provider's headers name (`Retry-After`, `anthropic-ratelimit-*-reset`)."""
+    waits = [retry_after_seconds(headers, now)]
+    for name, raw in headers.items():
+        lower = name.lower()
+        if lower.startswith('anthropic-ratelimit-') and lower.endswith('-reset'):
+            try:
+                reset = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+            except ValueError:
+                continue
+            if reset.tzinfo is not None:   # a time without an offset would be read in the host's zone: not believed
+                try:
+                    waits.append(reset.timestamp() - now)
+                except OverflowError:
+                    pass
+    waits = [wait for wait in waits if wait is not None and 0 < wait <= MAX_BILLING_PAUSE]
+    return max(waits, default=None)
+
+
+def billing_failover(code: str, headers: dict, body: Any, now: float) -> Failover:
+    """Resume time from the provider's message or headers (the latest wins: never retry early); none given: the backoff ladder."""
+    resume_at, wait = message_resume_time(body), header_wait(headers, now)
+    if resume_at is not None and not now < resume_at <= now + MAX_BILLING_PAUSE:
+        resume_at = None
+    excerpt = error_excerpt(body)
+    if resume_at is not None and (wait is None or now + wait <= resume_at):
+        return Failover(code, resume_at - now, resume_at=resume_at, excerpt=excerpt)
+    if wait is not None:   # a header is a floor: the ladder step still applies, so a short header cannot keep a dry key probed every minute
+        return Failover(code, max(wait, MIN_BILLING_PAUSE), escalate=True, excerpt=excerpt)
+    return Failover(code, BILLING_BACKOFF[0], escalate=True, excerpt=excerpt)
+
+
+def key_failure(status: int, headers: dict, body: Any, now: float | None = None) -> Failover | None:
     """What a non-success provider status means for this key; None for success or a redirect-like status."""
+    now = time.time() if now is None else now
     billing = is_billing_error(body)
+    if status == 429 and billing:
+        return billing_failover('rate_limit', headers, body, now)
+    if status == 402 or (status in (400, 403) and billing):
+        return billing_failover('billing_unavailable', headers, body, now)
+    excerpt = error_excerpt(body)
     if status == 429:
-        return Failover('rate_limit', retry_after(headers, 3600 if billing else 60))
+        return Failover('rate_limit', retry_after(headers, 60, now), excerpt=excerpt)
     if status in (401, 403):
-        return Failover('credential_unavailable', retry_after(headers, 300))
-    if status == 402 or status == 400 and billing:
-        return Failover('billing_unavailable', retry_after(headers, 3600))
+        return Failover('credential_unavailable', retry_after(headers, 300, now), excerpt=excerpt)
     if status == 408 or 500 <= status <= 599:
-        return Failover('server_unavailable', retry_after(headers, 15))
+        return Failover('server_unavailable', retry_after(headers, 15, now), excerpt=excerpt)
     if 400 <= status <= 499:
         # Model access, workspace and organisation state belong to the key: another key may still work.
-        return Failover('request_rejected', retry_after(headers, 300))
+        return Failover('request_rejected', retry_after(headers, 300, now), excerpt=excerpt)
     return None
 
 
@@ -426,7 +525,7 @@ async def anthropic_send(credential: Credential, body: dict, timeout: float, *,
     started_at, started = time.time(), time.monotonic()
     deadline = deadline if deadline is not None else ATTEMPT_DEADLINE.get()
     status, headers, result = None, {}, None
-    outcome = 'router_error'
+    outcome, excerpt = 'router_error', None
     owned_session = session is None
     if owned_session:
         session = aiohttp.ClientSession(trust_env=False)
@@ -454,6 +553,7 @@ async def anthropic_send(credential: Credential, body: dict, timeout: float, *,
         raise Failover('transport_unavailable', 30) from None
     except RouterError as exc:
         outcome = safe_identifier(str(exc), 64) or 'router_error'
+        excerpt = getattr(exc, 'excerpt', None)
         raise
     finally:
         metadata = response_metadata(headers, result)
@@ -467,7 +567,7 @@ async def anthropic_send(credential: Credential, body: dict, timeout: float, *,
                       'response_model': metadata['model'], 'organization_id': metadata['organization_id'],
                       'request_id': metadata['request_id'], 'response_id': metadata['response_id'],
                       'stop_reason': metadata['stop_reason'],
-                      'http_status': status, 'outcome': outcome, **metadata['usage']}
+                      'http_status': status, 'outcome': outcome, 'error_excerpt': excerpt, **metadata['usage']}
         try:
             if owned_session:
                 await session.close()
@@ -490,11 +590,18 @@ class State:
           CREATE TABLE IF NOT EXISTS turns (
             id TEXT PRIMARY KEY, station TEXT NOT NULL, digest TEXT NOT NULL,
             status TEXT NOT NULL, provider TEXT, created REAL NOT NULL);
-          CREATE TABLE IF NOT EXISTS cooldowns (keyhash TEXT PRIMARY KEY, until_time REAL NOT NULL);
+          CREATE TABLE IF NOT EXISTS cooldowns (keyhash TEXT PRIMARY KEY, until_time REAL NOT NULL, strikes INTEGER NOT NULL DEFAULT 0);
           CREATE TABLE IF NOT EXISTS context (
             seq INTEGER PRIMARY KEY AUTOINCREMENT, station TEXT NOT NULL,
             prompt TEXT NOT NULL, answer TEXT NOT NULL, created REAL NOT NULL);
         ''')
+        if 'strikes' not in {col[1] for col in self.db.execute('PRAGMA table_info(cooldowns)')}:   # a table of the previous release
+            try:
+                with self.db:
+                    self.db.execute('ALTER TABLE cooldowns ADD COLUMN strikes INTEGER NOT NULL DEFAULT 0')
+            except sqlite3.OperationalError as exc:   # another process upgraded the table between the check and here
+                if 'duplicate column' not in str(exc):
+                    raise
     def close(self):
         self.db.close()
     def count_turns(self):
@@ -512,12 +619,22 @@ class State:
     def mark(self, turn, status, provider=None):
         with self.db:
             self.db.execute('UPDATE turns SET status=?,provider=? WHERE id=?', (status, provider, turn))
-    def cooldown(self, keyhash, until):
+    def cooldown(self, keyhash, until, strikes=None):
+        """Pause a key until `until` (never shortening a longer pause); `strikes` replaces the failed-re-probe count when given."""
         with self.db:
-            self.db.execute('INSERT INTO cooldowns VALUES(?,?) ON CONFLICT(keyhash) DO UPDATE SET until_time=MAX(until_time,excluded.until_time)', (keyhash, until))
-    def cooling(self, keyhash, now):
+            self.db.execute('INSERT INTO cooldowns(keyhash,until_time,strikes) VALUES(?,?,?) ON CONFLICT(keyhash) DO UPDATE SET '
+                            'until_time=MAX(until_time,excluded.until_time), strikes=COALESCE(?,strikes)', (keyhash, until, strikes or 0, strikes))
+    def paused_until(self, keyhash, now):
         row = self.db.execute('SELECT until_time FROM cooldowns WHERE keyhash=?', (keyhash,)).fetchone()
-        return bool(row and row[0] > now)
+        return row[0] if row and row[0] > now else None
+    def cooling(self, keyhash, now):
+        return self.paused_until(keyhash, now) is not None
+    def strikes(self, keyhash):
+        row = self.db.execute('SELECT strikes FROM cooldowns WHERE keyhash=?', (keyhash,)).fetchone()
+        return row[0] if row else 0
+    def clear_cooldown(self, keyhash):
+        with self.db:
+            self.db.execute('DELETE FROM cooldowns WHERE keyhash=?', (keyhash,))
     def prune(self, pairs, cutoff):
         with self.db:
             self.db.execute('DELETE FROM context WHERE created<?', (cutoff,))
@@ -646,8 +763,8 @@ class Router:
         for credential in self.credentials:
             answer=await self._ask_key(credential,payload,body,attempts)
             if answer is not None:
-                return answer
-        return await self._ask_reserve(payload,history,attempts)
+                return {**answer,'keys':self._key_states()}
+        return {**await self._ask_reserve(payload,history,attempts),'keys':self._key_states()}
 
     async def _ask_key(self,credential,payload,body,attempts):
         """One Claude request with one credential: the answer, or None after recording why the key was skipped."""
@@ -674,14 +791,39 @@ class Router:
         else:
             if not isinstance(text,str) or not text.strip() or len(text)>16000:
                 raise RouterError('invalid_answer')
+            self.state.clear_cooldown(credential.fingerprint)   # answered: any earlier billing backoff is over
             self.state.complete(payload,text,'claude',settings.history_pairs,self.clock())
             attempts.append({'slot':credential.label,'result':'complete','seconds':round(time.monotonic()-started,3)})
             return {'text':text,'conversation_id':payload.get('conversation_id'),
                     'provider':'claude','credential_slot':credential.label,'attempts':attempts,
                     **(text.metadata if isinstance(text,ResponseText) else {})}
-        self.state.cooldown(credential.fingerprint,self.clock()+error.cooldown_seconds)
+        self._pause_key(credential,error)
         attempts.append({'slot':credential.label,'result':str(error),'seconds':round(time.monotonic()-started,3)})
         return None
+
+    def _pause_key(self,credential,error):
+        """Pause a failed key until the provider's own resume time; a billing failure without one backs off 1, 3, 12, 24 h."""
+        now,strikes=self.clock(),None
+        if error.resume_at is not None and now<error.resume_at<=now+MAX_BILLING_PAUSE:
+            until=error.resume_at
+        else:
+            until=now+error.cooldown_seconds
+            if error.escalate:
+                strikes=self.state.strikes(credential.fingerprint)
+                until=now+max(error.cooldown_seconds,BILLING_BACKOFF[min(strikes,len(BILLING_BACKOFF)-1)])
+                strikes+=1
+        self.state.cooldown(credential.fingerprint,until,strikes)
+        diagnostic({'event':'claude_key_paused','slot':safe_identifier(credential.label,32),'code':str(error),
+                    'until':until,'excerpt':error.excerpt})
+
+    def _key_states(self):
+        """Every key after this turn: available, or paused until a time; the trace shows them as one status line."""
+        now=self.clock()
+        states=[]
+        for credential in self.credentials:
+            until=self.state.paused_until(credential.fingerprint,now)
+            states.append({'slot':credential.label,'ok':until is None,'until':until})
+        return states
 
     async def _ask_reserve(self,payload,history,attempts):
         settings=self.settings

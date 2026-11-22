@@ -67,7 +67,18 @@ A 401/402/403/408/429/5xx/timeout response puts that key in a persistent cooldow
 finite `Retry-After` interval from the provider, never shortened; missing or malformed values use
 a safe default) and moves to the next key. Any other 4xx rejection (model access, workspace or
 organization state, which belong to the key) is treated the same way with a 300 s default
-cooldown, and a disabled organization or exhausted credit with 3600 s; only a redirect-like
+cooldown. A key out of credit or at its usage limit (402, or a 400/403/429 whose message says so) is
+paused until the provider's own resume time, never probed in between: the date in the message
+(«You will regain access on 2026-12-01 at 00:00 UTC», UTC, midnight when no time is given); a time
+more than 62 days away is not believed. `Retry-After` or the `anthropic-ratelimit-*-reset` headers (an
+offset-less time is ignored) are a floor under the ladder step: a later header time wins, a nearer one
+is raised to the step (a message date later than the headers is followed as given). With no date the pause grows
+with every failed re-probe: 1 h, 3 h, 12 h, 24 h, then 24 h again; an answer from the key resets the ladder. The
+pause is stored in `router.sqlite3` (`cooldowns.until_time`, `cooldowns.strikes`), so a new process, a
+restart or a redeploy keeps it. The result JSON lists every key after the turn (`keys`: slot, `ok`, `until`)
+for the trace line; a `claude_key_paused` event with the slot, code, resume time and the sanitized excerpt
+goes to the private invocation log. After topping up a key, lift its pause at once with
+`sqlite3 "$AISIS_CLAUDE_STATE_DIR/router.sqlite3" 'DELETE FROM cooldowns'` (every key is probed again on the next turn). Only a redirect-like
 status or an unusable answer shape fails the turn. An answer cut off at `max_tokens` is spoken as far as it
 goes; an empty one fails the turn. Only when all keys fail or cool down is the existing
 `chatgpt_pm.py` (kept beside the
@@ -314,11 +325,12 @@ Every native HTTP attempt queues one row to `$AISIS_CLAUDE_STATE_DIR/usage.sqlit
 - Attempt ID, UTC Unix start time, duration, purpose (`brain`, `asr`, `facts`, `probe`) and optional turn ID.
 - Credential slot and one-way credential fingerprint, requested/returned model, provider organization ID and request/response IDs when present.
 - HTTP status and a fixed outcome code, including failed, cancelled and timed-out attempts.
+- `error_excerpt`: for a rejected attempt, the provider's error sentence as one line of at most 200 characters, with API keys, e-mail addresses and identifiers masked; `NULL` for successes and for rejections without a JSON message. It is the only way to see *which* billing condition (credit balance, usage limit, workspace limit, disabled organization) a `billing_unavailable` row was.
 - Separate raw input, output, cache-read, cache-write, five-minute write and one-hour write counters.
 
 Missing or malformed counters remain SQL `NULL`. A timeout can have unknown provider consumption; it is never reported as zero. Count non-null samples alongside each token sum when reporting coverage. The transport records once; the router and adapter do not add a second usage row for that response. The adapter may copy the safe counters into its turn trace for correlation.
 
-The ledger contains no prompts, answers, credentials or full headers. Its file is private (0600), WAL permits concurrent readers, and writes run off the request deadline with a one-second lock budget. This absorbs short competing writes without consuming the voice attempt deadline. Orderly shutdown drains pending writes; SIGTERM follows the cancellation path, while a crash or SIGKILL can leave incomplete coverage. Persistence failures only emit a fixed warning: they do not discard a successful voice answer. The CLI emits a private per-invocation `/tmp/aisis-claude-*.log` path on stderr while preserving the JSON-only stdout contract. The private log retains fixed error/warning codes and the actual exit status, including argparse and interrupts. Its parent PID identifies the caller; subprocess fixtures remove only logs from their own invocations. These small invocation logs follow the host’s existing temporary-file retention policy; the router does not remove another process’s logs.
+The ledger contains no prompts, answers, credentials or full headers; the one provider text it keeps is the sanitized error line described above. Its file is private (0600), WAL permits concurrent readers, and writes run off the request deadline with a one-second lock budget. This absorbs short competing writes without consuming the voice attempt deadline. Orderly shutdown drains pending writes; SIGTERM follows the cancellation path, while a crash or SIGKILL can leave incomplete coverage. Persistence failures only emit a fixed warning: they do not discard a successful voice answer. The CLI emits a private per-invocation `/tmp/aisis-claude-*.log` path on stderr while preserving the JSON-only stdout contract. The private log retains fixed error/warning codes and the actual exit status, including argparse and interrupts. Its parent PID identifies the caller; subprocess fixtures remove only logs from their own invocations. These small invocation logs follow the host’s existing temporary-file retention policy; the router does not remove another process’s logs.
 
 For installations using the current AISIS state layout, the immutable installer accepts an explicit root:
 
