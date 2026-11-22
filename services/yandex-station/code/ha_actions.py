@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+import home_status
 import utterance_trace
 
 AREAS = {
@@ -157,6 +160,17 @@ def _num(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
+def _parse_time(value: Any) -> datetime | None:
+    """An ISO timestamp of a state (`last_changed`) as an aware datetime; None for anything unreadable or without a zone."""
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
 class _Command:
     """The service calls of one voice command. hacli answers 202 when it OBSERVED Home Assistant gone and queued the call for the
     recovery: the command goes on, so that every operation of it (all the entities, the mode and the setpoint) is queued.
@@ -214,7 +228,11 @@ class HaActions:
     def __init__(self, get_json: Callable[[str], Awaitable[Any]],
                  post_json: Callable[[str, dict], Awaitable[HaReply]],
                  ttl: float = 60.0, clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 wall: Callable[[], datetime] = lambda: datetime.now(timezone.utc).astimezone(),
+                 pick: Callable[[list[str]], str] = random.choice) -> None:
+        self._wall = wall
+        self._pick = pick
         self._get = get_json
         self._post = post_json
         self._ttl = ttl
@@ -231,6 +249,8 @@ class HaActions:
 
     async def run(self, executor: str, args: dict, station: str | None = None) -> str:
         """`station`: the speaker that heard the command, for a command that names no room."""
+        if executor == "ha.climate_status":
+            return await self._climate_status(args)
         handler = {
             "ha.climate": self._climate,
             "ha.climate_delta": self._climate_delta,
@@ -281,11 +301,60 @@ class HaActions:
             raise _Outcome(REPLY_WHICH_ROOM)
         return area
 
+    # -- read-only state answers (spec 150): nothing here ever calls a service ----------------------------------------
+
+    async def _climate_status(self, args: dict) -> str:
+        """Which air conditioners are on, in what mode, since when, from the states ha-cli holds (read fresh from it: the adapter's own
+        cache could be a minute old). A room named in the phrase narrows it; no room is every unit of the home."""
+        try:
+            return await self._climate_status_text(args)
+        except Exception as err:   # Home Assistant or ha-cli did not answer, or answered something unreadable
+            utterance_trace.error("ha status: " + type(err).__name__)
+            utterance_trace.note(reply_why="ha_status_unavailable")
+            return home_status.STATUS_UNAVAILABLE
+
+    async def _climate_status_text(self, args: dict) -> str:
+        room = args.get("room")
+        area = AREAS.get(room) if room else None
+        if room and area is None:
+            return REPLY_UNKNOWN_ROOM
+        states = await self._all_states(fresh=True)
+        areas = await self._area_registry()
+        units = []
+        for entity_id, entity in sorted(states.items()):
+            if not entity_id.startswith("climate."):
+                continue
+            entity_area = areas.get(entity_id)
+            if area is not None and entity_area != area:
+                continue
+            attrs = entity.get("attributes") or {}
+            units.append((entity_area, home_status.Unit(
+                where=home_status.locative(entity_area) if entity_area else None,
+                state=entity["state"] if isinstance(entity.get("state"), str) else "unknown",   # an entity without a state was not read: never «включён»
+                setpoint=_num(attrs.get("temperature")), current=_num(attrs.get("current_temperature")),
+                since=_parse_time(entity.get("last_changed")))))
+        utterance_trace.note(status_units=len(units), room=area)
+        if not units and area is not None:
+            return home_status.NO_UNIT_IN_AREA.format(area=area)
+        units.sort(key=lambda item: (item[0] is None, item[0] or ""))   # a unit with no known room last
+        return home_status.climate_text([unit for _, unit in units], self._wall(), aspect=args.get("aspect"), pick=self._pick)
+
+    async def rooms_with(self, domain: str) -> tuple[str, ...]:
+        """The areas that have at least one entity of the domain (`light`, `climate`), in the home's own order; entities that are
+        printers' equipment are not «свет». Raises when Home Assistant or ha-cli does not answer."""
+        states = await self._all_states()
+        areas = await self._area_registry()
+        found = {areas[entity_id] for entity_id, entity in states.items()
+                 if entity_id.startswith(domain + ".") and entity_id in areas and entity.get("state") not in _UNAVAILABLE
+                 and not (domain == "light" and JUNK_LIGHT.search(entity_id))}
+        order = list(AREAS.values())
+        return tuple(sorted(found, key=lambda name: (order.index(name) if name in order else len(order), name)))
+
     # -- lookup ---------------------------------------------------------------------------------------------------
 
-    async def _all_states(self) -> dict[str, dict]:
+    async def _all_states(self, fresh: bool = False) -> dict[str, dict]:
         now = self._clock()
-        if self._states and now - self._states[0] < self._ttl:
+        if not fresh and self._states and now - self._states[0] < self._ttl:
             return self._states[1]
         raw = await self._get("/api/states")
         if not isinstance(raw, list):

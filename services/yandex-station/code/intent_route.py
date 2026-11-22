@@ -36,6 +36,7 @@ from intent_grammar.grammar import load, render_reply
 from intent_grammar.timewords import plural
 from timers import duration_accusative, left_text
 import voice_skills
+import capabilities
 import correction
 import utterance_trace
 
@@ -54,7 +55,7 @@ WEEKDAYS = ("понедельник", "вторник", "среда", "четв�
 # Executors the adapter runs itself; everything else belongs to the quasar container (or is only a skill label).
 ADAPTER_EXECUTORS = frozenset(("clock.say", "clock.date", "dialog.repeat_last", "timer.start", "timer.cancel",
                                "timer.remaining", "alarm.set", "alarm.cancel", "reminder.cancel", "ha.climate", "ha.climate_delta",
-                               "ha.light_color", "ha.light_brightness", "skill.math", "skill.weather"))
+                               "ha.light_color", "ha.light_brightness", "ha.climate_status", "skill.math", "skill.weather", "skill.capabilities"))
 TIMER_PREFIXES = ("timer.", "alarm.", "reminder.")   # the executors that need the TimerBook
 VOLUME_EXECUTORS = frozenset(("speaker.volume", "speaker.volume_delta"))
 FALLBACK_BAND = -1             # intents with priority below zero are the catch-alls: they read what the skills left
@@ -152,9 +153,13 @@ class IntentRouter:
     correction_mode: str = "off"        # AISIS_CORRECTION: off | shadow (decide and trace, never speak) | on
     correction_core: Any | None = None  # the stt_cli.hypotheses module (tests pass a fake); None imports the real one
     extra_dict_mode: str = "off"        # AISIS_EXTRA_DICT: off | shadow (log the extra confusables' candidates) | on (the engine decides with them)
+    status_bare: str = "shadow"         # AISIS_STATUS_BARE: shadow (traced, declined; anything but `on`) | on: «кондиционер на втором этаже» alone is answered with the status
+    capabilities: capabilities.Capabilities | None = field(default=None, init=False)
     correction: correction.Correction | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
+        self.capabilities = capabilities.Capabilities(ha=self.ha, timers=self.timers, skills=self.skills, now=self.now,
+                                                      pick=self.pick, monotonic=self.monotonic)
         if self.correction_mode in ("shadow", "on"):
             try:
                 self.correction = correction.Correction(self.classify, self._decide_in, self.hypotheses, mode=self.correction_mode,
@@ -220,6 +225,8 @@ class IntentRouter:
             return not (action.get("args") or {}).get("query") and self.skills is not None
         if executor not in ADAPTER_EXECUTORS:
             return False
+        if executor == "ha.climate_status" and (action.get("args") or {}).get("bare") and self.status_bare != "on":
+            return False   # «кондиционер на втором этаже» alone: shadow first (AISIS_STATUS_BARE), traced and declined
         if executor.startswith(TIMER_PREFIXES):
             return timers_bound or self.timers is not None
         if executor.startswith("ha."):
@@ -324,6 +331,8 @@ class IntentRouter:
             return "timers are not configured"
         if executor.startswith("ha.") and self.ha is None:
             return "Home Assistant actions are off"
+        if executor == "ha.climate_status" and (decision.action or {}).get("args", {}).get("bare") and self.status_bare != "on":
+            return "bare «кондиционер …» is in shadow (AISIS_STATUS_BARE): the quasar layer's question stands"
         if executor == "dialog.repeat_last":
             return "nothing to repeat"
         return f"executor {executor} gave no answer"
@@ -471,6 +480,7 @@ class IntentRouter:
         """The last thing the speaker said to this station, for «повтори». `brain`: the brain said it. A question of the brain's
         is remembered until the next line of any kind to that station or BRAIN_QUESTION_WINDOW_S (a short answer to it is the brain's to continue)."""
         if text:
+            self.capabilities.forget(station, text)
             self.last_reply[station] = text
             if brain and text.rstrip().endswith("?"):
                 self.brain_asked[station] = self.monotonic()
@@ -558,6 +568,8 @@ class IntentRouter:
         return Route("reply", text, intent=intent, source="skill" if intent.startswith("skill.") else "grammar")
 
     async def _adapter_executor(self, station: str, decision: Decision, executor: str, args: dict) -> str | None:
+        if executor == "skill.capabilities":
+            return await self.capabilities.answer(station, topic=args.get("topic"), more=bool(args.get("more")))
         if executor == "skill.math":
             return decision.slots["answer"]
         if executor == "skill.weather":

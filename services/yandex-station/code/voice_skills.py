@@ -322,6 +322,10 @@ class Skills:
         found = shutil.which("weather", path=path)
         return [found] if found else None
 
+    def weather_available(self) -> bool:
+        """weather-cli is configured or found where a weather question would look for it (nothing is run)."""
+        return self.weather_command(weather_child_env(self.env, self.ha_url)["PATH"]) is not None
+
     async def weather(self, mode: str) -> str:
         started = time.monotonic()
         reply = await self._weather(mode)

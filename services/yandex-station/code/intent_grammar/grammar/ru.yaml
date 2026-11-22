@@ -39,6 +39,27 @@ lexicon:
     garland: [гирлянд*]
     socket: [розетк*]
   ac_words: [кондиционер*, кондей*, кондер*]
+  # Words before a request that answer the previous reply («Тоже неплохо. А что ты умеешь?»). They matter only in front of an
+  # information request (assistant.capabilities*), never as fillers elsewhere.
+  reaction: [тоже, неплохо, хорошо, отлично, нормально, прекрасно, ничего, ладно, понятно, ясно, понял, поняла, окей, ок, круто, супер,
+             здорово, класс, кстати, тогда, давай, теперь]
+  tell_verb: [расскажи, скажи, покажи, перечисли, назови, объясни, подскажи]
+  capability_topics:
+    light: [свет*, освещени*, лампочк*, люстр*, подсветк*]
+    climate: [кондиционер*, кондей*, кондер*, климат*, температур*, отоплени*]
+    timers: [таймер*, будильник*, напоминани*, напомин*]
+    weather: [погод*]
+    music: [музык*, песн*, трек*]
+    volume: [громкост*, звук*]
+    tv: [телик*, телевизор*, телек*]
+    home: [дом*, квартир*]
+  # State words of a question about a device («какой кондиционер включён?»). `включил` is what the recogniser writes for `включён`.
+  status_on: [=включен, =включена, =включено, =включены, =включил, =включила, =включили, работа*]
+  status_off: [=выключен, =выключена, =выключено, =выключены, =выключил, =выключила, =выключили, =отключен, =отключена, =отключено, =отключены]
+  # The air conditioner in every case («у кондея», «с кондеем»): `ac_words` has the nominative stems only and is pinned by the quasar overlay.
+  ac_forms: [кондиционер*, кондей*, кондея*, кондею*, кондее*, кондер*]
+  status_head: [какой, какие, какая, какое, скажи, подскажи, проверь, узнай]
+  status_aspect: {mode: [режим*], temp: [градус*, температур*, выставлен*, установлен*, поставлен*, настроен*], since: [давно, сколько]}
   light_words: [свет*, освещени*, лампочк*, лампу, лампа, люстр*, подсветк*, светильник*]
   colors:
     white: [бел*, белый]
@@ -780,6 +801,114 @@ intents:
     action: {executor: ha.state_report}
     reply: {kind: none}
     examples: ["Какой свет включен?", "что сейчас включено", "что включено"]
+
+  # ── information requests with a dynamic answer (spec 150) ──────────────
+  # «Что ты умеешь?» is answered from what is configured and reachable right now (capabilities.py), never from a fixed list.
+  - id: assistant.capabilities
+    tier: query
+    labels: [CAPABILITIES, smalltalk]
+    max_tokens: 10
+    patterns:
+      - "{reaction}? {reaction}? {tell_verb}? (а|и)? что (ты|вы)? (еще|вообще)? (ты|вы)? (умее*|може*) (ты|вы)? (делать|сделать)? (еще|вообще)? (для меня|мне)?"
+      - "{reaction}? {reaction}? а? (чем|что) (ты|вы)? (може*|умее*) (мне)? (помочь|быть полезн*)"
+      - "{reaction}? {tell_verb} (мне)? (о|про|обо) (своих|твоих|всех)? (возможностях|функциях|командах|умениях)"
+      - "{reaction}? {tell_verb} (мне)? (свои|твои|все)? (возможности|функции|команды|умения)"
+      - "{reaction}? (какие|какая|что за) (у тебя|у вас)? (есть)? (возможности|функции|команды|умения|навыки) (ты|вы)? (знаешь|понимаешь|поддерживаешь)?"
+      - "что (у тебя|у вас|тебя|вас|вообще)? можно (у тебя|у вас)? (попросить|спросить|сказать|заказать|сделать|делать)"
+      - "(ты|вы) (вообще)? (что-нибудь|что-то|хоть что-нибудь|хоть что-то|чему-нибудь) (умеешь|умеете)"
+      - "(помощь|справка|подсказка)"
+    examples:
+      - "что ты умеешь"
+      - "Алиса, что ты умеешь?"
+      - "Тоже неплохо. А что ты умеешь?"
+      - "а что ты можешь делать"
+      - "расскажи о своих возможностях"
+      - "какие у тебя есть команды"
+      - "что у тебя можно попросить"
+      - "чем ты можешь помочь"
+      - "помощь"
+    negatives: ["можешь включить свет", "что ты умеешь готовить на ужин", "на помощь", "помогите", "что ты умеешь со светом"]
+    reply: {kind: none}
+    action: {executor: skill.capabilities, args: {}}
+  - id: assistant.capabilities_topic
+    tier: query
+    labels: [CAPABILITIES, smalltalk]
+    max_tokens: 10
+    slots:
+      topic: {type: capability_topics}
+    patterns:
+      - "{reaction}? (а|и)? что (ты|вы)? (еще)? (умее*|може*) (делать|сделать)? (со|с|по|про|насчет|в|для)? (части)? {topic}"
+      - "что (можно|получится) (сделать|делать)? (со|с|по|про|насчет) {topic}"
+      - "(ты|вы)? умее* (ли)? (ты|вы)? (ставить|включать|выключать|заводить|говорить|показывать|узнавать|управлять|регулировать|менять|играть|находить|слушать|рассказывать)? {topic}"
+    examples:
+      - {say: "что ты умеешь со светом", slots: {topic: light}}
+      - {say: "а что ты умеешь делать с кондиционером", slots: {topic: climate}}
+      - {say: "умеешь ли ты ставить таймеры", slots: {topic: timers}}
+      - {say: "что можно сделать со светом", slots: {topic: light}}
+    negatives: ["можешь включить свет", "включи свет", "что ты умеешь"]
+    reply: {kind: none}
+    action: {executor: skill.capabilities, args: {topic: "$topic"}}
+  # The follow-up «а ещё?» is read only while an answer of capabilities is fresh (the router declines it otherwise).
+  - id: assistant.capabilities_more
+    tier: query
+    labels: [CAPABILITIES, smalltalk]
+    max_tokens: 6
+    patterns:
+      - "(а|и)? (что|чего) еще"
+      - "(а|и)? еще (что-нибудь|что-то|что)?"
+    examples: ["а ещё", "что ещё"]
+    reply: {kind: none}
+    action: {executor: skill.capabilities, args: {more: true}}
+  # «Какой кондиционер включён?» is a state question: answered from the cached Home Assistant states, read-only (home_status.py).
+  # `pre`: the quasar layer's own handlers must not turn it into a question or a refusal.
+  - id: home.climate_status
+    tier: query
+    phase: pre
+    labels: [STATE_QUERY, state, climate, CLIMATE_STATE]
+    max_tokens: 10
+    slots:
+      room: {type: rooms}
+      aspect: {type: status_aspect}
+    patterns:
+      - "{status_head}? {status_head}? (все|оба)? (сейчас)? {ac_forms} (сейчас)? (в|на)? {room}? (сейчас)? {status_on}"
+      - "{status_head}? {status_head}? (все|оба)? (сейчас)? {ac_forms} (сейчас)? (в|на)? {room}? (сейчас)? {status_off}"
+      - "{status_head}? {status_on} ли (сейчас)? {ac_forms} (в|на)? {room}?"
+      - "{status_head}? {status_off} ли (сейчас)? {ac_forms} (в|на)? {room}?"
+      - "{status_head}? {ac_forms} (в|на)? {room}? {status_on} ли"
+      - "(что|как) (там|сейчас)? (с|у)? {ac_forms} (в|на)? {room}?"
+      - "(какой|скажи|подскажи)? (статус|состояние) (у)? {ac_forms} (в|на)? {room}?"
+      - "какой {ac_forms} (в|на)? {room}? (статус|состояние)"
+      - "(какой|в каком) {aspect} (сейчас)? (у|на|в)? {ac_forms} (в|на)? {room}?"
+      - "(какая|сколько|на сколько) {aspect} (стоит)? (сейчас)? (у|на|в)? {ac_forms} (в|на)? {room}?"
+      - "(как)? {aspect} (времени)? {status_on} {ac_forms} (в|на)? {room}?"
+      - "(как)? {aspect} {status_on} {ac_forms} (в|на)? {room}?"
+    examples:
+      - "какой кондиционер включён"
+      - "Какой кондиционер включил?"
+      - {say: "включён ли кондиционер на втором этаже", slots: {room: upstairs}}
+      - "что с кондиционером"
+      - {say: "в каком режиме кондиционер", slots: {aspect: mode}}
+      - {say: "на сколько градусов стоит кондиционер", slots: {aspect: temp}}
+      - {say: "как давно работает кондиционер", slots: {aspect: since}}
+      - "Алиса, какой статус у кондея?"
+    negatives: ["включи кондиционер", "выключи кондиционер", "включи кондиционер на втором этаже на обогрев", "кондиционер 23", "не включай кондиционер",
+                "какая температура на улице", "включён ли свет"]
+    reply: {kind: none}
+    action: {executor: ha.climate_status, args: {room: "$room", aspect: "$aspect"}}
+  # A bare «кондиционер на втором этаже» has three readings; the status is the safe and informative one. Shadow first
+  # (AISIS_STATUS_BARE, router): until the owner switches it on the quasar layer's question stands.
+  - id: home.climate_bare
+    tier: query
+    phase: pre
+    labels: [STATE_QUERY, state, CLIMATE_STATE]
+    max_tokens: 6
+    slots:
+      room: {type: rooms}
+    patterns: ["{ac_forms} (в|на)? {room}?"]
+    examples: ["кондиционер на втором этаже", {say: "кондиционер наверху", slots: {room: upstairs}}]
+    negatives: ["включи кондиционер", "кондиционер 23"]
+    reply: {kind: none}
+    action: {executor: ha.climate_status, args: {room: "$room", bare: true}}
 
   # ── negation: «не включай свет» is a no-op, never the opposite action ───
   - id: negation.noop

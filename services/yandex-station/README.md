@@ -607,6 +607,24 @@ verdict, so the caller keeps its own deterministic decision:
 
 Tests: `code/test_adapter_laya.py` (CI). Rollback: restart the adapter on the previous commit.
 
+## Information intents with a dynamic answer
+
+Three grammar intents answer from live data instead of a fixed line or the language model (spec `docs/specs/150-dynamic-intents-and-weighted-answers.md`):
+
+- **«что ты умеешь»** (`assistant.capabilities`, `assistant.capabilities_topic`, `assistant.capabilities_more`): `code/capabilities.py` lists what is configured and
+  reachable right now (timers, weather-cli, music, the rooms that have lights and air conditioners from Home Assistant), orders it by the hour, pages
+  through it («а ещё?» or the same question again within two minutes) and ends with an example phrase the grammar is tested to read. Home Assistant
+  not answering within 1.5 s leaves the home out and says so. A leading reaction («Тоже неплохо. А что ты умеешь?») changes nothing.
+- **«какой кондиционер включён»** (`home.climate_status`, a `pre` intent, so the quasar layer cannot turn it into a question): `ha.climate_status` reads the
+  `climate.*` states through ha-cli (fresh per question, read-only, never a service call) and says which units are on, mode, set-point, room temperature and
+  since when, rounded («около 20 минут», «больше часа», «с утра»); `code/home_status.py` holds the sentences and the rounding. Every failure is one
+  short «состояние … узнать не удаётся».
+- **a bare «кондиционер на втором этаже»** (`home.climate_bare`) is the same answer, in shadow: traced with `declined: … AISIS_STATUS_BARE`, nothing is said, the
+  quasar layer's question «Включить или выключить кондиционер наверху?» stands. `AISIS_STATUS_BARE=on` (adapter environment, restart) switches it on.
+
+Wording is impersonal: no sentence names who switches or does anything. Phrase fixture: `code/intent_grammar/grammar/info-ru.jsonl`. Tests:
+`test_capabilities`, `test_home_status`, `test_ha_status`, `test_info_intents` (CI). Restart: the adapter (it loads the compiled bundle at start); no quasar deploy.
+
 ## Jev: an advisory classifier for the turns that go to the brain
 
 Off by default. Jev (TypeSafe's decision model through the Vercel AI Gateway, `code/jev.py`) is asked only about a turn the
