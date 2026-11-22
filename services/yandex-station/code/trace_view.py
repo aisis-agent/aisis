@@ -4,6 +4,7 @@ Shared by the Telegram clip feed (compact lines) and the dashboard session page 
 """
 from __future__ import annotations
 
+from datetime import datetime
 import math
 import re
 from typing import Any
@@ -221,12 +222,70 @@ def jev_line(jev: dict) -> str:
     return f"Jev {jev.get('mode', '?')}: " + " · ".join(str(b) for b in bits if b) + f" · {acted} · {ms_text(jev.get('ms'))}"
 
 
-def brain_line(brain: dict) -> str:
-    attempts = "; ".join(f"{a.get('slot')} {a.get('result')} {a.get('s')} с" for a in brain.get("attempts") or [])
+KEY_REASONS = {"rate_limit": "лимит запросов", "server_unavailable": "сервер недоступен", "transport_unavailable": "нет связи",
+               "credential_unavailable": "ключ отклонён", "request_rejected": "запрос отклонён", "billing_unavailable": "нет средств"}
+MONTHS = ("янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек")
+PAUSE_IS_NEWS_S = 600     # a key paused for less than this is a hiccup: its reason is shown, not the end of the pause
+CLOCK_ONLY_S = 20 * 3600  # a pause that ends sooner reads as a time of day, a longer one as a date
+MAX_EPOCH_S = 253402300800  # 10000-01-01 UTC: a larger `until` (ms read as s, garbage) is no date and would raise in datetime
+
+
+def number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def epoch(value: Any) -> bool:
+    return number(value) and 0 < value < MAX_EPOCH_S
+
+
+def key_states(brain: dict) -> list[dict]:
+    """Every Claude key as {"slot", "ok", "until", "result"}: the router's list of all keys (including the ones this turn never
+    asked) when it gave one, else only the keys the attempts touched."""
+    attempts = [a for a in brain.get("attempts") or [] if isinstance(a, dict)]
+    result = {a["slot"]: a.get("result") for a in attempts if isinstance(a.get("slot"), str)}
+    listed = [k for k in brain.get("keys") or [] if isinstance(k, dict) and isinstance(k.get("slot"), str) and isinstance(k.get("ok"), bool)] \
+        if isinstance(brain.get("keys"), list) else []
+    if listed:
+        return [{"slot": k["slot"], "ok": k["ok"], "until": k.get("until") if epoch(k.get("until")) else None, "result": result.get(k["slot"])}
+                for k in listed]
+    return [{"slot": a["slot"] if isinstance(a.get("slot"), str) else None, "ok": a.get("result") == "complete", "until": None,
+             "result": a.get("result")} for a in attempts]
+
+
+def until_text(until: float, since: float | None) -> str:
+    moment = datetime.fromtimestamp(until)
+    if since is not None and until - since >= CLOCK_ONLY_S:
+        return f"{moment.day} {MONTHS[moment.month - 1]}"
+    return moment.strftime("%H:%M")
+
+
+def key_note(position: int, key: dict, since: float | None) -> str:
+    name = f"ключ {position}" + (f" ({key['slot']})" if key["slot"] else "")
+    result, until = key["result"], key["until"]
+    if until is not None and (result in (None, "cooldown") or since is None or until - since >= PAUSE_IS_NEWS_S):
+        return f"{name} пропущен до {until_text(until, since)}"
+    return f"{name}: {KEY_REASONS.get(result, result)}" if result else f"{name} недоступен"
+
+
+def keys_line(brain: dict, since: float | None) -> list[str]:
+    """«🔑 ❌✅✅ · 1.983 с · ключ 1 (finance) пропущен до 1 дек»: a mark per key (❌ failed or skipped, ✅ available), the time the keys
+    took in all, and why each ❌ key is out (until when, or the provider's reason for a short failure)."""
+    keys = key_states(brain)
+    if not keys:
+        return []
+    spent = sum(a["s"] for a in brain.get("attempts") or [] if isinstance(a, dict) and number(a.get("s")))
+    notes = [key_note(i, key, since) for i, key in enumerate(keys, 1) if not key["ok"]]
+    parts = ["🔑 " + "".join("✅" if key["ok"] else "❌" for key in keys)]
+    if spent:
+        parts.append(f"{round(spent, 3):g} с")
+    return parts + ["; ".join(notes)] if notes else parts
+
+
+def brain_line(brain: dict, since: float | None = None) -> str:
     head = " ".join(str(x) for x in (brain.get("provider"), brain.get("model"), brain.get("slot") and f"слот {brain['slot']}") if x)
     extras = [x for x in (brain.get("persona") and "персона", brain.get("memories") and f"память {brain['memories']}",
                           brain.get("prompt_chars") and f"промпт {brain['prompt_chars']} симв.") if x]
-    return "ИИ " + " · ".join(x for x in (head, attempts, ", ".join(extras)) if x)
+    return "ИИ " + " · ".join(x for x in [head, *keys_line(brain, since), *extras] if x)
 
 
 def stages_line(stages: dict | None) -> str:
@@ -264,7 +323,7 @@ def ranked_lines(trace: dict, compact: bool = False, answered: str | None = None
     if trace.get("jev"):
         out.append((3, "🧠 " + jev_line(trace["jev"])))
     if trace.get("brain"):
-        out.append((3, "🤖 " + brain_line(trace["brain"])))
+        out.append((3, "🤖 " + brain_line(trace["brain"], trace.get("ts"))))
     stages = stages_line(trace.get("stages_ms"))
     if stages:
         out.append((4, stages))

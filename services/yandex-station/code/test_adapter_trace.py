@@ -133,6 +133,28 @@ class TraceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("brain", trace["stages_ms"])
         self.assertNotIn("Фотосинтез", json.dumps(trace["brain"], ensure_ascii=False))
 
+    async def test_the_brain_record_keeps_the_routers_key_states_and_drops_anything_malformed(self):
+        adapter = await self.adapter(AISIS_CHATGPT_COMMAND='["brain"]')
+        del adapter.turn
+        answer = {"text": "Ответ", "conversation_id": "c1", "provider": "claude", "credential_slot": "calendar",
+                  "attempts": [{"slot": "finance", "result": "cooldown"}, {"slot": "calendar", "result": "complete", "seconds": 1.5}],
+                  "keys": [{"slot": "finance", "ok": False, "until": 1796083200.0}, {"slot": "calendar", "ok": True, "until": None},
+                           {"slot": "report", "ok": True, "until": "soon", "secret": "sk-ant-not-copied"}, "junk", {"slot": 5, "ok": True}]}
+        with patch("adapter.run_command", AsyncMock(return_value=answer)):
+            await self.speak(adapter, "что такое фотосинтез")
+        (trace,) = self.traces()
+        self.assertEqual(trace["brain"]["keys"], [{"slot": "finance", "ok": False, "until": 1796083200.0},
+                                                  {"slot": "calendar", "ok": True, "until": None}, {"slot": "report", "ok": True, "until": None}])
+        self.assertNotIn("sk-ant", json.dumps(trace["brain"]))
+
+    async def test_a_router_without_key_states_leaves_the_record_as_before(self):
+        adapter = await self.adapter(AISIS_CHATGPT_COMMAND='["brain"]')
+        del adapter.turn
+        with patch("adapter.run_command", AsyncMock(return_value={"text": "Ответ", "conversation_id": "c1", "provider": "claude"})):
+            await self.speak(adapter, "что такое фотосинтез")
+        (trace,) = self.traces()
+        self.assertNotIn("keys", trace["brain"])
+
     async def test_a_brain_failure_is_an_error_layer_with_the_reason(self):
         adapter = await self.adapter()
         adapter.turn = AsyncMock(side_effect=RuntimeError("boom"))

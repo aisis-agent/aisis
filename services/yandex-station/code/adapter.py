@@ -473,9 +473,20 @@ class Adapter:
             request_id = None
         return {k: v for k, v in {"provider": result.get("provider"), "slot": result.get("credential_slot"),
                                   "model": result.get("model") or self.env.get("AISIS_CLAUDE_MODEL"), "attempts": attempts or None,
+                                  "keys": self._keys_trace(result.get("keys")),
                                   "persona": persona or None, "memories": memories or None, "prompt_chars": prompt_chars,
                                   "usage": usage, "request_id": request_id}.items()
                 if v is not None}
+
+    @staticmethod
+    def _keys_trace(keys) -> list[dict] | None:
+        """The router's list of every key after the turn (`ok`, and `until` while paused), copied field by field: the trace line shows it."""
+        if not isinstance(keys, list):
+            return None
+        kept = [{"slot": k["slot"][:32], "ok": k["ok"],
+                 "until": k.get("until") if isinstance(k.get("until"), (int, float)) and not isinstance(k.get("until"), bool) else None}
+                for k in keys if isinstance(k, dict) and isinstance(k.get("slot"), str) and isinstance(k.get("ok"), bool)][:4]
+        return kept or None
 
     def _recent_sync(self, station: str, text: str) -> tuple[dict, str]:
         """Settings plus the recent-dialogs block; blocking file/DB reads, run in a thread."""
