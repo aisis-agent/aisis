@@ -84,6 +84,7 @@ jobs:
           python3 -m unittest test_tone_guard test_hint_echo test_stt_lib_pin test_extra_dict test_stt_extra_dict test_bench_extra_dict
           python3 -m unittest test_bench_asr_archive asr_eval.test_asr_eval_tier_a asr_eval.test_asr_eval_tier_b asr_eval.test_asr_eval_tier_c asr_eval.test_asr_eval_batch asr_eval.test_asr_eval_latency
           python3 -m unittest test_info_intents test_capabilities test_ha_status test_home_status
+          python3 -m unittest test_brain_line
           python3 -m intent_grammar compile --check
       - name: ha-cli command verification (fake Home Assistant, journal, trace lines, isolated clip replay)
         working-directory: services/yandex-station/code

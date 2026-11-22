@@ -116,7 +116,7 @@ class Reading(unittest.TestCase):
         text = "\n".join(trace_view.lines(trace))
         for needle in ("❓ уточнение: «Какую громкость?» (микрофон открыт)", "склеено с уточнением: «громкость семь»", "комната: Гостиная",
                        "HA climate.set_temperature climate.k {'temperature': 24} → 200 · 12 мс", "weather-cli weather say --now → сбой · 8000 мс",
-                       "Jev on: garbled 0.99 · jev_garbled · действовал · 250 мс", "ИИ claude слот a · a complete 1.5 с · память 2",
+                       "Jev on: garbled 0.99 · jev_garbled · действовал · 250 мс", "ИИ claude слот a · 🔑 ✅ · 1.5 с · память 2",
                        "⏱ грамматика 1 · ИИ 900 · всего 910 мс", "⚠ weather-cli: timeout 8 s", "грамматика не выполнила"):
             self.assertIn(needle, text)
 

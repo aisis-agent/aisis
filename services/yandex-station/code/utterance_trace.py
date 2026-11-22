@@ -20,7 +20,7 @@ Record (JSON, all keys optional except v/ts/via/text):
            verify {"result": ok|failed|unknown|skipped, "reason", "ms", "after"} (ha-cli's verdict on the device state after the call),
            aid (the ha-cli journal id of the action), ha (Home Assistant's own outcome: HTTP status or error kind), down (outage evidence)
   jev      {"mode", "decision", "reason", "confidence", "ms", "acted"}
-  brain    {"provider", "slot", "model", "attempts": [{"result", "seconds"}], "ms"}
+  brain    {"provider", "slot", "model", "attempts": [{"slot", "result", "s"}], "keys": [{"slot", "ok", "until"}], "ms"}   (keys: every Claude key after the turn, `until` the epoch a paused one is let back; trace_view.keys_line shows them)
   stages_ms {"grammar": .., "skills": .., "jev": .., "brain": .., "total": ..}
   errors   [short strings]
   correction  the repair dialog (correction.py, #182), written when the engine had evidence or a dialog was open:
