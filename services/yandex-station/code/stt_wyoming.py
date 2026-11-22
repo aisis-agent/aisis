@@ -25,6 +25,7 @@ from urllib.parse import unquote, urlsplit
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
 import dsp_settings
+import extra_dict
 import hint_echo
 import speech_frontend
 import spotter_clips
@@ -238,6 +239,7 @@ class Tuning:
     wake_cut: bool = True        # cut the activation word from the audio before the recognizer (wake_window.py); off: the text-level strip only
     tone_guard: str = tone_guard.DEFAULT_MODE   # a short narrow-band tone (the station's activation chime, an earcon): "enforce" drops it before the recognizer, "shadow" only logs stt_tone_shadow, "off" (tone_guard.py)
     hint_echo: str = hint_echo.DEFAULT_MODE     # a transcript that is only the recogniser's own prompt lists read back (hint_echo.py): "enforce" drops it, "shadow" only logs stt_hint_echo_shadow, "off"
+    extra_dict: str = extra_dict.DEFAULT_MODE   # typical mishearings of the station's words (extra_dict.py, AISIS_EXTRA_DICT): "on" corrects them, "shadow" only logs extra_dict_would_correct, "off"
 
     @classmethod
     def from_env(cls, env):
@@ -260,6 +262,7 @@ class Tuning:
                    wake_cut=bool(number("AISIS_STT_WAKE_WINDOW", int(cls.wake_cut), int)),
                    tone_guard=tone_guard.parse_mode(env.get("AISIS_STT_TONE_GUARD"), cls.tone_guard),
                    hint_echo=tone_guard.parse_mode(env.get("AISIS_STT_HINT_ECHO"), cls.hint_echo),   # the same off/shadow/enforce spelling
+                   extra_dict=extra_dict.parse_mode(env.get("AISIS_EXTRA_DICT"), cls.extra_dict),
                    ab_percent=min(100.0, max(0.0, number("AISIS_STT_AB_PERCENT", cls.ab_percent, float))))
 
 
@@ -474,13 +477,28 @@ class Endpoint:
             swing=voiced_rms[len(voiced_rms) * 9 // 10] / max(voiced_rms[len(voiced_rms) // 10], 1.0) if voiced_rms else 0.0)
 
 
-def judge_transcript(heard, utt):
+def apply_extra_dict(heard, named, dictionary, mode):
+    """`named` (the activation word split off `heard`) as the extra dictionary (extra_dict.py, #268) would have it: the variants of the station's
+    words replaced by their canonical in the contexts their entries allow, then split again. `on` returns the corrected split; `shadow` logs
+    what it would have changed and returns `named`, so nothing downstream moves until the shadow period has been read."""
+    corrected = dictionary.correct(heard)
+    if not corrected.hits:
+        return named
+    changed = wake_word.split(corrected.text)
+    LOG.info("extra_dict_%s mode=%s layer=static kinds=%s entries=%s before=%r after=%r activation=%s", "corrected" if mode == "on" else "would_correct", mode,
+             ",".join(sorted({hit.kind for hit in corrected.hits})), ",".join(sorted({hit.entry for hit in corrected.hits})), heard, corrected.text, changed.only)
+    return changed if mode == "on" else named
+
+
+def judge_transcript(heard, utt, extra=None, extra_mode="off"):
     """(rejected, named): why what the recognizer heard is no request (None = it is one; "empty" counts as one, the final says nothing),
-    and the activation word split off it (wake_word.split) when it is judged."""
+    and the activation word split off it (wake_word.split) when it is judged. `extra`: the extra dictionary, applied per `extra_mode`."""
     rejected = distrust(heard, utt)
     if rejected == "empty":
         rejected = None
     named = wake_word.split(heard) if rejected is None else None
+    if named is not None and extra is not None and extra_mode != "off":
+        named = apply_extra_dict(heard, named, extra, extra_mode)
     if named is not None and named.only:
         rejected = WAKE_ONLY
     return rejected, named
@@ -564,6 +582,8 @@ class STTGateway:
         self.hypothesis_background = set()
         # The prompt a stock wyoming-whisper was started with (its env file; the gateway never sees it on the wire): what a hint echo is compared with.
         self.prompt_file = hint_echo.PromptFile(self.env.get("AISIS_WHISPER_PROMPT_ENV"))
+        # The extra dictionary of typical mishearings (extra_dict.py, #268): read once at start; one that cannot be loaded is logged and the gateway runs without it.
+        self.extra = extra_dict.load_or_none() if self.tuning.extra_dict != "off" else None
 
     def live_tuning(self):
         """The startup tuning with the dashboard's end-of-speech wait and level front-end overrides; read per conversation, no restart."""
@@ -914,7 +934,7 @@ class STTGateway:
         out.asr_ms = int((time.monotonic() - began) * 1000)
         if recognizer_pcm is not utt.speech_pcm and tuning.ab_percent > 0 and random.random() * 100 < tuning.ab_percent:
             self.ab_probe(utt.speech_pcm, rate, out.heard, info["gain_db"], utt.voiced_rms)
-        out.rejected, named = judge_transcript(out.heard, utt)
+        out.rejected, named = judge_transcript(out.heard, utt, self.extra, tuning.extra_dict)
         if out.rejected is None and tuning.hint_echo != "off" and hint_echo.is_echo(named.clean, self.prompt_hint()):
             if tuning.hint_echo == "enforce":
                 out.rejected, named = hint_echo.REJECTED, None

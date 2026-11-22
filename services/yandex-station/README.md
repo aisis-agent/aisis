@@ -293,6 +293,51 @@ that was not observed.
   cut is dropped like a caption and the session keeps listening); `0` switches it off. Count a shadow period with
   `journalctl --user -u aisis-station-stt | grep stt_hint_echo_shadow` and compare each line with the owner's clip verdicts before enforcing.
   Python-only: restart `aisis-station-stt`.
+- **Extra dictionary** (`code/extra_dict.py`, data `code/extra_dict_ru.json`, ticket #268; the runtime layer built from the home's own entity
+  names is #269): Whisper writes the wake word «Алиса» as another name («Олеса, включи свет.», clip 20261120T235150-330d2a). `wake_word.py` knows the
+  grammar's `lexicon.wake` list and one sound rule (within two edits of «алиса», containing «ис», whole segment only), so «Олеса» (no «ис»),
+  «Алекса» and «Олеся», the owner's examples, reached routing as a request. The file is a reviewed list of variants, each with the context it
+  may be corrected in and the evidence it was added on; the code never guesses one.
+  File: `{"version": 1, "locale": "ru", "entries": [...]}`; an entry is `id` (slug), `kind` (`wake`, `command`, `phrase`), `canonical`, `context`,
+  `variants` (`[{"text": "олеса", "n": 1}]`, folded to lower case and ё = е, 1-6 words of at least 3 letters) and `evidence` (`source`: `owner` =
+  named by the owner, `verdict` = an owner verdict in `clip_truth`, `observed` = stored transcripts without one; `note`). `n` is the number of stored
+  clips that carry the variant in the context (an owner-named variant may have 0; `verdict` and `observed` need at least 1, and an observed command or
+  phrase at least 2). Contexts: `wake` → `standalone` (the whole segment is the variant), `address` (at the head, directly followed by a stop,
+  comma, dash or colon, or by an imperative of the grammar's lexicon: «Олеса, включи свет», «Алекса включи свет»), `start` (at the head, whatever
+  follows; for non-words); `command` and `phrase` → `anywhere` (whole words) or `standalone` (the whole request: nothing in front of it but the name
+  and a lead-in, nothing behind it). One lead-in in front of the name («Эй, Олеса») is skipped, as `wake_word` skips one (a correction behind two
+  would leave a name its split cannot cut, so «Ну, эй, Олеса» is left as heard); a name said twice («Олеса, Олеся.») is both cut. So «Мы с Алексой ходили в кино», «Скажи Алексе, что я
+  приду», «Привет, Олеса», «Алекса пошёл домой» and a name after another sentence stay as they were heard (the last one is the one stored case of
+  «Олеса»: not handled on purpose). The loader refuses, naming the file and the entry: an unknown key, kind or context, a duplicate id, a variant
+  claimed twice, a variant that is another entry's canonical, a variant (of any kind) that is, or holds, a name of the grammar's `lexicon.wake` (so «Толиса»,
+  «Тариса», «Малис», «Лисы», all seen in the stored clips, are not repeated here, and no phrase can eat the activation word), a wake canonical
+  outside `lexicon.wake`, and evidence below the floors above.
+  What it does: `judge_transcript` of the STT gateway replaces the variants in the heard text, then `wake_word.split` cuts the name as before, so
+  the activation handling stays in one place («Олеся.» alone becomes an activation event, `rejected: wake_word`; «Олеса, включи свет.» becomes the request
+  «Включи свет.» with the clip's `reason` `wake_cut:Алиса`). `command` and `phrase` entries are also written (atomically, to
+  `$XDG_CACHE_HOME/aisis/extra-dict/extra-confusables-ru.json`) as a phonetic extra confusables file that the correction engine hands to the stt-cli
+  core (`load(extra=[path])`): the repair dialog then offers the canonical for the heard variant (the sets work in both directions, as every
+  confusables set does). A file the core refuses leaves the engine on its own sets (`extra_dict_confusables_unavailable class=... error=...`).
+  `AISIS_EXTRA_DICT` (in `~/.config/aisis/runtime.env`, read by the STT gateway and the adapter) picks the mode: `shadow` (the default, also for an
+  unknown value) logs `extra_dict_would_correct mode=shadow layer=static kinds=... entries=... before=... after=... activation=...` (gateway) and
+  `extra_dict_would_correct ... kind=confusable ...` (engine) and changes nothing sent downstream; `on` / `1` / `enforce` applies it
+  (`extra_dict_corrected` in the log); `off` / `0` switches it off. A dictionary that cannot be loaded is logged (`extra_dict_unusable error=...`, by the
+  gateway and by the engine) and the service runs without it. Count a shadow period with `journalctl --user -u aisis-station-stt | grep extra_dict_would_correct` and read each
+  line before `on`. Python-only: restart `aisis-station-stt` and, for the engine's part (only when `AISIS_CORRECTION` is `shadow` or `on`), the
+  adapter; the data file is read at start.
+  Evidence (ledger read on 2026-11-22, read-only; `python3 bench_extra_dict.py mine` and `replay` reproduce it): 341 clips (2026-11-08 .. 11-22), 176
+  with a transcript, 107 of them `sent` (the replay's set; the other 69 are captions the gateway dropped), owner verdicts in `clip_truth`: 5
+  (2 corrected, 1 correct, 2 noise). «Алиса» opens 23 of the 176 transcripts. The other head words within three edits of «алиса»: «Толиса» 1 (at the
+  head of a request the owner repeated within a minute as «Алиса, включи кондиционер …»), «Тариса» 1, «Малис» 1, «Лисы» 1 (the last three the whole
+  segment), all four already in the lexicon, and «Лица» 1 (the start of a garbled request, covered by nobody and not adopted: one occurrence
+  and no verdict). «Олеса» 1 (after another sentence, not at the head); «Алекса» and «Олеся» 0: they are in the file because the owner named them.
+  The one `phrase` entry is the owner's verdict on clip 20261109T010646-564b98 («урок из 5» → «громкость 5»; n = 1, source `verdict`; `standalone`, so
+  «Урок из 5 песен длится час» is not touched). No other
+  command-word confusion has a verdict or a second clip yet, so none is in the file; `ключи свет` (the lost start of «включи» and «выключи») is
+  deliberately not an entry: either reading is possible and the repair policy asks instead. Replay of the 107 sent clips (`bench_extra_dict.py
+  replay`): 1 clip corrected (the phrase's own source clip, which confirms nothing), 0 changed wrongly by an owner verdict; these are counts of one
+  household's clips, not an accuracy figure. Known pre-existing risk, outside this file: the grammar's `lexicon.wake` holds the real word «Лисы», so
+  «Лисы живут в лесу» loses its first word at the head (`wake_word.split`).
 - **Whisper prompt**: `aisis-whisper-prompt.timer` regenerates the recognizer's
   initial prompt every 6 h (code/refresh-whisper-prompt.sh -> `voice_vocab.py prompt`).
   It is home vocabulary only (fixed example commands, HA room and device names, library

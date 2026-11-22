@@ -151,13 +151,14 @@ class IntentRouter:
     hypotheses: Any | None = None       # hypothesis_store.HypothesisStore (`get(station, text, now)` -> the gateway's second opinion payload), or None
     correction_mode: str = "off"        # AISIS_CORRECTION: off | shadow (decide and trace, never speak) | on
     correction_core: Any | None = None  # the stt_cli.hypotheses module (tests pass a fake); None imports the real one
+    extra_dict_mode: str = "off"        # AISIS_EXTRA_DICT: off | shadow (log the extra confusables' candidates) | on (the engine decides with them)
     correction: correction.Correction | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if self.correction_mode in ("shadow", "on"):
             try:
                 self.correction = correction.Correction(self.classify, self._decide_in, self.hypotheses, mode=self.correction_mode,
-                                                        core=self.correction_core)
+                                                        core=self.correction_core, extra_dict_mode=self.extra_dict_mode)
             except Exception as err:   # no core installed, bad data: the speaker runs exactly as before
                 LOG.warning("correction_unavailable class=%s", type(err).__name__)
 

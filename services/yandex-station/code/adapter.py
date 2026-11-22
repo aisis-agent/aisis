@@ -27,6 +27,7 @@ import announcement_cache
 import asr_correct
 import dialog_context
 import dialogstore
+import extra_dict
 import ha_actions
 import hypothesis_store
 import intent_route
@@ -243,7 +244,8 @@ class Adapter:
         return intent_route.IntentRouter(grammar, self.skills, self.timers, ha,
                                          catchall=self.env.get("AISIS_INTENT_CATCHALL", "on") != "off",
                                          hypotheses=self.hypotheses,
-                                         correction_mode=self.correction_mode if self.correction_mode in ("shadow", "on") else "off")
+                                         correction_mode=self.correction_mode if self.correction_mode in ("shadow", "on") else "off",
+                                         extra_dict_mode=extra_dict.parse_mode(self.env.get("AISIS_EXTRA_DICT")))
 
     def _hacli(self) -> ClientSession:
         """One short-timeout session for ha-cli calls: a stuck Home Assistant must not stall a voice turn for a minute."""

@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "locale": "ru",
+  "note": "Typical recogniser mishearings of the station's words, variant -> canonical (extra_dict.py documents the format and the contexts). Evidence: n counts stored voice clips (sent transcripts) that carry the variant in the entry's context; source owner = named by the owner, verdict = an owner verdict in clip_truth, observed = stored transcripts without a verdict. An owner-named variant may have n = 0. A variant the grammar's lexicon.wake already holds («Толиса», «Тариса», «Малис», «Лисы» were all seen in the stored clips) is not repeated here: the loader refuses it.",
+  "entries": [
+    {
+      "id": "wake-owner-names",
+      "kind": "wake",
+      "canonical": "Алиса",
+      "context": "address",
+      "variants": [
+        {
+          "text": "олеса"
+        },
+        {
+          "text": "олеся"
+        },
+        {
+          "text": "алекса"
+        }
+      ],
+      "evidence": {
+        "source": "owner",
+        "note": "named by the owner as the typical mishearings of the name. The stored clips hold «Олеса» once, after another sentence (not at the head); «Алекса» and «Олеся» have no stored clip. Real first names: only cut when a comma or a stop follows (the address)."
+      }
+    },
+    {
+      "id": "phrase-volume-five",
+      "kind": "phrase",
+      "canonical": "громкость 5",
+      "context": "standalone",
+      "variants": [
+        {
+          "text": "урок из 5",
+          "n": 1
+        }
+      ],
+      "evidence": {
+        "source": "verdict",
+        "note": "the owner's verdict on clip 20261109T010646-564b98: heard «Алиса, урок из 5.», said «Алиса, громкость 5»."
+      }
+    }
+  ]
+}
