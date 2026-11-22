@@ -9,19 +9,24 @@
   gate       the same splices judged by arithmetic alone, no recognizer: where the gateway's cut lies against the true end of the
              name and the true start of the request (loss: a voiced frame of the request is removed; tight: the cut is within
              40 ms in front of it; leak: more than 40 ms of the name go on; clean), over many name and request clips
+  position   the stored gateway journal replayed through the place rule (wake_window.name_by_position), no audio and no recognizer: of the
+             activation streams the window left alone, which VAD cuts end inside the history and are taken for the name, and what the
+             clip store made of each (`--exclude START END`, local ISO times, leaves a stretch out: the 2026-11-17 22:19-22:24 replay
+             of the activation sessions through the live gateway is not the owner talking)
 
 `--extra 0 100 1200` adds, to every splice, live audio inside the burst behind the history (the socket opened late: 2026-11-20
 11:18 had 1.16 s of it): the gateway then sees a lead of history + extra and the cut must not move onto the request.
 
 `sessions` and `stress` play the gateway's own pieces (Endpoint with the VAD primed on the cut audio, judge, the level front-end) into
 the Wyoming recognizer of `AISIS_WYOMING_URI`; `gate` needs none. Needs numpy and webrtcvad (the gateway's venv). Nothing is written to
-the archive, the TV or the clip feed. `python3 bench_wake_window.py sessions|stress|gate [--since 2026-11-10]`.
+the archive, the TV or the clip feed. `python3 bench_wake_window.py sessions|stress|gate|position [--since 2026-11-10]`.
 """
 from __future__ import annotations
 
 import argparse
 import array
 import asyncio
+import collections
 import datetime
 import os
 import random
@@ -40,10 +45,12 @@ PAUSES_MS = (60, 100, 150, 250, 400)
 NAME_ENDS_BEFORE_MS = (220, 300, 380)
 TIGHT_MS = 40                   # a cut this close in front of the request's first voiced frame leaves its soft onset at risk
 LEAK_MS = 40                    # this much of the name behind the cut is not counted as a leak (the decay under the room noise)
+CLOSING_SILENCE_MS = 800        # the Endpoint closes a cut after this much silence (AISIS_STT_SILENCE_MS default): its speech ended that long before `received`
 
 
 def journal_sessions(text: str) -> list[dict]:
-    """Sessions of `journalctl -u aisis-station-stt -o short-iso-precise`: open time, rate, every VAD cut and the stream's totals."""
+    """Sessions of `journalctl -u aisis-station-stt -o short-iso-precise`: open time, rate, the window's verdict (`window`: «cut» or the
+    reason it left the audio alone, with `window_history_ms`; absent before the window existed), every VAD cut and the stream's totals."""
     sessions: list[dict] = []
     current = None
     for line in text.splitlines():
@@ -61,10 +68,16 @@ def journal_sessions(text: str) -> list[dict]:
             continue
         elif "stt_init" in line:
             current["rate"] = int(re.search(r"rate=(\d+)", line).group(1))
-        elif "stt_finalize" in line:
-            found = re.search(r"reason=(\w+) pcm=(\d+)B .* received=(\d+)B", line)
+        elif "stt_wake_window" in line:
+            found = re.search(r"history_ms=(\d+) (?:skipped=(\w+)|cut_ms=)", line)
             if found:
-                current["cuts"].append({"at": at, "reason": found.group(1), "pcm": int(found.group(2)), "received": int(found.group(3))})
+                current["window_history_ms"] = int(found.group(1))
+                current["window"] = found.group(2) or "cut"
+        elif "stt_finalize" in line:
+            found = re.search(r"reason=(\w+) pcm=(\d+)B .* received=(\d+)B(?:.* voiced_ms=(\d+))?", line)
+            if found:
+                current["cuts"].append({"at": at, "reason": found.group(1), "pcm": int(found.group(2)), "received": int(found.group(3)),
+                                        "voiced": int(found.group(4) or 0)})
         elif "stt_session_close" in line:
             current["close"] = at
             current["bytes"] = int(re.search(r"bytes=(\d+)B", line).group(1))
@@ -75,6 +88,28 @@ def journal_sessions(text: str) -> list[dict]:
             for cut in session["cuts"]:
                 cut["start"] = (cut["received"] - cut["pcm"]) / (2 * rate)
     return [s for s in sessions if s.get("history") is not None]
+
+
+def position_rows(sessions: list[dict], exclude: list[tuple[float, float]] = ()) -> list[dict]:
+    """One row per VAD cut of every activation stream the window left alone (a stream it cut has no name left in the audio): where the cut's
+    speech ended in the stream, how much of it there was, and whether the place rule takes it for the name. The end is read from the
+    journal's `received` (the audio the gateway had taken when the cut closed) less the closing silence: an upper bound, a cut that
+    closed in the middle of a large chunk lies earlier than this says. The history is the window's own measure when it logged one, else
+    the lead the journal's totals give."""
+    rows = []
+    for session in sessions:
+        if session.get("window") == "cut" or any(start <= session["open"] <= end for start, end in exclude):
+            continue
+        history_ms = session.get("window_history_ms") or int(round(session["history"] * 1000))
+        if not wake_window.MIN_HISTORY_MS <= history_ms <= wake_window.MAX_HISTORY_MS:
+            continue
+        for cut in session["cuts"]:
+            if cut["reason"] != "vad":
+                continue
+            end_ms = int(round(cut["received"] * 1000 / (2 * session["rate"]))) - CLOSING_SILENCE_MS
+            rows.append({"opened": session["open"], "window": session.get("window", "-"), "history_ms": history_ms, "at": cut["at"],
+                         "end_ms": end_ms, "voiced_ms": cut["voiced"], "name": wake_window.name_by_position(history_ms, end_ms, cut["voiced"])})
+    return rows
 
 
 def room(rng: random.Random, samples: int, level: float) -> array.array:
@@ -197,9 +232,38 @@ def removed_prefix(clips: list[tuple], opened: float, archive: str) -> tuple | N
                  and os.path.exists(os.path.join(archive, c[2]))), None)
 
 
+def read_journal(since: str) -> str:
+    return subprocess.run(["journalctl", "--user", "-u", "aisis-station-stt", "--since", since, "--no-pager", "-o", "short-iso-precise"],
+                          capture_output=True, text=True, check=True).stdout
+
+
+def run_position(since: str, db: str, exclude: list[tuple[float, float]]) -> int:
+    conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    clips = conn.execute("SELECT id, ts, status, reason, transcript FROM voice_clips ORDER BY ts").fetchall()
+    sessions = journal_sessions(read_journal(since))
+    rows = position_rows(sessions, exclude)
+    used: set[str] = set()
+    stored = collections.Counter()
+    print("%-14s %-10s %-6s %-8s %-7s %-5s %s" % ("session", "window", "H ms", "end ms", "voiced", "name", "stored as"))
+    for row in rows:
+        # the clip the gateway archived for this cut: the first one of the store written within 1.5 s of the cut closing (a clip of the cut before it is already used)
+        clip = next((c for c in clips if c[0] not in used and c[2] != "activation" and row["at"] - 0.1 <= c[1] <= row["at"] + 1.5), None)
+        if clip:
+            used.add(clip[0])
+        what = "-" if clip is None else "%s %s/%s %r" % (clip[0], clip[2], clip[3] or "", (clip[4] or "")[:30])
+        if row["name"]:
+            stored["%s/%s" % (clip[2], clip[3] or "") if clip else "-"] += 1
+        print("%-14s %-10s %-6d %-8d %-7d %-5s %s" % (datetime.datetime.fromtimestamp(row["opened"]).strftime("%m-%d %H:%M:%S"), row["window"],
+                                                      row["history_ms"], row["end_ms"], row["voiced_ms"], "NAME" if row["name"] else "", what))
+    taken = [row for row in rows if row["name"]]
+    print("\n%d activation streams the window left alone (of %d journal sessions), %d VAD cuts in them, %d taken for the name by their place" % (
+        len({row["opened"] for row in rows}), len(sessions), len(rows), len(taken)))
+    print("taken cuts, by what the store made of them:", dict(stored))
+    return 0
+
+
 def run_sessions(since: str, uri: str, db: str, archive: str) -> int:
-    journal = subprocess.run(["journalctl", "--user", "-u", "aisis-station-stt", "--since", since, "--no-pager", "-o", "short-iso-precise"],
-                             capture_output=True, text=True, check=True).stdout
+    journal = read_journal(since)
     conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
     clips = conn.execute("SELECT id, ts, path, dur, voiced_ms, floor_rms, status, reason FROM voice_clips ORDER BY ts").fetchall()
     print("%-18s %-6s %-9s %-30s %-30s" % ("session", "H ms", "cut ms", "uncut", "cut"))
@@ -338,10 +402,11 @@ def run_stress(names: list[str], requests: list[str], extras: list[int], uri: st
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("mode", choices=("sessions", "stress", "gate"))
+    parser.add_argument("mode", choices=("sessions", "stress", "gate", "position"))
     parser.add_argument("--since", default="2026-11-10")
     parser.add_argument("--names", nargs="*", default=[])
     parser.add_argument("--requests", nargs="*", default=[])
+    parser.add_argument("--exclude", nargs=2, action="append", default=[], metavar=("START", "END"), help="a stretch of the journal to leave out (position), local ISO times")
     parser.add_argument("--extra", nargs="*", type=int, default=[0], help="ms of live audio inside the burst behind the history (stress, gate)")
     parser.add_argument("--level", type=float, default=2.5, help="room noise RMS between the clips of a stress stream")
     args = parser.parse_args()
@@ -350,6 +415,9 @@ def main() -> int:
     archive = os.environ.get("AISIS_VOICE_ARCHIVE") or os.path.expanduser("~/.local/share/aisis/voice-archive")
     if args.mode == "sessions":
         return run_sessions(args.since, uri, db, archive)
+    if args.mode == "position":
+        return run_position(args.since, db, [(datetime.datetime.fromisoformat(start).timestamp(), datetime.datetime.fromisoformat(end).timestamp())
+                                             for start, end in args.exclude])
     if args.mode == "gate":
         return run_gate(args.names, args.requests, args.extra, db, archive, args.level)
     return run_stress(args.names, args.requests, args.extra, uri, db, archive, args.level)

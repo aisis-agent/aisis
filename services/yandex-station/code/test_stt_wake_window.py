@@ -354,6 +354,121 @@ class Replay(unittest.TestCase):
         messages, calls, rows = self.session(pcm, ["Алиса, включи свет."], burst_ms=HISTORY)
         self.assertEqual(len(calls), 1)
 
+    # The window found nothing to cut (the name's last frame 120 ms in front of the history's end: it wants a pause that starts 180 ms
+    # before it): the name goes on as an utterance of its own, a pause longer than the Endpoint's 800 ms behind it (2026-11-22 11:48:24).
+    LATE_NAME_END = 2200
+
+    def test_a_name_the_window_could_not_locate_is_the_name_by_its_place_and_never_recognised(self):
+        pcm = squares(activation_stream(name_end_ms=self.LATE_NAME_END, gap_ms=1300, live_ms=3600))
+        with self.assertLogs("aisis.stt", "INFO") as logs:
+            messages, calls, rows = self.session(pcm, ["Включи свет в студии."])
+        self.assertTrue(any("skipped=no_pause peak=" in line for line in logs.output), "the window left this one alone and said what it saw")
+        self.assertTrue(any("stt_wake_position history_ms=" in line for line in logs.output))
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(self.heard_the_name(calls[0]), "the recognizer was handed the name")
+        self.assertEqual(messages, [{"text": "Включи свет в студии.", "end_of_utt": True}])
+        self.assertEqual(rows, [("gate", "short", None), ("activation", "wake_position", None), ("sent", None, "Включи свет в студии.")])
+
+    def test_a_name_left_in_the_audio_with_nothing_after_it_ends_the_turn_as_an_unanswered_window(self):
+        pcm = squares(activation_stream(name_end_ms=self.LATE_NAME_END, gap_ms=None))
+        messages, calls, rows = self.session(pcm, [])
+        self.assertEqual(calls, [])
+        self.assertEqual(messages, [{"text": "", "end_of_utt": True, "rejected": "wake_word"}])
+        self.assertEqual(rows, [("gate", "short", None), ("activation", "wake_position", None)])
+
+    def test_a_one_word_request_after_a_name_taken_by_its_place_is_not_dropped_and_the_speaker_check_hears_the_name(self):
+        heard = []
+
+        def spy(gateway):
+            async def check(pcm, rate):
+                heard.append(pcm)
+                return None
+            gateway.speaker_check = check
+        pcm = squares(activation_stream(name_end_ms=self.LATE_NAME_END, gap_ms=1300, request_ms=160, live_ms=3600))
+        messages, calls, rows = self.session(pcm, ["Стоп."], setup=spy)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(self.heard_the_name(calls[0]))
+        self.assertEqual(messages, [{"text": "Стоп.", "end_of_utt": True}])
+        self.assertEqual(len(heard), 1)
+        self.assertTrue(self.heard_the_name(heard[0]))
+
+    def test_an_utterance_that_reaches_the_end_of_the_history_is_recognised_as_before(self):
+        """Ended 20 ms in front of the history's end: a request's first word may start there, so it is not taken for the name."""
+        pcm = squares(activation_stream(name_end_ms=2300, gap_ms=None))
+        messages, calls, rows = self.session(pcm, ["Включи свет."])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(rows, [("gate", "short", None), ("sent", None, "Включи свет.")])
+
+    def test_an_utterance_of_more_than_a_name_of_speech_is_recognised_as_before(self):
+        levels = layout.room(HISTORY // 20 + 160, 0.0)
+        levels[70:110] = speech(800)                 # 1.4-2.2 s: 800 ms of speech that ends 120 ms in front of the history's end
+        messages, calls, rows = self.session(squares(levels), ["Включи свет в студии."])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(rows, [("sent", None, "Включи свет в студии.")])
+
+    def test_a_burst_with_live_speech_in_it_has_no_place_for_the_name(self):
+        """The socket opened late: 3.5 s arrive at once, where the history ends is unknown, so nothing is taken for the name by its place."""
+        pcm = squares(activation_stream(name_end_ms=self.LATE_NAME_END, gap_ms=1300, live_ms=4200))
+        messages, calls, rows = self.session(pcm, ["Малис.", "Включи свет."], burst_ms=HISTORY + 1180)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("wake_position", [row[1] for row in rows])
+        self.assertEqual(messages, [{"text": "Включи свет.", "end_of_utt": True}])
+
+    def test_a_short_answer_in_a_follow_up_turn_is_never_taken_for_the_name(self):
+        """No wake word, no history: whatever is said first is the answer, wherever in the stream it is."""
+        levels = layout.room(260, 0.0)
+        levels[85:105] = speech(400)                 # 1.7-2.1 s into the stream
+        messages, calls, rows = self.session(squares(levels), ["Да."], burst_ms=200)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(messages, [{"text": "Да.", "end_of_utt": True}])
+        self.assertEqual(rows, [("sent", None, "Да.")])
+
+    def test_the_name_taken_by_its_place_keeps_its_credit_for_the_same_six_seconds_as_a_cut_name(self):
+        """The age counts from the name's end, not from the start of the stream: the 2.2 s of history in front of it are not the speaker's wait.
+        The request comes 5 s after the name, as in the gate-cut test above."""
+        heard = []
+
+        def spy(gateway):
+            async def check(pcm, rate):
+                heard.append(pcm)
+                return None
+            gateway.speaker_check = check
+        pcm = squares(activation_stream(name_end_ms=self.LATE_NAME_END, gap_ms=5000, request_ms=140, live_ms=6500))
+        messages, calls, rows = self.session(pcm, ["Стоп."], setup=spy)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(messages, [{"text": "Стоп.", "end_of_utt": True}])
+        self.assertTrue(self.heard_the_name(heard[0]))
+
+    def test_a_short_sound_long_after_a_name_taken_by_its_place_does_not_get_it(self):
+        pcm = squares(activation_stream(name_end_ms=self.LATE_NAME_END, gap_ms=8000, request_ms=140, live_ms=9500))
+        messages, calls, rows = self.session(pcm, [])
+        self.assertEqual(calls, [])
+        self.assertIn(("gate", "short"), [row[:2] for row in rows])
+
+    def test_switching_the_window_off_switches_the_place_rule_off(self):
+        """No window, no measured history: the name goes to the recognizer as before and the text-level strip answers."""
+        pcm = squares(activation_stream(name_end_ms=self.LATE_NAME_END, gap_ms=1300, live_ms=3600))
+        messages, calls, rows = self.session(pcm, ["Малис.", "Включи свет."], env={"AISIS_STT_WAKE_WINDOW": "0"})
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("wake_position", [row[1] for row in rows])
+
+
+class EndpointPosition(unittest.TestCase):
+    def test_an_utterance_knows_where_in_the_stream_its_speech_ended(self):
+        endpoint = stt_wyoming.Endpoint(Vad(), RATE, silence_ms=800)
+        done = endpoint.feed(squares(layout.room(10, 0.0) + speech(400) + layout.room(60, 0.0)))
+        self.assertEqual(len(done), 1)
+        self.assertEqual(done[0].ended_ms, 1400, "the closing silence is part of the utterance: 200 + 400 + 800 ms")
+        self.assertEqual(done[0].ended_ms - done[0].trailing_ms, 600)
+
+    def test_the_position_is_the_one_of_the_cut_not_of_the_chunk_that_held_it(self):
+        """Several seconds of audio arrive in one chunk: the cut closed in the middle of it."""
+        endpoint = stt_wyoming.Endpoint(Vad(), RATE, silence_ms=800)
+        first, second = endpoint.feed(squares(layout.room(5, 0.0) + speech(300) + layout.room(60, 0.0) + speech(400) + layout.room(60, 0.0)))
+        self.assertEqual(first.ended_ms - first.trailing_ms, 100 + 300)
+        self.assertEqual(second.ended_ms - second.trailing_ms, 100 + 300 + 1200 + 400)
+
+
 
 if __name__ == "__main__":
     unittest.main()

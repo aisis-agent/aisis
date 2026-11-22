@@ -248,7 +248,18 @@ that was not observed.
   stream is never cut (`skipped=burst`). When the name cannot be told from the request (no pause behind it, speech running
   through the whole window, a quiet history, a
   stream that ends before the decision) nothing is cut and the text-level strip
-  below is the fallback (`stt_wake_window skipped=<reason>` in the gateway log). `AISIS_STT_WAKE_WINDOW=0` switches the cut off.
+  below is the fallback (`stt_wake_window skipped=<reason>` in the gateway log, followed by the numbers the decision saw: the
+  name's peak, the room floor, where the burst starts and, for `not_alone`, the loudest frame in front of it).
+  `AISIS_STT_WAKE_WINDOW=0` switches the cut off, and the place rule below with it (no history is measured without the window).
+  A name the window left in the audio is still taken by its place (ticket 274, owner clip tg#31613: «Алиса» posted apart from the
+  request, Whisper wrote «Редактор субтитров»): the speaker pauses behind the name for longer than the Endpoint's 800 ms (1.2-1.8 s
+  in the stored sessions), so the VAD makes the name an utterance of its own. Everything inside the history is older than the
+  spotter trigger, so an utterance of a stream with a measured history (1.5-2.45 s) that the window did not cut, with at most 600 ms of
+  speech and whose last voiced frame lies 60-700 ms in front of the history's end (24 real names: 92-612 ms) is the name
+  (`wake_window.name_by_position`): archived `status='activation'`, `reason='wake_position'`, never recognised, never a post,
+  and its length and audio go to the request that follows as a cut name's do (journal line `stt_wake_position`). Nothing is taken
+  by place in a stream without a history (a follow-up turn), in a burst with live speech (`skipped=burst`), in a stream the window cut,
+  or from an utterance that reaches the history's end. `bench_wake_window.py position` replays the stored journal through the rule.
   The text-level strip: the STT gateway cuts the name from the head of a transcript before the final goes to quasar
   (`wake_cut:<name>` in the clip's `reason`; the clip's `transcript` is the cleaned text, the one the dialog log and the
   feed's «ответ» line match on; the ASR bench therefore scores a cut clip's engine output with the name as an error: read
