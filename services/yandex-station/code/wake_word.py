@@ -15,7 +15,9 @@ One list of names: the intent grammar's `lexicon.wake` (grammar/ru.json), cut wh
 bounded sound rule recognises a mishearing the list has not seen yet («Малисан», «Лиса»): within two edits of «алиса» and
 containing «ис». That rule only applies when the name is the whole utterance (an activation): in front of a request such a
 word may be the request's own («Полиса нет у меня» is two edits from «алиса»), so a variant is cut from a request only after
-it has been added to the lexicon. Pure functions, standard library only.
+it has been added to the lexicon. A name of the lexicon that is also an ordinary word (REAL_WORDS: «Лисы живут в лесу», «Алисы нет дома») is cut
+from a request only when it is addressed: a comma, stop or colon right behind it, or an imperative of the grammar («Лисы, включи свет»); as the
+whole utterance it is an activation as before. Pure functions, standard library only.
 """
 from __future__ import annotations
 
@@ -34,9 +36,14 @@ NAME = "алиса"
 MAX_EDITS = 2
 FUZZY_LENGTHS = range(4, 9)
 LEAD_INS = frozenset(("эй", "ну", "слушай", "ой", "а"))   # cut only directly in front of a name
+REAL_WORDS = frozenset(("лисы", "алисы"))   # names of the lexicon that are also ordinary words («Лисы живут в лесу», «Алисы нет дома»): cut only when addressed
+VERB_LISTS = ("cmd_verbs", "on_verb", "off_verb", "set_verb", "play_verb")
+VOICE_WORDS = ("громче", "тише", "погромче", "потише", "теплее", "холоднее", "прохладнее", "дальше", "пауза", "продолжи", "выше", "ниже")   # requests the grammar takes outside its verb lists
+VERB_FLOOR = frozenset(("включи", "выключи", "поставь"))   # only when the grammar bundle cannot be read
 WORD = re.compile(r"[a-zа-яё]+", re.IGNORECASE)
 SEPARATORS = " \t\r\n,.!?:;-—–…"
 HEAD_SEPARATORS = re.compile(r"(?:[\s,.!?:;…]|[-—–−](?!\d))*")   # a dash before a digit is a minus sign (the grammar folds them all): «Алиса, -5 громкость»
+VOCATIVE = ",.!?:;…"   # directly behind a name that is being spoken to; no dash: «Лисы — хищные животные»
 
 
 class Split(NamedTuple):
@@ -54,6 +61,29 @@ def lexicon() -> frozenset[str]:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         LOG.warning("wake_lexicon_unreadable class=%s", type(exc).__name__)
         return FLOOR
+
+
+@lru_cache(maxsize=1)
+def command_verbs() -> frozenset[str]:
+    """The imperatives of the intent grammar's lexicon (on/off, set, play, cmd verbs) and the grammar's comparatives (VOICE_WORDS), folded; a small floor when the bundle cannot be read."""
+    try:
+        with open(BUNDLE, encoding="utf-8") as bundle:
+            lexicon_data = json.load(bundle)["data"]["lexicon"]
+        words = {str(word).lstrip("=").lower().replace("ё", "е") for key in VERB_LISTS for word in lexicon_data[key]}
+        return frozenset(words) | frozenset(VOICE_WORDS) if words else VERB_FLOOR | frozenset(VOICE_WORDS)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        LOG.warning("wake_verbs_unreadable class=%s", type(exc).__name__)
+        return VERB_FLOOR | frozenset(VOICE_WORDS)
+
+
+def addressed(rest: str) -> bool:
+    """What follows a name that is being spoken to: nothing, a stop or comma (the vocative), or directly an imperative of the grammar («Алиса включи свет»)."""
+    if not any(ch.isalnum() for ch in rest):
+        return True
+    if rest.lstrip(" \t\r\n")[:1] in VOCATIVE:
+        return True
+    following = WORD.search(rest)
+    return following is not None and following.group().lower().replace("ё", "е") in command_verbs()
 
 
 def _edits(a: str, b: str) -> int:
@@ -82,7 +112,7 @@ def _cut(text: str, words: list[re.Match], standalone: bool) -> int:
         if text[cursor:match.start()].strip(SEPARATORS):
             break                        # something other than separators (a digit, a symbol) sits between the words
         word = match.group().lower().replace("ё", "е")
-        if is_wake(word, standalone=standalone) and (first in (None, word) or standalone):
+        if is_wake(word, standalone=standalone) and (first in (None, word) or standalone) and (standalone or word not in REAL_WORDS or addressed(text[match.end():])):
             end = cursor = match.end()
             lead_in = False
             first = first or word

@@ -6,7 +6,7 @@ same format, and never commits it:
 
   vocabulary   the words the owner's commands are made of: the friendly names and rooms of Home Assistant (voice_vocab.fetch_catalog: the
                read-only `/api/states` list and the area template of ha-cli's cache, nothing is actuated), and the imperatives and comparatives
-               of the intent grammar (extra_dict.command_verbs, VOICE_WORDS);
+               of the intent grammar (wake_word.command_verbs);
   evidence     the stored transcripts of voice_clips (`sent`, not the speaker's own spotter text, read-only) from the dialog database;
   entries      a word that is none of the known words (the vocabulary, every word of the grammar bundle, the catalog) but looks very like exactly one
                vocabulary word, and was written by the recogniser in at least MIN_SUPPORT distinct clips: «люстара» for «люстра» (a verb:
@@ -56,7 +56,6 @@ MAX_ENTRIES = 100
 MAX_NAMES = 120
 MAX_BYTES = 64 * 1024
 MAX_CLIPS = 5000
-VOICE_WORDS = ("громче", "тише", "погромче", "потише", "теплее", "холоднее", "прохладнее", "дальше", "пауза", "продолжи", "выше", "ниже")
 _SECRET_SHAPED = re.compile(r"\d{4,}|[.:@/\\]|\b[0-9a-f]{8,}\b|\b[0-9a-f]{2}(?::[0-9a-f]{2}){3,}\b", re.IGNORECASE)
 _WORD = re.compile(r"[а-яё]+")
 
@@ -95,7 +94,7 @@ class Vocabulary:
 
 
 def vocabulary_from(catalog: voice_vocab.Catalog) -> Vocabulary:
-    return Vocabulary((*extra_dict.command_verbs(), *VOICE_WORDS), (*catalog.entities, *catalog.areas))
+    return Vocabulary(wake_word.command_verbs(), (*catalog.entities, *catalog.areas))
 
 
 def entry_id(canonical: str, variant: str) -> str:
