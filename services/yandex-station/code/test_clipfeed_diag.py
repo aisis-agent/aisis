@@ -71,7 +71,7 @@ class Caption(unittest.TestCase):
         dialog = {"status": "serverFinished", "brain": [], "actions": [
             {"ts": "16:03:38", "at": clip_row()["ts"] + 1, "kind": "запрос", "text": "Напомню, выключить грелку через десять минут.", "res": "Скажи, когда напомнить. (listen=false)"}]}
         sent = clipfeed.trace_caption_lines(clip_row(), [], dialog)
-        self.assertEqual([line for _, line in sent], ["🧭 записи вызова адаптера нет: фразу обработал сам квазар "
+        self.assertEqual([line for _, line in sent], ["🧭 записи вызова адаптера нет: фраза обработана быстрым слоем quasar "
                                                       "(быстрый интент → «Скажи, когда напомнить.»)"])
 
     def test_a_spotter_clip_with_a_server_side_answer_in_its_dialog_is_explained_by_it(self):
@@ -95,8 +95,8 @@ class Caption(unittest.TestCase):
         diag = clipfeed.trace_caption_lines(clip_row(), [{**TRACE, "via": "hook", "layer": "none", "intent": None, "tier": None, "asked": None},
                                                          brain])
         text = "\n".join(line for _, line in diag)
-        self.assertIn("🧭 хук квазара: грамматика не знает эту фразу → ответ: ИИ (ход колонки)", text)
-        self.assertIn("🧭 ход колонки: ИИ → claude a", text)
+        self.assertIn("🧭 хук квазара: грамматика не знает эту фразу → ответ: ИИ (текстовый запрос к адаптеру)", text)
+        self.assertIn("🧭 текстовый запрос к адаптеру: ИИ → claude a", text)
         self.assertNotIn("не обработано адаптером", text)
 
     def test_a_handed_on_phrase_with_no_witness_of_the_answer_says_the_quasar_decided(self):

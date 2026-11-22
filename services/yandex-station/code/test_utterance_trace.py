@@ -134,7 +134,7 @@ class Reading(unittest.TestCase):
                     "declined": "volume change is run by the quasar layer"}
         self.assertEqual(trace_view.route_line(declined), "грамматика узнала фразу (volume.up · execute · p4 · 1.00), но не выполнила её "
                                                          "→ дальше решал квазар (быстрый интент или ИИ)")
-        self.assertIn("↷ грамматика не выполнила: громкость меняет сам квазар", trace_view.lines(declined))
+        self.assertIn("↷ грамматика не выполнила: громкость меняет быстрый слой quasar", trace_view.lines(declined))
         self.assertNotIn("не обработано адаптером", " ".join(trace_view.lines(declined) + trace_view.lines(abstain)))
 
     def test_a_shadow_call_says_it_executed_nothing(self):
@@ -147,7 +147,7 @@ class Reading(unittest.TestCase):
         reasons = {"reprompt cooldown: one «не расслышал» a minute per station": "переспрос не чаще раза в минуту",
                    "compound: a clause is not run by the adapter": "составная команда: часть исполняет квазар",
                    "fuzzy guess: needs the owner's «да»": "нечёткое совпадение: нужно подтверждение «да»",
-                   "volume change is run by the quasar layer": "громкость меняет сам квазар",
+                   "volume change is run by the quasar layer": "громкость меняет быстрый слой quasar",
                    "volume arguments break the contract": "параметры громкости не подходят адаптеру",
                    "executor light.turn_on belongs to the quasar layer": "действие light.turn_on исполняет квазар",
                    "timers are not configured": "таймеры не настроены", "Home Assistant actions are off": "действия Home Assistant выключены",
@@ -161,7 +161,7 @@ class Reading(unittest.TestCase):
         quasar = [{"kind": "запрос", "text": "какая влажность на улице", "res": "Влажность на улице 100 процентов. (listen=false)"}]
         self.assertEqual(trace_view.answered_by(hook["text"], [hook], quasar, []), "быстрый интент квазара → «Влажность на улице 100 процентов.»")
         turn = {"via": "turn", "layer": "brain", "text": "Какая влажность на улице"}
-        self.assertEqual(trace_view.answered_by(hook["text"], [hook, turn], quasar, []), "ИИ (ход колонки)", "the adapter's own record is the better witness")
+        self.assertEqual(trace_view.answered_by(hook["text"], [hook, turn], quasar, []), "ИИ (текстовый запрос к адаптеру)", "the adapter's own record is the better witness")
         self.assertEqual(trace_view.answered_by(hook["text"], [hook], [], [{"prompt": "какая влажность на улице", "answer": "а"}]), "ИИ")
         self.assertIsNone(trace_view.answered_by(hook["text"], [hook], [{"kind": "запрос", "text": "другое", "res": "x"}], []))
         line = trace_view.route_line(hook, answered="ИИ")
@@ -188,7 +188,7 @@ class Reading(unittest.TestCase):
         clip = {"transcript": "Какая влажность на улице?"}
         asked = [{"kind": "запрос", "text": "какая влажность на улице", "res": "Влажность на улице 100 процентов."}]
         self.assertEqual(trace_view.untraced_reason(clip, {"actions": asked, "brain": []}),
-                         "записи вызова адаптера нет: фразу обработал сам квазар (быстрый интент → «Влажность на улице 100 процентов.»)")
+                         "записи вызова адаптера нет: фраза обработана быстрым слоем quasar (быстрый интент → «Влажность на улице 100 процентов.»)")
         self.assertEqual(trace_view.untraced_reason(clip, {"actions": [], "brain": [{"prompt": "какая влажность на улице", "answer": "а"}]}),
                          "записи вызова адаптера нет, но в диалоге есть ответ ИИ")
         self.assertEqual(trace_view.untraced_reason(clip, {"actions": [], "brain": []}),

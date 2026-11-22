@@ -46,10 +46,12 @@ SCHEMA = (
 )
 COLUMNS = ("id", "ts", "dialog_id", "path", "dur", "rate", "bytes", "rms", "peak", "voiced_ms", "floor_rms", "contrast",
            "engine", "trigger", "status", "reason", "transcript", "asr_ms", "silence_ms", "final_ms", "station")
-# Clips of commands the speaker recognised on the device (spotter_clips.py): `trigger` and `engine` mark them, because their
-# transcript is the speaker's own recognition and must not count as Whisper's in the recognizer-quality numbers.
+# Clips of commands recognised by the commands spotter (spotter_clips.py): `trigger` and `engine` mark them, because their
+# transcript is the spotter's, not Whisper's, and must not count in the recognizer-quality numbers.
 SPOTTER_TRIGGER = "spotter"
-SPOTTER_ENGINE = "колонка сама (споттер команд)"
+SPOTTER_ENGINE = "споттер команд"
+_LEGACY_SPOTTER_ENGINE = "колонка сама (споттер команд)"   # what archives made before the neutral wording hold; renamed on first connect
+_ENGINE_RENAMED: set[str] = set()
 # A segment that was only the activation word (wake_word.py): an event of the session, not an utterance. Its row is kept (audio,
 # what Whisper wrote in `transcript`, `reason='wake'`) but it is no request: the clip feed never posts it alone, the ASR bench skips it.
 ACTIVATION = "activation"
@@ -76,6 +78,10 @@ def connect(db_path: str) -> sqlite3.Connection:
             conn.execute("ALTER TABLE voice_clips ADD COLUMN station TEXT")
         except sqlite3.OperationalError:  # another process migrated first
             pass
+    if db_path not in _ENGINE_RENAMED:   # once per process and archive: the label is a stored value, old rows keep their identity
+        conn.execute("UPDATE voice_clips SET engine=? WHERE engine=?", (SPOTTER_ENGINE, _LEGACY_SPOTTER_ENGINE))
+        conn.commit()
+        _ENGINE_RENAMED.add(db_path)
     return conn
 
 

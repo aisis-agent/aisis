@@ -123,7 +123,7 @@ class EvidenceLines(unittest.TestCase):
     def test_the_second_opinion_is_labelled_with_its_engine(self):
         got = trace_view.evidence_lines(EVIDENCE, [SPOTTER_TRACE])
         self.assertEqual(got[0], (1, "🔎 второе мнение (GigaAM): «выключи свет» 94% · «включи свет» 5%"))
-        self.assertIn((2, "основное распознавание (споттер колонки): «включи свет»"), got)
+        self.assertIn((2, "основное распознавание (споттер команд): «включи свет»"), got)
         self.assertIn((4, "⏱ второе мнение: 140 мс"), got)       # nbest.ms 120 is the scoring alone; the evidence's own ms is the whole time
 
     def test_the_reply_clip_keeps_its_own_evidence_when_the_trace_alternatives_belong_to_the_question(self):
@@ -157,7 +157,7 @@ class OwnerClipCaption(unittest.TestCase):
     def caption(self, evidence=EVIDENCE, traces=(SPOTTER_TRACE,)):
         clip = dict(OWNER_CLIP)
         diag = clipfeed.trace_caption_lines(clip, list(traces)) + clipfeed.evidence_caption_lines(evidence, list(traces))
-        return clipfeed.build_caption(clip, "распознано самой колонкой (споттер команд); текст не от Whisper", 1, diag=diag,
+        return clipfeed.build_caption(clip, "распознано споттером команд; текст не от Whisper", 1, diag=diag,
                                       link="🔗 http://dash.test:8781/session/clip/" + clip["id"])
 
     def test_the_caption_shows_the_alternatives_with_the_engine_that_said_them(self):

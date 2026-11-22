@@ -180,7 +180,7 @@ def describe_result(clip: dict, dialog: dict | None, window_end: float) -> str:
     if not heard:
         return "∅ пустой текст"
     if dialog is None:
-        if clip.get("trigger") == voiceclips.SPOTTER_TRIGGER:  # «громче», «пауза»: the speaker ran it itself, the server heard no text turn
+        if clip.get("trigger") == voiceclips.SPOTTER_TRIGGER:  # «громче», «пауза»: recognised by the commands spotter, the server got the recording and no text turn
             return "🔊 " + trace_view.SPOTTER_RAN_IT
         return "❔ диалог не найден"
     start = _seconds_of_day(time.strftime("%H:%M:%S", time.localtime(clip["ts"]))) or 0
@@ -220,8 +220,8 @@ def load_dialog(conn: sqlite3.Connection, dialog_id: str | None) -> dict | None:
 
 
 WAKE_WORDS = ("алис", "яндекс")
-CUT_BY = {"vad": "закрыто по паузе (VAD)", "finish": "поток закончила станция (EOF)", "idle": "закрыто по таймауту потока",
-          voiceclips.SPOTTER_TRIGGER: "распознано самой колонкой (споттер команд); запись из лога споттера, текст не от Whisper"}
+CUT_BY = {"vad": "закрыто по паузе (VAD)", "finish": "поток завершён (EOF)", "idle": "закрыто по таймауту потока",
+          voiceclips.SPOTTER_TRIGGER: "распознано споттером команд; запись из лога споттера, текст не от Whisper"}
 SHORT_SPEECH_MS = 700
 REPLY_FOOTER = "↩ Реплай = что сказали на самом деле («=» верно, «шум» — речи не было)."
 

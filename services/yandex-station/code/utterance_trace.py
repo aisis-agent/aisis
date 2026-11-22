@@ -1,7 +1,7 @@
 """One compact record per call the adapter answers: how an utterance was processed (the clip feed and the dashboard show it).
 
 The adapter is asked twice for a phrase at most: by the quasar overlay's hook (`/intent/decide`, before the container's own
-handlers; `via: "hook"`) and by the speaker's turn itself (the processor socket; `via: "turn"`). Each call opens a Trace,
+handlers; `via: "hook"`) and by the turn's text request (the processor socket; `via: "turn"`). Each call opens a Trace,
 the code that decides or executes adds facts to it through the module functions (a contextvar, so executors need no extra
 parameter and the functions are a no-op outside a call), and the adapter stores the finished record in dialogs.sqlite3
 (`dialogstore.add_trace`). The session page and the Telegram feed read it back by time: the adapter does not know the

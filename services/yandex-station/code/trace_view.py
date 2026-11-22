@@ -10,10 +10,12 @@ from typing import Any
 
 import ha_action_log
 
-LAYERS = {"grammar": "грамматика", "skill": "навык", "calc": "калькулятор", "jev": "Jev", "brain": "ИИ", "error": "ошибка"}
-VIA = {"turn": "ход колонки", "hook": "хук квазара", "hook-shadow": "хук квазара (теневой)"}
+# `skill` is the adapter's own handlers (voice_skills.py: weather, arithmetic, «включи музыку»), aisis code: not a Yandex Alice skill.
+LAYERS = {"grammar": "грамматика", "skill": "встроенный обработчик", "calc": "калькулятор", "jev": "Jev", "brain": "ИИ", "error": "ошибка"}
+# `turn` is the adapter call over the processor socket: the phrase as text, after the quasar fast layer let it through.
+VIA = {"turn": "текстовый запрос к адаптеру", "hook": "хук квазара", "hook-shadow": "хук квазара (теневой)"}
 ASKED = {"clarify": "уточнение", "reprompt": "переспрос", "brain": "вопрос ИИ"}
-SPOTTER_RAN_IT = "команду выполнила сама колонка, серверу пришла только запись"   # a spotter clip («громче», «пауза»): no text turn, no adapter call
+SPOTTER_RAN_IT = "голосовая команда распознана споттером команд; текстового запроса к адаптеру не было, пришла только запись"   # a spotter clip («громче», «пауза»)
 DECISIONS = {"ask": "уточнение", "ask-choice": "выбор из двух", "relisten": "переспрос", "none": "без вопроса"}
 TRIGGERS = {"garbled": "фразу не разобрать", "contradiction": "подозрение на противоположную команду",
             "confusable-disagreement": "второе мнение слышит другую команду", "low-margin": "варианты почти равноценны"}
@@ -26,8 +28,8 @@ DIALOG_STATES = {"awaiting_confirm": "ждём «да» или «нет»", "awa
 OUTCOMES = {"accepted": "принято", "denied": "отклонено", "kept": "оставлено как услышано", "cancelled": "отменено",
             "timeout": "ответа не было", "fallthrough": "ответ ушёл обычным путём", "gave_up": "сдались после повтора", "repeat": "вопрос повторён"}
 CUES = {"noop": "команда ничего не меняет", "contradiction": "противоречит состоянию устройства", "state": "состояние устройства"}
-ENGINES = {"gigaam-v3-ctc": "GigaAM", "faster-whisper": "Whisper", "yandex-spotter": "споттер колонки"}
-EVIDENCE_SOURCES = {"spotter": "споттер колонки", "primary": "основное распознавание"}
+ENGINES = {"gigaam-v3-ctc": "GigaAM", "faster-whisper": "Whisper", "yandex-spotter": "споттер команд"}
+EVIDENCE_SOURCES = {"spotter": "споттер команд", "primary": "основное распознавание"}
 WAKE_STATUS = "activation"
 MATCH_AFTER_S = 20.0    # a clip's call starts within this long after the archived clip
 MATCH_BEFORE_S = 3.0
@@ -91,7 +93,7 @@ def intent_bits(trace: dict) -> str:
 DECLINED = [(re.compile(r"^reprompt cooldown"), "переспрос не чаще раза в минуту"),
             (re.compile(r"^compound:"), "составная команда: часть исполняет квазар"),
             (re.compile(r"^fuzzy guess"), "нечёткое совпадение: нужно подтверждение «да»"),
-            (re.compile(r"^volume change is run by the quasar layer"), "громкость меняет сам квазар"),
+            (re.compile(r"^volume change is run by the quasar layer"), "громкость меняет быстрый слой quasar"),
             (re.compile(r"^volume arguments break the contract"), "параметры громкости не подходят адаптеру"),
             (re.compile(r"^executor (\S+) belongs to the quasar layer"), r"действие \1 исполняет квазар"),
             (re.compile(r"^timers are not configured"), "таймеры не настроены"),
@@ -185,7 +187,7 @@ def untraced_reason(clip: dict, dialog: dict | None) -> str:
         return f"{base} и диалога квазара нет: возможно, фраза не дошла до разбора"
     spoken = quasar_answer(wanted, dialog.get("actions"))
     if spoken is not None:
-        return f"{base}: фразу обработал сам квазар (быстрый интент" + (f" → «{spoken}»" if spoken else "") + ")"
+        return f"{base}: фраза обработана быстрым слоем quasar (быстрый интент" + (f" → «{spoken}»" if spoken else "") + ")"
     if any(norm(turn.get("prompt")) == wanted for turn in dialog.get("brain") or []):
         return f"{base}, но в диалоге есть ответ ИИ"
     return f"{base}, и ответа квазара в диалоге нет: возможно, фраза не дошла до разбора (или квазар разбирал исправленный текст)"
@@ -228,7 +230,7 @@ def brain_line(brain: dict) -> str:
 
 
 def stages_line(stages: dict | None) -> str:
-    names = {"grammar": "грамматика", "route": "маршрут", "skills": "навыки", "jev": "Jev", "context": "контекст", "brain": "ИИ"}
+    names = {"grammar": "грамматика", "route": "маршрут", "skills": "обработчики", "jev": "Jev", "context": "контекст", "brain": "ИИ"}
     parts = [f"{names.get(k, k)} {v}" for k, v in (stages or {}).items() if k != "total"]
     if stages and "total" in stages:
         parts.append(f"всего {stages['total']}")

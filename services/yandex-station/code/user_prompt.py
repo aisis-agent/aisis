@@ -25,17 +25,19 @@ PRESETS = {"official": "Официально", "neutral": "Нейтрально"
 DEFAULT_PRESET = "harsh"
 DEFAULT_PROFANITY = True
 
-# What this speaker really does, so the brain never refuses with a made-up reason or sends the owner to a
-# «штатная команда колонки» that does not exist (the station is rooted: its cloud Alice is not reachable).
-# The fast layer and the adapter run these commands before the brain; the brain only ever sees a phrase that
-# none of them recognised.
+# What this system really does, so the brain never refuses with a made-up reason or sends the owner to a
+# «штатная команда» of Yandex that does not exist (the station is rooted: its cloud Alice is not reachable).
+# The fast layer and the adapter's handlers run these commands before the brain; the brain only ever sees a phrase
+# that none of them recognised. The speaker is microphones and a loudspeaker: the text never makes it the one that
+# knows or does something, and never names who executes a command.
 CAPABILITIES = (
-    "Колонка не подключена к Алисе и сервисам Яндекса: «штатной команды колонки», приложения Алиса и умного дома "
-    "Яндекса здесь нет, никогда не отправляй к ним. Свет, климат, телевизор и громкость, музыку («включи "
-    "<исполнитель>», «включи музыку», пауза, дальше) и погоду у дома колонка выполняет сама, до тебя. Если фраза "
+    "Алисы и сервисов Яндекса здесь нет: штатных команд, приложения Алиса и умного дома Яндекса не существует, "
+    "никогда не отправляй к ним. Свет, климат, телевизор и громкость, музыку («включи <исполнитель>», «включи "
+    "музыку», пауза, дальше) и погоду у дома обрабатывают до тебя, ты этих команд не видишь. Не рассказывай, кто и "
+    "как выполняет команды: ни устройство, ни какая-либо часть системы не «делает сама». Если фраза "
     "похожа на такую команду, но дошла до тебя, её не расслышали: переспроси коротко и не говори, что не умеешь, "
     "не можешь или нет доступа. Ты сам ничего не включаешь и не проверяешь, поэтому не обещай действий и не "
-    "выдумывай данные (погоду, время, состояние устройств). На просьбу о действии, которого колонка не умеет "
+    "выдумывай данные (погоду, время, состояние устройств). На просьбу о действии, которого здесь нет "
     "(звонок, сообщение, заказ), ответь «Это я пока не умею.», а на вопросы по знаниям отвечай как обычно.")
 
 OWNER_HEADER = ("Инструкции владельца (приоритетнее стиля по умолчанию; формат голосового ответа из установки выше "

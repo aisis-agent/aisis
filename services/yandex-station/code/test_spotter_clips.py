@@ -70,7 +70,7 @@ class ArchiveSpotterClip(unittest.TestCase):
         clip["first_in_dialog"] = True
         caption = clipfeed.build_caption(clip, "✅ выполнено: on [light.studiia]", 1)
         self.assertIn("«включи свет»", caption)
-        self.assertIn("колонкой", caption)
+        self.assertIn("споттером команд", caption)
         self.assertNotIn("хвост тишины", caption)
         self.assertNotIn("слова активации", caption)
 
@@ -178,10 +178,10 @@ class ArchiveSpotterClip(unittest.TestCase):
         self.assertEqual(self.row("old")["station"], None)
         self.assertEqual(self.row(saved["clip"])["station"], "M00ZRW3008RAJG")
 
-    def test_a_spotter_clip_with_no_dialog_says_the_speaker_ran_it(self):
+    def test_a_spotter_clip_with_no_dialog_says_the_command_came_as_a_recording_only(self):
         saved = spotter_clips.archive(self.db, ogg_opus(1.0), "громче")
         result = clipfeed.describe_result(self.row(saved["clip"]), None, time.time() + 45)
-        self.assertIn("сама колонка", result)
+        self.assertIn("распознана споттером команд", result)
         self.assertNotIn("диалог не найден", result)
 
     def test_the_speakers_own_recognition_stays_out_of_the_recognizer_numbers(self):

@@ -304,8 +304,8 @@ def _turn_lines(dialog: dict) -> str:
     for at, note in dialogstore.log_notes(dialog.get("raw") or []):   # a helper that failed open: the turn went on without it
         out.append(f"<li class=dim><span class=dim>{e(at)}</span> {e(note)}</li>")
     closes = dialogstore.normal_close_count(dialog.get("raw") or [])
-    if closes:   # one line, not one error per close: the speaker ends a connection after every exchange and every wake word
-        out.append(f"<li class=dim>соединение колонки закрывалось {closes} {_times(closes)}: штатно, не ошибка</li>")
+    if closes:   # one line, not one error per close: a connection ends after every exchange and every wake word
+        out.append(f"<li class=dim>соединение закрывалось {closes} {_times(closes)}: штатно, не ошибка</li>")
     return "<div class=card><h2>Журнал квазара</h2><ul>" + "".join(out) + "</ul></div>" if out else ""
 
 
