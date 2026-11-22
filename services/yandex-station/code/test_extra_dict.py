@@ -103,6 +103,25 @@ class Validation(unittest.TestCase):
                 self.rejects(document(entry(kind=kind, context="anywhere", canonical="громкость", variants=[{"text": text}], evidence={"source": "owner"})), "lexicon.wake")
         self.rejects(document(entry(variants=[{"text": "алиса олеса"}])), "lexicon.wake")
 
+    def test_a_canonical_starts_and_ends_with_a_letter_or_digit(self):
+        """«,громкость» would be written into the text with its comma; a hand-edited file is the only way to such a canonical, and it is refused."""
+        for canonical in (",громкость", "громкость,", "...громкость 5", "-громкость", "громкость!"):
+            self.rejects(document(entry(kind="phrase", context="anywhere", canonical=canonical, variants=[{"text": "громкасть"}])), "canonical must be")
+        self.rejects(document(entry(canonical=",Алиса")), "canonical must be")
+
+    def test_a_variant_that_is_a_lead_in_word_is_refused(self):
+        """wake_word cuts «ну», «эй», «слушай», «ой», «а» in front of a name: a wake variant holding one is never reached, and a variant that is one would rewrite them."""
+        for word in sorted(wake_word.LEAD_INS):
+            self.rejects(document(entry(variants=[{"text": word + " олеса"}])), "lead-in")
+        self.rejects(document(entry(variants=[{"text": "слушай"}])), "lead-in")
+        self.rejects(document(entry(kind="phrase", context="anywhere", canonical="громкость", variants=[{"text": "слушай"}], evidence={"source": "owner"})), "lead-in")
+
+    def test_a_command_or_phrase_canonical_is_never_a_wake_name(self):
+        """A correction that writes the activation word would make an ordinary utterance an activation."""
+        for kind in ("command", "phrase"):
+            for canonical in ("Алиса", "яндекс", "включи яндекс", "брачо"):
+                self.rejects(document(entry(kind=kind, context="anywhere", canonical=canonical, variants=[{"text": "олеса"}], evidence={"source": "owner"})), "activation word")
+
     def test_evidence_must_carry_a_count_unless_the_owner_named_it(self):
         self.rejects(document(entry(evidence={"source": "observed"}, variants=[{"text": "олеса"}])), "n >= 1")
         self.rejects(document(entry(evidence={"source": "verdict"}, variants=[{"text": "олеса"}])), "n >= 1")

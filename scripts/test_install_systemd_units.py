@@ -67,7 +67,7 @@ class InstallerTest(unittest.TestCase):
             shutil.copytree(src, self.repo / "services" / src.parent.name / "systemd")
         code = self.repo / "services" / "yandex-station" / "code"
         code.mkdir(parents=True, exist_ok=True)
-        for name in ("adapter.py", "clipfeed.py", "dashboard.py", "stt_wyoming.py"):
+        for name in ("adapter.py", "clipfeed.py", "dashboard.py", "extra_dict_dynamic.py", "stt_wyoming.py"):
             (code / name).write_text("# entry\n")
         (code / "quasar_lan_proxy.py").write_text("# entry: reads ALLOWED_PEERS\n")
         for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "init"],

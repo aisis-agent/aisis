@@ -4,11 +4,13 @@ phrase entries only in `on`.
 
 Real inputs: «Олеса, включи свет.» (clip 20261120T235150-330d2a, tg#31621: the owner's «Олеса Алекса Олеся -> Алиса»).
 """
+import json
 import os
 import tempfile
 import pathlib
 import types
 import unittest
+from unittest import mock
 
 import correction
 import extra_dict
@@ -32,6 +34,17 @@ class Utt:
 
 
 DICTIONARY = extra_dict.load()
+
+
+DYNAMIC_ENTRY = {"id": "dyn-a", "kind": "phrase", "canonical": "люстра", "context": "anywhere", "variants": [{"text": "люстара", "n": 3}], "evidence": {"source": "observed"}}
+
+
+def install_layer(*entries):
+    """A dynamic layer at the place the services look for it (XDG_CACHE_HOME)."""
+    layer = extra_dict.dynamic_path()
+    layer.parent.mkdir(parents=True, exist_ok=True)
+    layer.write_text(json.dumps({"version": 1, "locale": "ru", "entries": list(entries), "generated": {"at": 1, "vocabulary": "x", "min_support": 3},
+                                 "vocabulary": {"verbs": [], "names": []}}, ensure_ascii=False), encoding="utf-8")
 
 
 class Judge(unittest.TestCase):
@@ -87,7 +100,35 @@ class Tuning(unittest.TestCase):
 
 class Sessions(unittest.TestCase):
     """The gateway end to end: the websocket final carries the text downstream."""
-    setUp = test_stt_wake.GatewayReplay.setUp
+    def setUp(self):
+        test_stt_wake.GatewayReplay.setUp(self)
+        cache = tempfile.TemporaryDirectory()   # the runtime layer is looked for under XDG_CACHE_HOME: never the real one
+        self.addCleanup(cache.cleanup)
+        patch = mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache.name})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.cache = pathlib.Path(cache.name)
+
+    def test_the_runtime_layer_corrects_in_on_and_is_only_logged_in_shadow(self):
+        install_layer(DYNAMIC_ENTRY)
+        self.env["AISIS_EXTRA_DICT"] = "on"
+        with self.assertLogs("aisis.stt", level="INFO") as logs:
+            messages, _, _ = self.heard("Алиса, включи люстара")
+        self.assertEqual(messages, [{"text": "Включи люстра", "end_of_utt": True}])
+        self.assertIn("extra_dict_corrected mode=on layer=dynamic kinds=phrase entries=dyn-a", " ".join(logs.output))
+        self.env["AISIS_EXTRA_DICT"] = "shadow"
+        with self.assertLogs("aisis.stt", level="INFO") as logs:
+            messages, _, _ = self.heard("Алиса, включи люстара")
+        self.assertEqual(messages, [{"text": "Включи люстара", "end_of_utt": True}])
+        self.assertIn("extra_dict_would_correct mode=shadow layer=dynamic", " ".join(logs.output))
+
+    def test_a_layer_that_cannot_be_read_leaves_the_static_dictionary(self):
+        (self.cache / "aisis" / "extra-dict").mkdir(parents=True)
+        extra_dict.dynamic_path().write_text("{not json", encoding="utf-8")
+        self.env["AISIS_EXTRA_DICT"] = "on"
+        with self.assertLogs("aisis.extra_dict", level="WARNING"):
+            messages, _, _ = self.heard("Олеса, включи свет.")
+        self.assertEqual(messages, [{"text": "Включи свет.", "end_of_utt": True}])
     run_session = test_stt_wake.GatewayReplay.run_session
     rows = test_stt_wake.GatewayReplay.rows
 
@@ -149,6 +190,24 @@ class Engine(unittest.TestCase):
 
     def build(self, mode, core=None):
         return correction.Correction(lambda text: None, lambda text, context: None, None, mode="shadow", core=core or real_core, extra_dict_mode=mode)
+
+    @unittest.skipIf(real_core is None, "the stt-cli core is not installed")
+    def test_a_layer_that_appears_while_running_is_taken_up_and_one_that_goes_is_dropped(self):
+        engine = self.build("on")
+        self.assertEqual([c.text for c in engine.confusables.candidates("включи люстара")], ["выключи люстара"])
+        install_layer(DYNAMIC_ENTRY)
+        engine._extra._recheck = 0.0   # do not wait out the 30 s between two looks at the file
+        self.assertEqual(sorted(c.text for c in engine.confusables.candidates("включи люстара")), ["включи люстра", "выключи люстара"])
+        extra_dict.dynamic_path().unlink()
+        self.assertEqual([c.text for c in engine.confusables.candidates("включи люстара")], ["выключи люстара"])
+
+    @unittest.skipIf(real_core is None, "the stt-cli core is not installed")
+    def test_shadow_names_the_layer_that_added_the_candidate(self):
+        install_layer(DYNAMIC_ENTRY)
+        engine = self.build("shadow")
+        with self.assertLogs("aisis.correction", level="INFO") as logs:
+            engine._shadow_extra("включи люстара")
+        self.assertIn("extra_dict_would_correct mode=shadow layer=dynamic,static kind=confusable", logs.output[0])
 
     @unittest.skipIf(real_core is None, "the stt-cli core is not installed")
     def test_off_is_the_cores_own_sets(self):

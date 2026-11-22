@@ -45,6 +45,10 @@ class Replay(unittest.TestCase):
                                clip("other", "урок из 5")], DICTIONARY)
         self.assertEqual((report["n_corrected"], report["n_entry_source_clips"]), (2, 1))
 
+    def test_a_clip_id_that_is_only_a_piece_of_the_one_in_a_note_is_not_its_source(self):
+        report = bench.replay([clip("20261109T010646", "Алиса, урок из 5."), clip("564b98", "Алиса, урок из 5."), clip("0", "Алиса, урок из 5.")], DICTIONARY)
+        self.assertEqual((report["n_corrected"], report["n_entry_source_clips"]), (3, 0))
+
     def test_the_report_prints_counts_and_claims_no_accuracy(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
