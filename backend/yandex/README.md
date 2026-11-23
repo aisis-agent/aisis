@@ -256,3 +256,10 @@ The actual-encoder/decoder regressions construct valid Ogg pages with CRC,
 exercise packet/page boundaries and signed gain, and run alongside native EOF
 regressions. See [Ogg framing](https://xiph.org/ogg/doc/framing.html) and
 [Ogg Opus RFC7845](https://www.rfc-editor.org/rfc/rfc7845).
+
+## Mini 2 initial setup and firmware evidence
+
+The voice backend does not itself establish initial device access. See
+[Firmware preparation](FIRMWARE.md) for current HackAlice model-specific evidence,
+a non-destructive pinned-image verifier, and private artifact staging. It does
+not reset, flash or reconfigure a speaker, and it does not claim migration.
