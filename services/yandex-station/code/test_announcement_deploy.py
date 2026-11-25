@@ -341,6 +341,21 @@ class UnitCompanionTests(unittest.TestCase):
         self.assertFalse((self.app / "laya_route.py").exists())
         self.assertEqual(self.restarts()[-1], {"entry": self.old, "modules": {}})
 
+    def test_adapter_ships_the_quality_envelope_modules_and_the_corrector_it_imports(self):
+        adapter = "import laya_route\nimport laya_quality\nimport classifier_journal\nimport asr_correct\nVERSION = 'new'\n"
+        modules = {name: f"# {name}\n" for name in ("laya_route.py", "laya_quality.py", "classifier_journal.py", "asr_correct.py")}
+        result = self.deploy_unit("adapter", "adapter.py", adapter, **modules)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (restart,) = self.restarts()
+        self.assertEqual(restart["modules"], modules)
+
+    def test_adapter_without_its_journal_writer_beside_it_is_refused_untouched(self):
+        modules = {name: "# x\n" for name in ("laya_route.py", "laya_quality.py")}
+        result = self.deploy_unit("adapter", "adapter.py", "import laya_route\nimport laya_quality\nimport classifier_journal\n", **modules)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("classifier_journal.py must accompany", result.stderr)
+        self.assertEqual((self.app / "adapter.py").read_text(), self.old)
+
     def test_stale_bytecode_of_a_shipped_module_is_dropped_and_other_caches_stay(self):
         cache = self.app / "__pycache__"
         cache.mkdir()

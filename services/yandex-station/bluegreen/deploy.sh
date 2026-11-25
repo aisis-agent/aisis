@@ -302,7 +302,7 @@ cmd_adopt() {
 # module the new code newly depends on (or calls a new function of) would otherwise be missing or stale at the restart.
 unit_companion_candidates() {
   case $1 in
-    adapter) echo "announcement_cache.py hypothesis_store.py laya_route.py" ;;
+    adapter) echo "announcement_cache.py hypothesis_store.py laya_route.py laya_quality.py classifier_journal.py asr_correct.py" ;;
     stt) echo "second_opinion.py spotter_clips.py voiceclips.py" ;;
     ha-cli) echo "ha_verify.py ha_action_log.py" ;;
   esac

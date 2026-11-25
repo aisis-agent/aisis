@@ -34,6 +34,8 @@ import intent_route
 import jev
 import laya_route
 import led_animation
+import classifier_journal
+import laya_quality
 import reply_guard
 import user_prompt
 import timers
@@ -194,6 +196,12 @@ class Adapter:
         self.jev_session: ClientSession | None = None
         self.jev_task: asyncio.Task | None = None
         self.jev_pending: set[asyncio.Task] = set()
+        # The /laya quality envelope (laya_quality.py): built on the first request; its Jev session exists only once Jev is asked.
+        self.laya_envelope: laya_quality.Envelope | None = None
+        self.laya_jev: jev.JevClient | None = None
+        self.laya_jev_session: ClientSession | None = None
+        self.laya_pending: set[asyncio.Task] = set()
+        self.laya_source: dict | None = None
         self.trace_pending: set[asyncio.Task] = set()
         # AISIS_UTTERANCE_TRACE=off: no per-utterance records (utterance_trace.py) in dialogs.sqlite3; the diagnostics of the clip feed and the session page go empty.
         self.trace_enabled = self.env.get("AISIS_UTTERANCE_TRACE", "on").lower() != "off"
@@ -311,6 +319,7 @@ class Adapter:
     async def start(self, _app):
         self.http = ClientSession(timeout=ClientTimeout(total=60))
         self._asr_corrector()  # opens the keep-alive connection before the first phrase needs it
+        self.laya_source = await asyncio.to_thread(laya_quality.source_identity, Path(__file__).resolve().parent, self.env)  # reads files, asks git
         if self.timers is not None:
             await self.timers.resume()
         if self.env.get("AISIS_LED_ANIMATION") == "on":  # adb on the speaker: opt-in per process (not in tests/stage)
@@ -339,6 +348,13 @@ class Adapter:
             await asyncio.gather(self.jev_task, *self.jev_pending, return_exceptions=True)
         if self.jev_session is not None:
             await self.jev_session.close()
+        if self.laya_pending:  # a request in flight gets a bounded time to finish its journal write; the rest is cancelled
+            _done, stuck = await asyncio.wait(self.laya_pending, timeout=laya_quality.SHUTDOWN_WAIT_S)
+            for task in stuck:
+                task.cancel()
+            await asyncio.gather(*stuck, return_exceptions=True)
+        if self.laya_jev_session is not None:
+            await self.laya_jev_session.close()
         if self.warm_task is not None:
             self.warm_task.cancel()
             await asyncio.gather(self.warm_task, return_exceptions=True)
@@ -389,7 +405,8 @@ class Adapter:
             "jev": {"mode": self.jev_mode, "active": self.jev is not None,
                 "acting": self.jev is not None and self.jev_mode == "on" and self.jev_settings.acts,
                 "threshold": self.jev_settings.threshold, "refuse": self.jev_settings.refuse,
-                "reprompt": self.jev_settings.reprompt, "stats": dict(self.jev.stats) if self.jev else {}}})
+                "reprompt": self.jev_settings.reprompt, "stats": dict(self.jev.stats) if self.jev else {}},
+            "laya": self._laya_status()})
 
     async def _turn_payload(self, station: str, text: str, turn: str):
         """Build one request while keeping stable persona apart from changing context."""
@@ -982,7 +999,8 @@ class Adapter:
         return ogg
 
     async def laya(self, request):
-        """Proxy one classification to the local laya classify-server unix socket (protocol rules: laya_route).
+        """Classify one request through the quality envelope: Laya, then hosted Jev, then Haiku, each tier accepted only after a
+        positive and a negative control on its own route (laya_quality.py; request rules: laya_route).
 
         Read-only inference endpoint for the semantic-intents shadow layer in the
         quasar container; the private socket itself never crosses the boundary.
@@ -993,13 +1011,77 @@ class Adapter:
                 body = await request.json()
             except ValueError:
                 raise laya_route.LayaProblem(400, "invalid_request", field="body", detail="a JSON object") from None
-            line, model = laya_route.build_request(body)
-            text = laya_route.check_reply(await self._laya_exchange(line), model)
+            parsed = laya_route.parse(body)
         except laya_route.LayaProblem as problem:
             LOG.warning("laya request refused or failed: %s (%d)", problem.code, problem.status)
-            headers = {"Retry-After": "1"} if problem.fields.get("reason") == "loading" else None
-            return web.json_response(problem.body(), status=problem.status, headers=headers)
-        return web.Response(text=text, content_type="application/json")
+            return web.json_response(problem.body(), status=problem.status)
+        # A caller that gave up (the shadow's 5 s budget) must not cost the request its journal record: the run finishes on its own.
+        task = asyncio.ensure_future(self._laya_envelope().serve(parsed, lambda: request.transport is None or request.transport.is_closing()))
+        self.laya_pending.add(task)
+        task.add_done_callback(self.laya_pending.discard)
+        status, payload, headers = await asyncio.shield(task)
+        if status != 200:
+            LOG.warning("laya request refused or failed: %s (%d)", payload.get("error"), status)
+        return web.json_response(payload, status=status, headers=headers or None)
+
+    def _laya_envelope(self) -> laya_quality.Envelope:
+        if self.laya_envelope is None:
+            root = classifier_journal.state_root(self.env)
+            tiers = [laya_quality.LayaTier(self._laya_exchange),
+                     laya_quality.JevTier(self._laya_jev_missing, self._laya_jev_client, self.env.get("AISIS_JEV_MODEL", jev.DEFAULT_MODEL)),
+                     laya_quality.HaikuTier(self._laya_haiku_missing, self._laya_haiku_ask)]
+            self.laya_envelope = laya_quality.Envelope(tiers, journal=classifier_journal.Journal(root),
+                                                       incidents=classifier_journal.IncidentSink(root), root=root, source=self._laya_source)
+        return self.laya_envelope
+
+    def _laya_source(self) -> dict:
+        """Release, commit and code hash of the running code: computed in `start()`; here only for an adapter that was never started."""
+        if self.laya_source is None:
+            self.laya_source = laya_quality.source_identity(Path(__file__).resolve().parent, self.env)
+        return self.laya_source
+
+    def _laya_status(self) -> dict:
+        """The /healthz block of the envelope: the controls-coverage KPI per domain and what the journal and incident writers did."""
+        envelope = self.laya_envelope
+        if envelope is None:
+            return {"quality": {}, "journal": {}, "incidents": {}}
+        return {"quality": envelope.kpi_snapshot(), "journal": {**envelope.journal.counts, "pruned": envelope.journal.pruned,
+                                                                "last_failure": envelope.journal.last_failure},
+                "incidents": {"written": envelope.incidents.written, "suppressed": envelope.incidents.suppressed,
+                              "failed": envelope.incidents.failed}}
+
+    def _laya_fallback(self) -> set[str]:
+        """The cloud tiers the owner switched on for /laya: `AISIS_LAYA_FALLBACK=jev,haiku` (default none; they send the transcript off the host)."""
+        return {part.strip() for part in self.env.get("AISIS_LAYA_FALLBACK", "").lower().split(",") if part.strip()}
+
+    def _laya_jev_missing(self) -> str | None:
+        if "jev" not in self._laya_fallback():
+            return "disabled:aisis_laya_fallback"
+        return None if self.env.get("VERCEL_JEV_KEY") else "missing_env:vercel_jev_key"
+
+    def _laya_jev_client(self) -> jev.JevClient:
+        """The Jev tier's client: its own session (the voice-turn session has a 1 s budget) and the classification timeout."""
+        if self.laya_jev is None:
+            self.laya_jev_session = ClientSession(timeout=ClientTimeout(total=laya_quality.JEV_TIMEOUT_S + 1), trust_env=False)
+            self.laya_jev = jev.JevClient(jev.aiohttp_post(self.laya_jev_session), self.env["VERCEL_JEV_KEY"],
+                                          url=self.env.get("AISIS_JEV_URL", jev.DEFAULT_URL),
+                                          model=self.env.get("AISIS_JEV_MODEL", jev.DEFAULT_MODEL), timeout=laya_quality.JEV_TIMEOUT_S)
+        return self.laya_jev
+
+    def _laya_haiku_missing(self) -> str | None:
+        """Why the Haiku tier cannot be asked: the router module or its key-sources file is not there (names, never contents)."""
+        if "haiku" not in self._laya_fallback():
+            return "disabled:aisis_laya_fallback"
+        if self._claude_module() is None:
+            return "missing_config:claude_primary_module"
+        sources = Path(self.env.get("AISIS_CLAUDE_KEY_SOURCES") or Path.home() / ".config/aisis/claude-sources.json")
+        return None if sources.exists() else "missing_env:aisis_claude_key_sources"
+
+    async def _laya_haiku_ask(self, system: str, message: str) -> tuple[str, str]:
+        corrector = self._asr_corrector()
+        if corrector is None:
+            return "", "no_key"
+        return await corrector.ask_model(laya_quality.HAIKU_MODEL, system, message, laya_quality.HAIKU_BUDGET_S)
 
     async def _laya_exchange(self, line: dict) -> bytes:
         """Send one request line to the first Laya socket that accepts and return the reply line; raises a `LayaProblem`."""

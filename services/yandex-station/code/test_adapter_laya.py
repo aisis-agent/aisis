@@ -52,10 +52,11 @@ class SocketListTests(unittest.TestCase):
         self.assertEqual(laya_sockets({}, self.base), [])
 
 
-class BuildRequestTests(unittest.TestCase):
+class ParseRequestTests(unittest.TestCase):
     def build(self, **body):
         body.setdefault("message", "turn on the light")
-        return laya_route.build_request(body)
+        request = laya_route.parse(body)
+        return laya_route.line_for(request), request.model
 
     def problem(self, **body):
         with self.assertRaises(laya_route.LayaProblem) as raised:
@@ -132,21 +133,27 @@ class BuildRequestTests(unittest.TestCase):
                 self.assertEqual(self.problem(language=value).fields["field"], "language")
 
     def test_bad_message_and_questions_and_body_are_refused(self):
+        many = {f"q{i}": {"type": "choice"} for i in range(laya_route.QUESTIONS_MAX + 1)}
         for body, field in (({"message": ""}, "message"), ({"message": "  "}, "message"), ({"message": 3}, "message"),
                             ({"message": "я" * 2001}, "message"), ({}, "message"),
-                            ({"message": "x", "questions": []}, "questions"), ({"message": "x", "questions": None}, "questions")):
-            with self.subTest(body=body):
+                            ({"message": "x", "questions": []}, "questions"), ({"message": "x", "questions": None}, "questions"),
+                            ({"message": "x", "questions": many}, "questions")):
+            with self.subTest(body=body if len(str(body)) < 200 else "too many questions"):
                 with self.assertRaises(laya_route.LayaProblem) as raised:
-                    laya_route.build_request(body)
+                    laya_route.parse(body)
                 self.assertEqual((raised.exception.status, raised.exception.fields["field"]), (400, field))
         for body in ([], "x", None, 5):
             with self.subTest(body=body):
                 with self.assertRaises(laya_route.LayaProblem) as raised:
-                    laya_route.build_request(body)
+                    laya_route.parse(body)
                 self.assertEqual(raised.exception.fields["field"], "body")
 
     def test_a_message_of_exactly_the_limit_is_accepted(self):
         self.assertEqual(len(self.build(message="я" * 2000)[0]["message"]), 2000)
+
+    def test_exactly_the_most_questions_are_accepted(self):
+        questions = {f"q{i}": {"type": "choice"} for i in range(laya_route.QUESTIONS_MAX)}
+        self.assertEqual(len(self.build(questions=questions)[0]["questions"]), laya_route.QUESTIONS_MAX)
 
 
 def reply(**fields):
@@ -218,7 +225,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
     async def client(self, **extra):
         env = {"AISIS_ALLOWED_STATIONS": "st1", "AISIS_STATE_DB": str(self.base / "adapter.sqlite3"), "AISIS_MEMORY": "0",
                "AISIS_CHATGPT_COMMAND": "[]", "AISIS_ADAPTER_TOKEN": TOKEN, "AISIS_HA_ACTIONS": "off",
-               "AISIS_DIALOGS_DB": str(self.base / "dialogs.sqlite3"), **extra}
+               "AISIS_DIALOGS_DB": str(self.base / "dialogs.sqlite3"), "XDG_STATE_HOME": str(self.base / "journal-state"), **extra}
         client = TestClient(TestServer(Adapter(env).app()))
         await client.start_server()
         self.addAsyncCleanup(client.close)
@@ -414,6 +421,182 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         response = await self.ask(client, message="turn on the light")
         data = await response.json()
         self.assertEqual((response.status, data["error"], data["upstream"]), (502, "laya_upstream_error", "ValueError"))
+
+
+class QualityProxyTests(unittest.IsolatedAsyncioTestCase):
+    """aisis#250: the same endpoint with the quality envelope: controls, fallback, journal records and the coverage KPI."""
+
+    asyncSetUp = ProxyTests.asyncSetUp
+    serve = ProxyTests.serve
+    ask = ProxyTests.ask
+    LABELS = ("light", "volume", "timer", "climate", "math", "weather_time", "smalltalk", "question")
+    QUESTIONS = {"domain": {"type": "choice", "instructions": "Classify", "criteria": {label: "about " + label for label in LABELS}}}
+
+    async def client(self, **extra):
+        env = {"AISIS_ALLOWED_STATIONS": "st1", "AISIS_STATE_DB": str(self.base / "adapter.sqlite3"), "AISIS_MEMORY": "0",
+               "AISIS_CHATGPT_COMMAND": "[]", "AISIS_ADAPTER_TOKEN": TOKEN, "AISIS_HA_ACTIONS": "off",
+               "AISIS_DIALOGS_DB": str(self.base / "dialogs.sqlite3"), "XDG_STATE_HOME": str(self.base / "state"), **extra}
+        self.adapter = Adapter(env)
+        client = TestClient(TestServer(self.adapter.app()))
+        await client.start_server()
+        self.addAsyncCleanup(client.close)
+        return client
+
+    async def live(self, answer=None, **extra):
+        sock = self.base / "laya-0.35.1.sock"
+        await self.serve(sock, answer or self.classifier())
+        return await self.client(LAYA_SOCKET=str(sock), **extra)
+
+    def classifier(self, main="light", checkpoint="convaiinnovations/laya-multilingual"):
+        """A fake Laya that answers a control phrase with its expected label and every other message with `main`."""
+        import laya_quality
+        expected = {case.text: case.expected for case in laya_quality.VOICE_COMMAND_DOMAIN.controls}
+
+        def answer(request):
+            choice = expected.get(request["message"], main)
+            return reply(ok=True, result={"answers": {"domain": {"choice": choice, "answer_confidence": 0.9}}},
+                         meta={"api_version": 2, "model": request["model"], "checkpoint": checkpoint, "max_len": 1024, "truncated": False})
+        return answer
+
+    def journal(self):
+        folder = self.base / "state" / "agent-tools" / "classifier-quality" / "journal"
+        records = [json.loads(path.read_bytes()) for path in sorted(folder.glob("*.json"))] if folder.exists() else []
+        return {record["phase"]: record for record in records}
+
+    async def health(self, client):
+        return (await (await client.get("/healthz")).json())["laya"]
+
+    async def test_a_registered_request_is_answered_with_controls_and_journaled(self):
+        client = await self.live()
+        response = await self.ask(client, questions=self.QUESTIONS, language="ru")
+        body = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["result"]["answers"]["domain"]["choice"], "light")
+        self.assertEqual(body["meta"]["checkpoint"], "convaiinnovations/laya-multilingual")
+        quality = body["quality"]
+        self.assertEqual((quality["outcome"], quality["controls"], quality["tier"], quality["recorded"]), ("accepted", "passed", "laya", True))
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual({r["model"] for r in self.requests}, {"multilingual"})
+        records = self.journal()
+        self.assertEqual({k: v["request_id"] for k, v in records.items()}, {"request": quality["request_id"], "proposed": quality["request_id"]})
+        self.assertEqual(records["request"]["answer"]["outcome"], "accepted")
+
+    async def test_the_coverage_kpi_is_in_the_existing_health_output(self):
+        client = await self.live()
+        self.assertEqual(await self.health(client), {"quality": {}, "journal": {}, "incidents": {}})
+        await self.ask(client, questions=self.QUESTIONS, language="ru")
+        await self.ask(client, questions={"other": {"type": "choice", "criteria": {"a": "x"}}})
+        health = await self.health(client)
+        self.assertEqual(health["quality"]["voice-command-domain"]["controls_coverage"], 1.0)
+        self.assertEqual(health["quality"]["unregistered"]["controls_coverage"], 0.0)
+        self.assertEqual(health["journal"]["written"], 3)  # request + proposed for the registered one, the request alone for the excluded one
+        self.assertNotIn("threshold", json.dumps(health))
+
+    async def test_an_outage_is_the_distinct_status_with_an_explicit_unknown_and_a_critical_incident(self):
+        client = await self.client(LAYA_SOCKET=str(self.base / "gone.sock"))
+        response = await self.ask(client, questions=self.QUESTIONS, language="ru")
+        body = await response.json()
+        self.assertEqual((response.status, body["error"], body["quality"]["outcome"]), (503, "laya_socket_missing", "unknown"))
+        self.assertNotIn("result", body)
+        records = self.journal()
+        self.assertEqual(records["request"]["answer"]["outcome"], "unknown")
+        self.assertEqual(records["proposed"]["candidate_action"], "unknown")
+        events = list((self.base / "state" / "agent-tools" / "classifier-quality" / "events").glob("*-c-*.json"))
+        self.assertTrue(events)
+
+    async def test_a_degraded_model_that_fails_a_control_is_unknown_never_a_default_answer(self):
+        client = await self.live(lambda request: reply(ok=True, result={"answers": {"domain": {"choice": "light"}}},
+                                                       meta={"model": request["model"], "checkpoint": "c", "truncated": False}))
+        statuses = set()
+        for _ in range(12):  # an always-"light" model fails the control of the other polarity, whichever pair a request draws
+            response = await self.ask(client, questions=self.QUESTIONS, language="ru")
+            statuses.add((response.status, (await response.json())["quality"]["outcome"]))
+        self.assertEqual(statuses, {(502, "unknown")})
+
+    async def test_an_invalid_request_is_400_and_leaves_no_record(self):
+        client = await self.live()
+        for body in ({"fallback": "everything"}, {"model": "spanish"}, {"message": ""}):
+            response = await self.ask(client, questions=self.QUESTIONS, **body)
+            self.assertEqual(response.status, 400)
+        self.assertEqual(self.journal(), {})
+        self.assertEqual(self.requests, [])
+
+    async def test_fallback_none_is_accepted_and_keeps_the_chain_to_laya(self):
+        client = await self.live()
+        response = await self.ask(client, questions=self.QUESTIONS, language="ru", fallback="none")
+        self.assertEqual(response.status, 200)
+
+    async def test_a_caller_that_gives_up_still_gets_its_request_journaled(self):
+        client = await self.live()
+        gate = asyncio.Event()
+        real_exchange = self.adapter._laya_exchange
+
+        async def delayed(line):
+            await gate.wait()
+            return await real_exchange(line)
+
+        self.adapter._laya_exchange = delayed
+        task = asyncio.ensure_future(self.ask(client, questions=self.QUESTIONS, language="ru"))
+        await asyncio.sleep(0.1)
+        task.cancel()  # the quasar shadow's own 5 s timeout
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        gate.set()
+        await asyncio.wait_for(asyncio.gather(*self.adapter.laya_pending), 5)
+        self.assertEqual(self.journal()["request"]["answer"]["outcome"], "accepted")
+
+    async def test_the_cloud_tiers_are_off_until_the_owner_switches_them_on(self):
+        client = await self.live()
+        self.assertEqual(self.adapter._laya_jev_missing(), "disabled:aisis_laya_fallback")
+        self.assertEqual(self.adapter._laya_haiku_missing(), "disabled:aisis_laya_fallback")
+        await self.ask(client, questions=self.QUESTIONS, language="ru")
+        events = self.base / "state" / "agent-tools" / "classifier-quality" / "events"
+        self.assertFalse(events.exists() and list(events.glob("*.json")))  # switched off is not "missing"
+
+    async def test_the_later_tiers_say_what_they_lack_by_name(self):
+        client = await self.live(AISIS_LAYA_FALLBACK="jev,haiku")
+        self.assertEqual(self.adapter._laya_jev_missing(), "missing_env:vercel_jev_key")
+        self.assertEqual(self.adapter._laya_haiku_missing(), "missing_config:claude_primary_module")
+        await self.ask(client, questions=self.QUESTIONS, language="ru")
+        reasons = {json.loads(p.read_bytes())["reason_code"] for p in (self.base / "state" / "agent-tools" / "classifier-quality" / "events").glob("*.json")}
+        self.assertEqual(reasons, {"missing_env:vercel_jev_key", "missing_config:claude_primary_module"})
+
+    async def test_jev_answers_when_laya_cannot_and_is_recorded_as_jev(self):
+        import jev
+        client = await self.live(lambda request: None, VERCEL_JEV_KEY="test-only-key", AISIS_LAYA_FALLBACK="jev")
+
+        async def post(url, headers, body):
+            import laya_quality
+            expected = {case.text: case.expected for case in laya_quality.VOICE_COMMAND_DOMAIN.controls}
+            return 200, {"answers": [{"name": "domain", "choice": expected.get(body["input"], "volume"), "confidence": 0.9}]}
+
+        self.adapter.laya_jev = jev.JevClient(post, "test-only-key", timeout=1.0)
+        response = await self.ask(client, questions=self.QUESTIONS, language="ru")
+        body = await response.json()
+        self.assertEqual((response.status, body["quality"]["tier"], body["quality"]["provider"], body["quality"]["fallback"]),
+                         (200, "jev", "jev", True))
+        self.assertEqual(body["result"]["answers"]["domain"]["choice"], "volume")
+        self.assertEqual(self.journal()["request"]["model"]["provider"], "jev")
+
+    async def test_the_source_identity_is_computed_at_startup_not_on_the_first_request(self):
+        await self.client()
+        self.assertEqual(sorted(self.adapter.laya_source), ["code_hash", "commit", "release"])
+
+    async def test_shutdown_waits_a_bounded_time_for_requests_in_flight_then_cancels_them(self):
+        import laya_quality
+        await self.client()
+        stuck = asyncio.ensure_future(asyncio.sleep(3600))
+        self.adapter.laya_pending.add(stuck)
+        with mock.patch.object(laya_quality, "SHUTDOWN_WAIT_S", 0.05):
+            await asyncio.wait_for(self.adapter._close_background(), 5)
+        self.assertTrue(stuck.cancelled())
+
+    async def test_shutdown_lets_a_request_that_finishes_in_time_complete(self):
+        await self.client()
+        quick = asyncio.ensure_future(asyncio.sleep(0.01, result="done"))
+        self.adapter.laya_pending.add(quick)
+        await self.adapter._close_background()
+        self.assertEqual(quick.result(), "done")
 
 
 def echo(request):

@@ -1,0 +1,115 @@
+{
+  "answer": {
+    "answering_call_id": "0d015c1e-8a3b-4f6d-9e2a-7b4c1d8f0001",
+    "answering_tier": "laya",
+    "outcome": "accepted",
+    "primary_answered": true,
+    "questions_answered": 2,
+    "questions_asked": 2,
+    "typed_reason": null
+  },
+  "attempts": [
+    {
+      "call_id": "0d015c1e-8a3b-4f6d-9e2a-7b4c1d8f0001",
+      "checkpoint": "multilingual",
+      "cost": {"micro_usd": 0, "status": "known"},
+      "engine": "laya-classic",
+      "latency_ms": 212,
+      "model": "convaiinnovations/laya-multilingual",
+      "provider": "laya",
+      "questions": 2,
+      "role": "main",
+      "stage": 0,
+      "status": "answered",
+      "tier": "laya"
+    },
+    {
+      "call_id": "0d025c1e-8a3b-4f6d-9e2a-7b4c1d8f0002",
+      "checkpoint": "multilingual",
+      "control_result": "pass",
+      "cost": {"micro_usd": 0, "status": "known"},
+      "latency_ms": 190,
+      "model": "convaiinnovations/laya-multilingual",
+      "provider": "laya",
+      "questions": 1,
+      "role": "control_positive",
+      "stage": 0,
+      "status": "answered",
+      "tier": "laya"
+    },
+    {
+      "call_id": "0d035c1e-8a3b-4f6d-9e2a-7b4c1d8f0003",
+      "checkpoint": "multilingual",
+      "control_result": "pass",
+      "cost": {"micro_usd": 0, "status": "known"},
+      "latency_ms": 188,
+      "model": "convaiinnovations/laya-multilingual",
+      "provider": "laya",
+      "questions": 1,
+      "role": "control_negative",
+      "stage": 0,
+      "status": "answered",
+      "tier": "laya"
+    },
+    {
+      "call_id": "0d045c1e-8a3b-4f6d-9e2a-7b4c1d8f0004",
+      "cost": {"micro_usd": 0, "status": "known"},
+      "fallback_reason": "preflight",
+      "model": "jev",
+      "provider": "jev",
+      "reason_code": "missing_env:ai_gateway_api_key",
+      "role": "main",
+      "stage": 1,
+      "status": "unavailable",
+      "tier": "jev"
+    },
+    {
+      "call_id": "0d055c1e-8a3b-4f6d-9e2a-7b4c1d8f0005",
+      "cost": {"micro_usd": 0, "status": "known"},
+      "model": "claude-haiku-5-5",
+      "provider": "anthropic",
+      "reason_code": "not_needed_first_tier_accepted",
+      "role": "main",
+      "stage": 2,
+      "status": "skipped",
+      "tier": "haiku"
+    }
+  ],
+  "component": "task-cli",
+  "domain": "task-intake",
+  "eligibility": "eligible",
+  "identity": {
+    "prompt_hash": "8772a8438399f4b16b5b8c55d9c20160aaf9447ad03f18d964f5112ae868a672",
+    "runner": {"job_ref": null, "kind": "production"}
+  },
+  "input_hash": "6712b7e79e6307db69138cdab879a86b9906dcb79608ea28611c7d9461f6f703",
+  "language": "ru",
+  "model": {
+    "checkpoint": "multilingual",
+    "engine": "laya-classic",
+    "immutable_revision": "unknown",
+    "name": "convaiinnovations/laya-multilingual",
+    "provider": "laya"
+  },
+  "phase": "request",
+  "record_id": "1e5799fd-7a4f-58a3-aded-b7e8cfbe114e",
+  "request_id": "7c1f0a52-3b6e-4d0e-9a41-2f8d5c6b7e10",
+  "schema_version": 1,
+  "source": {
+    "code_hash": "9695c58727cd1d50f63f90d0bbfbcb17769e413c1b51ba5cc426f9a91ed7cc39",
+    "commit": "b2507f404f67a2cb1d0df1e5dbe149d32128e176",
+    "diff_hash": null,
+    "release": "0.37.0"
+  },
+  "timestamp": "2026-11-24T20:00:00.000Z",
+  "totals": {
+    "cost": {
+      "audits": {"micro_usd": null, "status": "unknown"},
+      "controls": {"micro_usd": 0, "status": "known"},
+      "failed_tiers": {"micro_usd": 0, "status": "known"},
+      "main": {"micro_usd": 0, "status": "known"}
+    },
+    "latency_ms": 590
+  },
+  "unknown_reasons": {"model.immutable_revision": "route_reports_no_revision"}
+}

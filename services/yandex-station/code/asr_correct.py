@@ -258,26 +258,29 @@ class Corrector:
         self._credentials: list = []
         self._loaded = 0.0
         self._cooldown: dict[str, float] = {}
+        self._model_cooldown: dict[str, float] = {}  # `ask_model` callers: a failing side model must not cool the keys `correct()` uses
         self._next = 0
 
-    def _keys(self) -> list:
+    def _keys(self, cooldown: dict[str, float]) -> list:
         if not self._credentials or self._now() - self._loaded > 300:
             self._credentials = self._load()
             self._loaded = self._now()
-        live = [c for c in self._credentials if self._cooldown.get(c.fingerprint, 0) <= self._now()]
+        live = [c for c in self._credentials if cooldown.get(c.fingerprint, 0) <= self._now()]
         if not live:
             return []
         self._next = (self._next + 1) % len(live)
         return live[self._next:] + live[:self._next]
 
-    async def _ask(self, settings: dict[str, Any], system: str, message: str, budget: float) -> tuple[str, str]:
-        """(model reply, status). Never raises: any failure is a status and the caller keeps the raw text."""
+    async def _ask(self, settings: dict[str, Any], system: str, message: str, budget: float,
+                   cooldowns: dict[str, float] | None = None) -> tuple[str, str]:
+        """(model reply, status). Never raises: any failure is a status and the caller keeps the raw text. `cooldowns` defaults to `correct()`'s map."""
+        cooldowns = self._cooldown if cooldowns is None else cooldowns
         deadline = self._now() + budget
         body = {"model": settings["model"], "max_tokens": 48, "temperature": 0,
                 "system": [{"type": "text", "text": system,
                             "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
                 "messages": [{"role": "user", "content": message}]}
-        for credential in self._keys():
+        for credential in self._keys(cooldowns):
             remaining = deadline - self._now()
             if remaining < 0.15:
                 return "", "timeout"
@@ -292,9 +295,17 @@ class Corrector:
                 return "", "timeout"
             except Exception as error:  # claude_primary.Failover carries a cooldown; anything else is transport
                 cooldown = float(getattr(error, "cooldown_seconds", 30))
-                self._cooldown[credential.fingerprint] = self._now() + min(cooldown, 600)
+                cooldowns[credential.fingerprint] = self._now() + min(cooldown, 600)
                 LOG.warning("asr_correct key_failed code=%s cooldown=%ss", type(error).__name__, int(cooldown))
         return "", "no_key"
+
+    async def ask_model(self, model: str, system: str, message: str, budget: float) -> tuple[str, str]:
+        """One call of `model` through the same credentials and transport as `correct()`, with its own key cooldowns: (reply text, status).
+
+        A failing call here never cools the keys `correct()` uses, and the reverse. Status is `ok`, `timeout` or `no_key`; it never
+        raises. The classifier fallback tier (laya_quality.py) uses it.
+        """
+        return await self._ask({"model": model}, system, message, budget, self._model_cooldown)
 
     async def correct(self, text: str, alternatives: list[str] | None = None, recent: list[dict] | None = None,
                       source: str = "") -> dict[str, Any]:
