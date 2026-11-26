@@ -70,7 +70,7 @@ class Verb:
 PAUSE = Verb("media_pause", ("поставь {n} на паузу", "пауза {n}", "{n} на паузу", "приостанови {n}"), "поставить {n} на паузу", ("paused", "idle"),
              "{N} на паузе.", nameless=True)
 CONTINUE = Verb("media_play", ("продолжи {n}", "продолжи воспроизведение {n}", "возобнови {n}", "включи воспроизведение {n}"), "продолжить {n}",
-                ("playing", "buffering"), "{N}: воспроизведение идёт.", nameless=True)
+                ("playing", "buffering"), "{N} продолжается.", nameless=True)
 OFF = Verb("turn_off", ("выключи {n}", "отключи {n}", "вырубай {n}"), "выключить {n}", ("off",), "{N} {off}.")
 ON = Verb("turn_on", ("включи {n}", "вруби {n}", "запусти {n}"), "включить {n}", ("on", "playing", "idle", "paused"), "{N} {on}.")
 
@@ -132,8 +132,9 @@ def entities_from(states: object) -> tuple[Entity, ...]:
         if state["entity_id"].startswith(_PLAYER_OWN) or ha_actions.JUNK_LIGHT.search(state["entity_id"]):
             continue
         names = voice_vocab.spoken_entity_names([state])
-        if names:
-            found.append(Entity(state["entity_id"], names[0], state["state"]))
+        name = names[0] if names else ""
+        if name or state["entity_id"].startswith("media_player."):   # a player with a technical name is still «the one that plays»
+            found.append(Entity(state["entity_id"], name, state["state"]))
     return tuple(found)
 
 
@@ -165,8 +166,8 @@ class HaHome:
 
     @staticmethod
     def _said(call: HaCall) -> str:
-        name = call.name[:1].upper() + call.name[1:]
-        return call.done.format(N=name, on=state_word(call.name, True), off=state_word(call.name, False))
+        name = call.name or "воспроизведение"
+        return call.done.format(N=name[:1].upper() + name[1:], on=state_word(name, True), off=state_word(name, False))
 
 
 # ── nearness of words ──────────────────────────────────────────────────────────
@@ -335,6 +336,8 @@ class Clarifier:
             if self._room_conflict(heard, name_words):
                 continue
             for verb in _verbs(entity):
+                if not name and not verb.nameless:
+                    continue   # a device whose name nobody can say is only ever «the one that plays»
                 best = 0.0
                 for template in verb.phrases:
                     score, missing = nearness(self.words, heard, tokens(template.format(n=name)), name_words)
@@ -343,9 +346,9 @@ class Clarifier:
                     best = max(best, score - (_NAME_MISSING if missing else 0.0))
                 if best <= 0:
                     continue
-                phrase = verb.phrases[0].format(n=name)
+                phrase = " ".join(verb.phrases[0].format(n=name).split())
                 call = HaCall(entity.domain, verb.service, entity.entity_id, entity.name, verb.expect, verb.done)
-                found.append(Option(phrase, verb.ask.format(n=accusative(name)), best, "home", entity.entity_id,
+                found.append(Option(phrase, " ".join(verb.ask.format(n=accusative(name)).split()), best, "home", entity.entity_id,
                                     _says(phrase, tuple(name_words)), call))
         return found
 
@@ -375,7 +378,8 @@ class Clarifier:
         ranked = [(score, option) for score, option in scored if score >= floor]
         picked: list[Option] = []
         for score, option in ranked:
-            if any(option.phrase == other.phrase or (option.call and other.call and option.call.entity_id == other.call.entity_id) for other in picked):
+            if any(option.phrase == other.phrase or option.ask == other.ask
+                   or (option.call and other.call and option.call.entity_id == other.call.entity_id) for other in picked):
                 continue
             if picked and (len(picked) == 2 or ranked[0][0] - score > SECOND_WITHIN or option.ask.startswith(MEANT)):
                 continue

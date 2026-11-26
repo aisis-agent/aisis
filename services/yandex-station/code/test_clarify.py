@@ -121,6 +121,18 @@ class OptionTests(unittest.TestCase):
         both = options(clarifier(TV), "поставь на паузу помоги", floor=0.3)
         self.assertFalse(len(both) == 2 and both[1].ask.startswith(clarify.MEANT))
 
+    def test_a_player_with_a_technical_name_is_still_the_one_that_plays(self):
+        """The real catalog (2026-11-26): media_player.televizor is «Chromecast — пульт», a name nobody says aloud."""
+        states = [{"entity_id": "media_player.televizor", "state": "playing", "attributes": {"friendly_name": "Chromecast — пульт"}},
+                  {"entity_id": "light.ultra", "state": "on", "attributes": {"friendly_name": "Chromecast лампа"}},
+                  {"entity_id": "media_player.station", "state": "paused", "attributes": {"friendly_name": "Станция Мини Гостиная"}}]
+        clar = clarifier(*clarify.entities_from(states))
+        found = options(clar, "Ставьте их на паузу.")
+        self.assertEqual([(o.ask, o.call.entity_id) for o in found], [("поставить на паузу", "media_player.televizor")])
+        self.assertEqual(clarify.Clarifier.question(found), "Поставить на паузу?")
+        self.assertEqual(clarify.HaHome._said(found[0].call), "Воспроизведение на паузе.")
+        self.assertEqual(options(clar, "выключи"), [])      # a device nobody can name is never switched off by a guess
+
 
 class WordingTests(unittest.TestCase):
     def test_a_feminine_name_is_a_direct_object(self):
