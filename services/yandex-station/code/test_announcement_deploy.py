@@ -272,7 +272,7 @@ runpy.run_path(str(entry), run_name='__main__')   # a module the entry file impo
 
 class UnitCompanionTests(unittest.TestCase):
     """`unit` installs one entry file, so the sibling modules it newly imports must travel with it and leave with it on a rollback."""
-    STT_IMPORTS = "import second_opinion\nimport spotter_clips\nimport voiceclips\nVERSION = 'new'\n"
+    STT_IMPORTS = "import second_opinion\nimport spotter_clips\nimport voiceclips\nimport ha_events\nVERSION = 'new'\n"
 
     def setUp(self):
         AdapterDeploymentTests.setUp(self)
@@ -367,11 +367,11 @@ class UnitCompanionTests(unittest.TestCase):
         self.assertEqual((cache / "other_module.cpython-fixture.pyc").read_bytes(), b"unrelated")
 
     def stt_modules(self, tag):
-        return {f"{name}.py": f"VERSION = '{tag} {name}'\n" for name in ("second_opinion", "spotter_clips", "voiceclips")}
+        return {f"{name}.py": f"VERSION = '{tag} {name}'\n" for name in ("second_opinion", "spotter_clips", "voiceclips", "ha_events")}
 
     def test_stt_ships_the_second_opinion_and_the_recorder_modules_its_new_code_calls(self):
         (self.app / "stt_wyoming.py").write_text(self.old)
-        for name in ("spotter_clips.py", "voiceclips.py"):
+        for name in ("spotter_clips.py", "voiceclips.py", "ha_events.py"):
             (self.app / name).write_text("VERSION = 'old'\n")
         result = self.deploy_unit("stt", "stt_wyoming.py", self.STT_IMPORTS, **self.stt_modules("new"))
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -203,6 +203,30 @@ directory the quasar containers mount read-only), through one client, `code/ha_c
 - **Advanced (folded on the page).** An address typed by hand (the login still happens on Home Assistant's page) and a pasted long-lived access
   token, for a network where mDNS or the login flow cannot run. The token is checked against `/api/config` before it is kept and is never refreshed.
 
+## TV auto-pause: a Home Assistant automation (the speaker only says «listening» and «dialog ended»)
+
+Pausing the TV while the speaker listens and resuming it afterwards is Home Assistant's own automation; AISIS holds no state and no timer for it.
+AISIS fires two events through the shared client (`code/ha_events.py`): `aisis_listening` when a spoken turn opens (the speech gateway) and
+`aisis_dialog_ended` when the dashboard's log follower sees `Dialog <id> ended`. Both calls have a 1 s timeout, are logged on failure and never delay
+the turn. The automation (`ha-automations/tv_autopause.json`, installed through the config API by `code/ha_autopause.py`, idempotent):
+
+- pauses only a TV that is `playing` (unknown, unavailable, down Home Assistant: nothing);
+- resumes only what it paused, only if the TV is still `paused`, only if the helper `input_boolean.tv_autopause_resume` is on;
+- does not undo the owner: the player going to any active state while held, or a service call that is not its own and NAMES the player or its
+  pause/play scripts by entity id (voice command, remote, UI) releases the hold (a call by area or device id is not seen); its own calls are recognised by the context of the helper `tv_autopause_we_paused`;
+- a new `aisis_listening` inside the 1.5 s grace cancels the pending resume (`mode: restart`); with no `aisis_dialog_ended` it resumes
+  300 s after the last `aisis_listening`; a dialog end counts only when its dialog started at most 3 s after that listening and did not end
+  before it (a text command or the previous dialog's late end does not resume the TV; the events carry `at`, `started_at`, `ended_at`);
+- the hold is armed before the pause is sent and the pause/resume scripts are only started (`script.turn_on`), so a fast dialog end is not lost
+  and a restart of the run cannot cut a TV call in half. Limit: a Home Assistant restart or automation reload drops the run and its 300 s timer
+  (the legacy `recover()` has no counterpart); the TV then stays paused until the next activation or the owner;
+- master switch: `input_boolean.tv_autopause_enabled` (install leaves it off). `python3 code/ha_autopause.py enable` turns it on, `disable` off.
+
+The legacy `code/tvpause.py` stays only until the automation is confirmed in use: while its setting `enabled` is true the events are NOT fired
+(exactly one of the two can act); with it disabled (the host's `tv_pause.json`) the events flow. `code/ha_autopause_proof.py` proves the automation on
+an `input_select` standing in for the TV (never the real one) and removes everything it created; it changes Home Assistant's runtime config, so run
+it under the deploy lock and finish with `POST /api/config/core/check_config`.
+
 ## Ops runbook
 
 - **Deploy units**: `scripts/install-systemd-units.sh` (repo root) copies every
@@ -565,7 +589,7 @@ services/yandex-station/bluegreen/deploy.sh unit adapter /path/to/reviewed/adapt
 ```
 
 The sibling modules the supplied file imports must be next to it: for the adapter `announcement_cache.py` and `hypothesis_store.py`,
-for `unit stt /path/to/reviewed/stt_wyoming.py` `second_opinion.py`, `spotter_clips.py` and `voiceclips.py`. The command checks
+for `unit stt /path/to/reviewed/stt_wyoming.py` `second_opinion.py`, `spotter_clips.py`, `voiceclips.py` and `ha_events.py` (its `ha_client.py` is already beside the dashboard). The command checks
 the sources, backs up every installed file it replaces, installs the companions first, and restarts the unit. A failed health
 check restores the previous files (a module the previous version did not have is removed). Only the stale bytecode of the
 replaced files is invalidated; unrelated modules and files are left alone. A failed restore or restart identifies the retained

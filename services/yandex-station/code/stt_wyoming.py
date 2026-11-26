@@ -26,6 +26,7 @@ from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
 import dsp_settings
 import extra_dict
+import ha_events
 import hint_echo
 import speech_frontend
 import spotter_clips
@@ -560,7 +561,7 @@ class STTGateway:
     SPEAKER_RETRY_AFTER = 60.0
 
     def __init__(self, env=None, vad_factory=None, recognizer=transcribe, verifier=None, tv=None, archive=True, domain_catalog=None, clock=time.monotonic,
-                 second_opinion=None):
+                 second_opinion=None, fire_event=None):
         self.env = dict(os.environ) if env is None else env
         self.tuning = Tuning.from_env(self.env)
         self.clock = clock            # the stream's age (wake_window.Gate); a test owns it
@@ -572,7 +573,8 @@ class STTGateway:
             voice_vocab.CatalogCache(lambda: voice_vocab.fetch_catalog(
                 self.env.get("AISIS_HACLI_URL", "http://127.0.0.1:8795"), voice_vocab.library_artists))
             if self.env.get("AISIS_STT_DOMAIN_CONTEXT") == "1" else None)
-        self.tv = tv                  # tvpause.TvPause: pause the TV when the station starts listening
+        self.tv = tv                  # tvpause.TvPause (legacy): pause the TV when the station starts listening
+        self.fire_event = fire_event  # fire(event, data): the `aisis_listening` event of the Home Assistant auto-pause automation
         self.slots = asyncio.Semaphore(self.SLOTS)
         self.verifier = verifier
         self.archive_enabled = archive
@@ -637,17 +639,24 @@ class STTGateway:
 
     def tv_activation(self):
         """Activation = a spoken turn's websocket just opened (wake word/spotter fired on the station).
-        The TV call runs in a worker thread: the STT session never waits for Home Assistant."""
-        if self.tv is None:
+        Exactly one path acts: the legacy tvpause while its settings say enabled, otherwise the `aisis_listening` event for the Home Assistant
+        automation. All of it, the settings file read included, runs in a worker thread: the STT session never waits for Home Assistant or a disk."""
+        if self.tv is None and self.fire_event is None:
             return
-        job = asyncio.get_running_loop().run_in_executor(None, self.tv.activation)
+        job = asyncio.get_running_loop().run_in_executor(None, self.activate_tv, time.time())
         self.speaker_background.add(job)
         job.add_done_callback(self.tv_done)
+
+    def activate_tv(self, at):
+        if self.tv is not None and self.tv.settings()["enabled"]:
+            self.tv.activation()
+        elif self.fire_event is not None:
+            self.fire_event(ha_events.LISTENING, {"at": at})
 
     def tv_done(self, job):
         self.speaker_background.discard(job)
         if not job.cancelled() and job.exception() is not None:
-            LOG.warning("tv_pause_failed class=%s", type(job.exception()).__name__)
+            LOG.warning("tv_activation_failed class=%s", type(job.exception()).__name__)
 
     def db_path(self):
         return (self.env.get("AISIS_DIALOGS_DB") or os.environ.get("AISIS_DIALOGS_DB")
@@ -1308,4 +1317,4 @@ if __name__ == "__main__":
     import tvpause
     tv = tvpause.default()
     tv.recover()
-    web.run_app(STTGateway(tv=tv).app(), host="127.0.0.1", port=int(os.environ.get("AISIS_STT_PORT", "31121")), access_log=None)
+    web.run_app(STTGateway(tv=tv, fire_event=ha_events.fire).app(), host="127.0.0.1", port=int(os.environ.get("AISIS_STT_PORT", "31121")), access_log=None)

@@ -88,7 +88,7 @@ jobs:
           python3 -m intent_grammar compile --check
       - name: Home Assistant client (mDNS discovery, standard sign-in, token refresh, the dashboard Connect page)
         working-directory: services/yandex-station/code
-        run: python3 -m unittest test_ha_client test_ha_connect
+        run: python3 -m unittest test_ha_client test_ha_connect test_ha_events test_ha_autopause test_ha_autopause_api
       - name: ha-cli command verification (fake Home Assistant, journal, trace lines, isolated clip replay)
         working-directory: services/yandex-station/code
         run: python3 -m unittest test_ha_verify test_ha_action_log test_hacli test_hacli_response_calls test_hacli_verify test_ha_trace_view test_ha_replay

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Control center: SPA on :8781. /events.json + /api/* backend, no secrets in frontend."""
-import re, subprocess, html, json, time, os, urllib.request, threading, http.client
+import functools, re, subprocess, html, json, time, os, urllib.request, threading, http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 import dialogstore
 import ha_action_log
 import ha_client
 import ha_connect
+import ha_events
 import session_pages
 import trace_view
 import voiceclips
@@ -1250,6 +1251,14 @@ if __name__ == "__main__":
     ha_connect.adopt_environment(HA_CLIENT.store, os.environ)    # a token configured before the connection store existed is kept as the connection
     tv = tvpause.default()
     tv.recover()
-    INGESTER = dialogstore.Ingester(on_log=tv.observe)
+    dialog_end = ha_events.DialogEndFollower(functools.partial(ha_events.fire, client=HA_CLIENT), lambda: tv.settings()["enabled"])
+
+    def on_log(ts, message):
+        for follow in (tv.observe, dialog_end.observe):    # the legacy follower failing must not swallow the event, nor the other way round
+            try:
+                follow(ts, message)
+            except Exception as err:
+                print(f"dialog log follower {follow.__qualname__} failed: {type(err).__name__}: {err}", file=sys.stderr, flush=True)
+    INGESTER = dialogstore.Ingester(on_log=on_log)
     INGESTER.start()
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()

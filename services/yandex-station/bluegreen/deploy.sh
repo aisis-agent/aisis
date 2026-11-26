@@ -303,7 +303,7 @@ cmd_adopt() {
 unit_companion_candidates() {
   case $1 in
     adapter) echo "announcement_cache.py hypothesis_store.py laya_route.py laya_quality.py classifier_journal.py asr_correct.py" ;;
-    stt) echo "second_opinion.py spotter_clips.py voiceclips.py" ;;
+    stt) echo "second_opinion.py spotter_clips.py voiceclips.py ha_events.py" ;;
     ha-cli) echo "ha_verify.py ha_action_log.py" ;;
   esac
 }

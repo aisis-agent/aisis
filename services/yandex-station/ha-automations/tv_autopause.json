@@ -1,0 +1,105 @@
+{
+  "version": 2,
+  "about": "TV auto-pause (ticket #320): pause the TV while the speaker listens, resume it after the dialog. Home Assistant's own automation: nothing of AISIS holds state or a timer. A helper is created in its new_state only when it did not exist. Installed through the config API by code/ha_autopause.py; placeholders written with a dollar sign and braces are filled from its Spec (a whole-string placeholder keeps the value's type).",
+  "helpers": [
+    {"kind": "input_boolean", "id": "${slug}_enabled", "name": "${title} enabled", "new_state": "off", "note": "master switch; off = no pause at all"},
+    {"kind": "input_boolean", "id": "${slug}_resume", "name": "${title} resume", "new_state": "on", "note": "off = pause, but never resume"},
+    {"kind": "input_boolean", "id": "${slug}_we_paused", "name": "${title} we paused", "new_state": "off", "note": "state of the automation itself: it paused the TV and still holds it"}
+  ],
+  "automations": [
+    {
+      "id": "${slug}_main",
+      "alias": "${title} main",
+      "description": "The listening event pauses a PLAYING TV (anything else, unknown or unavailable: nothing). The wait for the dialog end is registered in parallel with the pause, from the first action of the run, so no end event can arrive before the waiter exists however long the helper and script calls take. The hold is armed before the pause is sent (off then on, so the helper's context is this run's even when a stale hold was left on) and the pause script is only STARTED (script.turn_on), so a restart cannot cut a TV call in half. A Home Assistant restart or reload drops the run and its timer: the TV stays paused until the next activation or the owner. The run waits for a dialog end that belongs to this activation (it started within 3 s of it either way and did not end before it, so the end of an earlier dialog is ignored; a dialog that ended within 3 s of a re-activation is the one known case it cannot tell apart), for at most max_hold_s since the LAST listening (the deadline is fixed when the run starts) (a new run restarts this one, which is also what cancels a resume pending in the grace). After the grace it waits up to 30 s for the pause to settle (a slow pause must not leave the TV paused with the hold released), then resumes only what it paused, only if the TV is paused and the resume switch is on.",
+      "mode": "restart",
+      "max_exceeded": "silent",
+      "triggers": [{"trigger": "event", "event_type": "${listening_event}"}],
+      "conditions": [{"condition": "state", "entity_id": "input_boolean.${slug}_enabled", "state": "on"}],
+      "actions": [
+        {"variables": {"listened_at": "{{ trigger.event.data.at | float(0) }}", "hold_until": "{{ as_timestamp(now()) + ${max_hold_s} }}"}},
+        {
+          "parallel": [
+            {
+              "sequence": [
+                {
+                  "repeat": {
+                    "sequence": [
+                      {
+                        "wait_for_trigger": [{"trigger": "event", "event_type": "${ended_event}"}],
+                        "timeout": "{{ [hold_until - as_timestamp(now()), 0.1] | max }}",
+                        "continue_on_timeout": true
+                      }
+                    ],
+                    "until": [
+                      {
+                        "condition": "template",
+                        "value_template": "{% if wait.trigger is none or listened_at == 0 %}true{% else %}{% set d = wait.trigger.event.data %}{% set s = d.started_at | float(listened_at) %}{{ (s - listened_at) | abs <= 3 and (d.ended_at | float(listened_at)) >= listened_at }}{% endif %}"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "sequence": [
+                {
+                  "if": [{"condition": "state", "entity_id": "${player}", "state": "playing"}],
+                  "then": [
+                    {"action": "input_boolean.turn_off", "target": {"entity_id": "input_boolean.${slug}_we_paused"}},
+                    {"action": "input_boolean.turn_on", "target": {"entity_id": "input_boolean.${slug}_we_paused"}},
+                    {"action": "script.turn_on", "target": {"entity_id": "${pause_script}"}}
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "if": [{"condition": "state", "entity_id": "input_boolean.${slug}_we_paused", "state": "on"}],
+          "then": [
+            {"delay": {"milliseconds": "${grace_ms}"}},
+            {
+              "wait_template": "{{ is_state('${player}', 'paused') }}",
+              "timeout": 30,
+              "continue_on_timeout": true
+            },
+            {
+              "if": [{"condition": "state", "entity_id": "input_boolean.${slug}_we_paused", "state": "on"}],
+              "then": [
+                {"action": "input_boolean.turn_off", "target": {"entity_id": "input_boolean.${slug}_we_paused"}},
+                {
+                  "if": [
+                    {"condition": "state", "entity_id": "input_boolean.${slug}_resume", "state": "on"},
+                    {"condition": "state", "entity_id": "${player}", "state": "paused"}
+                  ],
+                  "then": [{"action": "script.turn_on", "target": {"entity_id": "${play_script}"}}]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "${slug}_owner",
+      "alias": "${title} owner action",
+      "description": "While the main automation holds a pause, the owner's own action on the TV (the player went to any active state, or a service call that is not ours NAMES the player or its pause/play scripts by entity id: a voice command, the remote, the UI) releases the hold, so nothing is resumed. Our own calls are recognised by the context of the helper we_paused (the run that paused sets it).",
+      "mode": "queued",
+      "max": 10,
+      "max_exceeded": "silent",
+      "triggers": [
+        {"trigger": "state", "entity_id": "${player}", "not_to": ["paused", "unavailable", "unknown"], "id": "state"},
+        {"trigger": "event", "event_type": "call_service", "event_data": {"domain": "${player_domain}"}, "id": "call"},
+        {"trigger": "event", "event_type": "call_service", "event_data": {"domain": "script"}, "id": "call"}
+      ],
+      "conditions": [
+        {"condition": "state", "entity_id": "input_boolean.${slug}_we_paused", "state": "on"},
+        {
+          "condition": "template",
+          "value_template": "{% set watch = ${watch} %}{% set own = states.input_boolean.${slug}_we_paused.context.id %}{% if trigger.id == 'state' %}true{% else %}{% set d = trigger.event.data %}{% set ids = d.service_data.entity_id | default([], true) %}{% set ids = [ids] if ids is string else ids %}{{ trigger.event.context.id != own and ((ids | select('in', watch) | list | count > 0) or (d.domain == 'script' and ('script.' ~ d.service) in watch)) }}{% endif %}"
+        }
+      ],
+      "actions": [{"action": "input_boolean.turn_off", "target": {"entity_id": "input_boolean.${slug}_we_paused"}}]
+    }
+  ]
+}
