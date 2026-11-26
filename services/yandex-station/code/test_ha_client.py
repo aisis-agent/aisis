@@ -132,6 +132,33 @@ class DiscoveryTests(unittest.TestCase):
         found = ha_client.discover(hint="http://127.0.0.1:9", uuid=UUID, window=0.4, group=mdns.group, hostnames=())
         self.assertEqual([f.url for f in found], [self.ha.url])
 
+    def test_every_address_of_an_announcement_is_tried(self):
+        service = ha_client.Service("Home Assistant", "ha.local", self.ha.port, ("127.0.0.2", "127.0.0.1"), {"uuid": UUID})
+        with unittest.mock.patch.object(ha_client, "browse", return_value=[service]):
+            found = ha_client.discover(window=0.1, hostnames=())
+        self.assertEqual([f.url for f in found], [self.ha.url])
+
+    def test_a_malformed_fallback_address_does_not_abort_discovery(self):
+        response = ha_fakes.mdns_response("_home-assistant._tcp.local", "Home Assistant", "ha.local", self.ha.port, "127.0.0.1",
+                                          {"uuid": UUID, "internal_url": "http://127.0.0.1:9", "base_url": "not-a-url"})
+        mdns = ha_fakes.FakeMdns(response)
+        self.addCleanup(mdns.close)
+        self.assertEqual([f.url for f in ha_client.discover(window=0.4, group=mdns.group, hostnames=())], [self.ha.url])
+
+    def test_one_announcement_without_an_instance_id_is_one_server(self):
+        response = ha_fakes.mdns_response("_home-assistant._tcp.local", "Home Assistant", "ha.local", self.ha.port, "127.0.0.1",
+                                          {"internal_url": self.ha.url, "base_url": self.ha.url.replace("127.0.0.1", "localhost")})
+        mdns = ha_fakes.FakeMdns(response)
+        self.addCleanup(mdns.close)
+        self.assertEqual(len(ha_client.discover(window=0.4, group=mdns.group, hostnames=())), 1)
+
+    def test_the_public_address_is_still_offered_when_the_local_one_does_not_answer(self):
+        response = ha_fakes.mdns_response("_home-assistant._tcp.local", "Home Assistant", "ha.local", 9, "127.0.0.1",
+                                          {"uuid": UUID, "base_url": self.ha.url, "internal_url": "http://127.0.0.1:9"})
+        mdns = ha_fakes.FakeMdns(response)
+        self.addCleanup(mdns.close)
+        self.assertEqual([f.url for f in ha_client.discover(window=0.4, group=mdns.group, hostnames=())], [self.ha.url])
+
     def test_the_local_address_is_offered_before_the_public_one(self):
         response = ha_fakes.mdns_response("_home-assistant._tcp.local", "Home Assistant", "ha.local", self.ha.port, "127.0.0.1",
                                           {"uuid": UUID, "base_url": "http://127.0.0.1:9", "internal_url": self.ha.url})

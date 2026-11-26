@@ -31,12 +31,18 @@ Response = tuple[int, dict[str, str], str]
 
 def adopt_environment(store: ha_client.Store, env: Mapping[str, str]) -> bool:
     """The long-lived token an installation was configured with before the connection store existed (`HA_URL`, `HA_TOKEN` of the dashboard's
-    environment file) becomes the stored connection once, so a deploy does not leave Home Assistant disconnected until somebody signs in. A
-    stored connection is never replaced. True when it adopted."""
+    environment file) becomes the stored connection once, so a deploy does not leave Home Assistant disconnected until somebody signs in. It
+    happens once: a marker beside the store remembers it, so a Disconnect is not undone by the next start. A stored connection is never
+    replaced. True when it adopted."""
     url, token = (env.get("HA_URL") or "").strip().rstrip("/"), (env.get("HA_TOKEN") or "").strip()
-    if not url or not token or store.load() is not None:
+    marker = store.path.with_name(store.path.name + ".env-adopted")      # per store file: two stores in one directory do not share it
+    if not url or not token or marker.exists():
+        return False
+    if store.load() is not None:        # a connection an earlier version adopted: remember it, so its Disconnect stays final too
+        marker.write_text("adopted\n")
         return False
     store.save(ha_client.Connection(url, "long_lived", token, None, None, None, time.time()))
+    marker.write_text("adopted\n")
     return True
 
 
@@ -246,6 +252,7 @@ class Onboarding:
         previous = self.client.store.load()
         self.client.store.save(ha_client.Connection(url, "long_lived", token, None, known.uuid if known else None,
                                                     name if isinstance(name, str) else None, self._clock()))
-        if previous is not None and previous.kind == "oauth":
-            ha_client.revoke(previous.url, previous.secret)     # the login grant it replaces must not stay valid
-        return 303, {"Location": "/ha?connected=1", "Content-Type": "text/plain; charset=utf-8"}, ""
+        location = "/ha?connected=1"
+        if previous is not None and previous.kind == "oauth" and not ha_client.revoke(previous.url, previous.secret):   # the grant it replaces must not stay valid
+            location += "&unrevoked=1"
+        return 303, {"Location": location, "Content-Type": "text/plain; charset=utf-8"}, ""
