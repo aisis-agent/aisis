@@ -543,18 +543,20 @@ def user_prompt_preview(body):
 
 # ---------- TV pause on activation (tvpause.py) ----------
 def tv_state():
+    """The card of the pause. `entities`/`live` are the media players of the speaker's room the rule would act on, with their state now
+    (the built UI lists them as before); `room` is that room, None with the reason in `why` when it is not known."""
     cfg = tvpause.load_settings()
-    live = {}
-    for entity in cfg["entities"]:
-        state, stale = tvpause.HaCli().state(entity)
-        live[entity] = None if state is None else (state + (" (кэш)" if stale else ""))
-    st = tvpause.default().status()
-    return {**cfg, "live": live, "paused": sorted(st["paused"]), "events": st["events"][-8:],
+    tv = tvpause.default()
+    players = tv.ha.players()
+    room = tvpause.discover(players, None, cfg["exclude"]) if players is not None else tvpause.Room(None, why="Home Assistant unreachable or unreadable")
+    st = tv.status()
+    return {**cfg, "entities": [p.entity for p in room.players], "live": {p.entity: p.state for p in room.players},
+            "room": room.area, "why": room.why, "paused": sorted(st["paused"]), "events": st["events"][-8:],
             "dry_run": os.environ.get("AISIS_TVPAUSE_DRY_RUN") == "1"}
 
 def tv_save(body):
     try:
-        tvpause.update_settings({k: body[k] for k in ("enabled", "resume") if k in body})
+        tvpause.update_settings({k: body[k] for k in ("enabled", "resume", "exclude") if k in body})
     except ValueError as e:
         return {"ok": False, "err": str(e)}
     return {"ok": True, **tv_state()}

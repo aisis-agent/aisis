@@ -572,7 +572,7 @@ class STTGateway:
             voice_vocab.CatalogCache(lambda: voice_vocab.fetch_catalog(
                 self.env.get("AISIS_HACLI_URL", "http://127.0.0.1:8795"), voice_vocab.library_artists))
             if self.env.get("AISIS_STT_DOMAIN_CONTEXT") == "1" else None)
-        self.tv = tv                  # tvpause.TvPause: pause the TV when the station starts listening
+        self.tv = tv                  # tvpause.TvPause: pause the players of the station's room when the station starts listening
         self.slots = asyncio.Semaphore(self.SLOTS)
         self.verifier = verifier
         self.archive_enabled = archive
@@ -635,12 +635,13 @@ class STTGateway:
         context = self.recognizer_extras().get("context")
         return hint_echo.Hint.of([self.prompt_file.read(), context["prompt"] if context else ""])
 
-    def tv_activation(self):
-        """Activation = a spoken turn's websocket just opened (wake word/spotter fired on the station).
+    def tv_activation(self, station=None):
+        """Activation = a spoken turn's websocket just opened (wake word/spotter fired on the station). `station`: the station the
+        websocket names, None when it names none (the pause scopes itself to that speaker's room).
         The TV call runs in a worker thread: the STT session never waits for Home Assistant."""
         if self.tv is None:
             return
-        job = asyncio.get_running_loop().run_in_executor(None, self.tv.activation)
+        job = asyncio.get_running_loop().run_in_executor(None, self.tv.activation, station)
         self.speaker_background.add(job)
         job.add_done_callback(self.tv_done)
 
@@ -1101,7 +1102,7 @@ class STTGateway:
         held = deque()  # cuts that came while an earlier one was still being recognised (a dropped activation word, noise)
         stats = {"bytes": 0, "bin": 0, "voiced": 0, "peak": 0, "squares": 0, "samples": 0}
         LOG.info("stt_session_open")
-        self.tv_activation()
+        self.tv_activation(station_of(request))
         gate = wake_window.Gate(16000, enabled=False)   # the real one is made when the sample rate arrives
         opened = self.clock()
         window_noted = False

@@ -74,13 +74,14 @@ Every device of the house (lights, television, climate, media players, scripts, 
 API by the shared Home Assistant client (module `ha_client`): service calls, scripts and Home Assistant automations. A new side
 script, proxy, cache or private state file of device state, or a new timer of our own that acts on a device, is not allowed. Code
 that still reaches Home Assistant another way (the legacy `hacli.py` proxy and its cache, direct calls in the dashboard) is being
-migrated to the client and is not a pattern to copy. Behaviour that pauses, resumes or switches a device on a timer or an event is
-built as a native Home Assistant automation, and this repository only fires the events it needs. If something does not work through
+migrated to the client and is not a pattern to copy. Behaviour of the house that runs on a timer or an event of its own (schedules,
+presence rules) is built as a native Home Assistant automation. If something does not work through
 the API, or the architecture is unclear, investigate it in Home Assistant itself (states, attributes, services, logs) and solve it
 there; do not work around it here. Discovery of the Home Assistant server and onboarding are automatic (mDNS discovery and the
-standard Home Assistant login flow, confirmed once in Home Assistant itself): no hand-typed keys. The television pause while the
-speaker listens (`code/tvpause.py`) is being replaced by the native automation; it
-stays until the replacement is confirmed on the live system or the owner says to remove it, and then it is removed in its own change.
+standard Home Assistant login flow, confirmed once in Home Assistant itself): no hand-typed keys. The speaker's own reaction to
+listening stays in the speaker: the pause of the players of the speaker's own room while it listens (`code/tvpause.py`, the owner,
+tg#32175) pauses only playing media players in the Home Assistant area of the activated speaker, never the speaker itself and never a
+player of another room, and reaches Home Assistant only through `ha_client`.
 The speaker's own functions (music, timers, announcements, its own clock display) are product features and stay here.
 
 ## Rule C: the speaker never asks for a bare repeat
