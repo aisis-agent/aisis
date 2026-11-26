@@ -17,7 +17,6 @@ import speaker_settings
 import tts_settings
 import led_animation
 import user_prompt
-import tvpause
 import yse
 import dashboard_dicts
 
@@ -538,24 +537,6 @@ def user_prompt_preview(body):
     except ValueError as e:
         return {"ok": False, "err": str(e)}
     return {"ok": True, "assembled": user_prompt.assemble(user_prompt.base_persona_from_env_file(), draft)}
-
-# ---------- TV pause on activation (tvpause.py) ----------
-def tv_state():
-    cfg = tvpause.load_settings()
-    live = {}
-    for entity in cfg["entities"]:
-        state, stale = tvpause.HaCli().state(entity)
-        live[entity] = None if state is None else (state + (" (кэш)" if stale else ""))
-    st = tvpause.default().status()
-    return {**cfg, "live": live, "paused": sorted(st["paused"]), "events": st["events"][-8:],
-            "dry_run": os.environ.get("AISIS_TVPAUSE_DRY_RUN") == "1"}
-
-def tv_save(body):
-    try:
-        tvpause.update_settings({k: body[k] for k in ("enabled", "resume") if k in body})
-    except ValueError as e:
-        return {"ok": False, "err": str(e)}
-    return {"ok": True, **tv_state()}
 
 # ---------- sound-start animation on the clock display (led_animation.py; the adapter fires it) ----------
 def led_animation_state():
@@ -1089,8 +1070,6 @@ class H(BaseHTTPRequestHandler):
             self._json(tts_state())
         elif p == "/api/persona/user-prompt":
             self._json(user_prompt_state())
-        elif p == "/api/tv-pause":
-            self._json(tv_state())
         elif p == "/api/led-animation":
             self._json(led_animation_state())
         elif p == "/api/dialog-context":
@@ -1199,8 +1178,6 @@ class H(BaseHTTPRequestHandler):
             return self._json(user_prompt_save(body))
         if p == "/api/persona/user-prompt/preview":
             return self._json(user_prompt_preview(body))
-        if p == "/api/tv-pause":
-            return self._json(tv_save(body))
         if p == "/api/led-animation":
             return self._json(led_animation_save(body))
         if p == "/api/dialog-context":
@@ -1226,8 +1203,6 @@ class H(BaseHTTPRequestHandler):
         pass
 
 if __name__ == "__main__":
-    tv = tvpause.default()
-    tv.recover()
-    INGESTER = dialogstore.Ingester(on_log=tv.observe)
+    INGESTER = dialogstore.Ingester()
     INGESTER.start()
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()

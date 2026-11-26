@@ -27,7 +27,6 @@ RETENTION_DAYS = 180
 STALE_RUNNING_S = 600          # dialog without "ended" older than this is shown as interrupted
 BRAIN_ATTACH_WINDOW_S = 180    # router turn is attached to a voice dialog started within this window
 VOICE_LEAD_S = 5               # a speaker score may precede its dialog's "started" log line by this much
-LIVE_LOG_S = 30                # on_log hooks only see lines this fresh (a restart replays history via --since)
 # prod/legacy quasar containers (any compose prefix like `<hash>_`); stage containers are not dialogs
 CONTAINER_RE = re.compile(r"^(?:[0-9a-f]{12}_)?aisis-(?:yandex-)?quasar(?!-stage)")
 
@@ -482,10 +481,10 @@ def prune(conn, days=RETENTION_DAYS):
 # ---------- docker follower ----------
 class Ingester(threading.Thread):
     def __init__(self, path=DB_PATH, docker=("docker",), interval=3.0, router_db=ROUTER_DB,
-                 adapter_db=ADAPTER_DB, journal=True, on_log=None):
+                 adapter_db=ADAPTER_DB, journal=True):
         super().__init__(daemon=True, name="dialog-ingester")
         self.path, self.docker, self.interval = path, list(docker), interval
-        self.router_db, self.adapter_db, self.journal, self.on_log = router_db, adapter_db, journal, on_log
+        self.router_db, self.adapter_db, self.journal = router_db, adapter_db, journal
         self.stop_ev = threading.Event()
         self.readers = {}      # cid -> (thread, launched_state)
         self.procs = {}
@@ -533,8 +532,7 @@ class Ingester(threading.Thread):
                 dts, _, line = text.partition(" ")
                 if dts_epoch(dts) is None:
                     continue
-                if store_line(conn, parser, dts, src, line) and self.on_log:
-                    self._notify(line)
+                store_line(conn, parser, dts, src, line)
                 conn.execute("INSERT INTO cursors(cid,dts) VALUES(?,?) ON CONFLICT(cid) DO UPDATE SET dts=excluded.dts"
                              " WHERE excluded.dts>cursors.dts", (c["id"], dts))
                 conn.commit()
@@ -543,18 +541,6 @@ class Ingester(threading.Thread):
             print(f"dialog-ingester: reader {c['name']}: {e}", file=sys.stderr, flush=True)
         finally:
             conn.close()
-
-    def _notify(self, line):
-        """Live (not history replay) container log message -> on_log(epoch, message); never raises."""
-        m = LINE.match(ANSI.sub("", line.rstrip("\r\n")))
-        if not m:
-            return
-        try:
-            t = to_ts(m.group(1))
-            if time.time() - t <= LIVE_LOG_S:
-                self.on_log(t, m.group(4))
-        except Exception as e:
-            print(f"dialog-ingester: on_log: {e}", file=sys.stderr, flush=True)
 
     def _ensure_readers(self, cs):
         for c in cs:

@@ -1,7 +1,7 @@
 """End of speech -> transcript through an ISOLATED gateway instance (ticket #59, Tier C latency bar: p95 < 1 s).
 
 `serve` starts the real gateway (`stt_wyoming.STTGateway`) on its own port against one recogniser URI, with everything that has side
-effects switched off: no clip archive, no TV pause, no speaker check, a throw-away dialogs DB and config dir. The live gateway and
+effects switched off: no clip archive, no speaker check, a throw-away dialogs DB and config dir. The live gateway and
 its voice archive are never touched; stored audio is never replayed through the live gateway (ticket #163).
 
 `measure` plays clips into it over the same websocket protocol the station uses, in REAL time (20 ms chunks every 20 ms), followed by
@@ -53,7 +53,7 @@ def serve(uri: str, port: int, work: Path, silence_ms: int) -> None:
     import stt_wyoming
     env = isolated_env(uri, work, silence_ms)
     os.environ.update(env)
-    gateway = stt_wyoming.STTGateway(env=env, tv=None, archive=False)
+    gateway = stt_wyoming.STTGateway(env=env, archive=False)
     web.run_app(gateway.app(), host="127.0.0.1", port=port, access_log=None)
 
 
