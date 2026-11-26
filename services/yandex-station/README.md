@@ -303,7 +303,7 @@ that was not observed.
   Python-only: restart `aisis-station-stt`.
 - **Prompt-echo guard** (`code/hint_echo.py`, ticket #258): on room noise Whisper sometimes continues its own initial prompt instead of hearing
   anything, and the gateway sent that on as a request (clip `20261120T133321-8c9f82`, owner verdict «шум»: «Комнаты, гирлянда, люстра.» ->
-  the adapter's «Не расслышал. Повтори» reprompt and an open microphone). A transcript is a prompt echo when every comma/full-stop piece of
+  the adapter's «Что сделать» line and an open microphone). A transcript is a prompt echo when every comma/full-stop piece of
   it is an entry of the prompt's LISTS (the label «Комнаты» / «Устройства» / «Исполнители», or one room, device or artist), there are at
   least two pieces, and a label is among them or there are at least three. The example commands and the climate sentence of the prompt are
   not entries (the recogniser may have heard them, and the on-device spotter transcribes «включи свет» word for word); «кухня, студия» (two
@@ -315,6 +315,17 @@ that was not observed.
   cut is dropped like a caption and the session keeps listening); `0` switches it off. Count a shadow period with
   `journalctl --user -u aisis-station-stt | grep stt_hint_echo_shadow` and compare each line with the owner's clip verdicts before enforcing.
   Python-only: restart `aisis-station-stt`.
+- **Proactive clarification** (`code/clarify.py`, ticket #307; owner tg#31635, tg#31640 and tg#32074: «Никаких «повтори». Она должна найти возможные логичные и ожидаемые действия»): the speaker never says a bare «Повтори?».
+  A phrase that the grammar, the quasar layer and the skills did not read gets ONE short question about the likeliest action of this home («Поставить телевизор на паузу?», at most two options with «или»,
+  the microphone stays open) and the answer goes through the repair dialog (`correction.py`: «да», a pick, «нет», «отмена»). The options come from the live Home Assistant catalog and states
+  (a playing player pauses, a paused one continues, a lamp that is on switches off: one STANDARD service call on the catalog entity, answered from the state read back, no script and no per-device code),
+  from the nearest pinned phrases of the adapter's own intents, from the speaker's recent commands and from the hour; a word is near when it differs only by what far-field speech blurs (a prefix,
+  an unstressed vowel, a voiced consonant, a synonym of the grammar's lexicon, one edit). It asks before the brain from `0.75` and after the brain gave up («Повтори?», «Непонятно.», nothing, a Jev
+  `garbled`, a grammar catch-all) from `0.5`; chit-chat and questions get nothing. Nothing runs without the spoken «да». With no option at all the line says what was heard and which kinds of action this
+  home has («Прозвучало «…», но что сделать, не ясно: свет, кондиционер или телевизор?», «Ничего не расслышал. Что сделать: …?» for a turn without speech), the microphone open once a minute per station.
+  `AISIS_CLARIFY=on|off` (default `on`; `off` keeps only that line). The Home Assistant access is the one seam `clarify.Home` (`HaHome` over the adapter's ha-cli calls). The trace line carries
+  `correction.options` (phrase, score, source) and `asked: clarify`. The persona in `runtime.env` must not forbid guesses: `user_prompt.CAPABILITIES` tells the brain to answer «Непонятно.» and
+  `reply_guard.is_unheard` turns that and any bare «Повтори?» into the clarifier's answer. Python-only: restart `aisis-station-adapter`.
 - **Extra dictionary** (`code/extra_dict.py`, data `code/extra_dict_ru.json`, ticket #268; the runtime layer built from the home's own entity
   names, #269, is the last paragraph of this item): Whisper writes the wake word «Алиса» as another name («Олеса, включи свет.», clip 20261120T235150-330d2a). `wake_word.py` knows the
   grammar's `lexicon.wake` list and one sound rule (within two edits of «алиса», containing «ис», whole segment only), so «Олеса» (no «ис»),
@@ -542,7 +553,7 @@ foreign-owner override.
 ## Grammar route: answers without a model
 
 A declarative grammar (`code/intent_grammar/`, README there) decides what the speaker says without calling a model: canned wake,
-greeting, thanks and refusal lines, «Не расслышал. Повтори, пожалуйста.» for garbled short phrases, the clock and date, timers and
+greeting, thanks and refusal lines, the likeliest-action question or the «what was heard, what can be asked for» line for garbled short phrases (`code/clarify.py`), the clock and date, timers and
 alarms, negation («не включай свет» does nothing), relative volume, AC mode and setpoint in words, light colour. The adapter runs it
 before calc, the skills and the brain (`intent_route.py`); the quasar overlay `overlays/intent-grammar/` asks it first through
 `/intent/decide`. Measurements, switches (`AISIS_INTENT_GRAMMAR`, `GRAMMAR_HOOK`), risks and the owner's steps:
@@ -722,7 +733,7 @@ measured: `docs/research/jev-usage-2026-11.md`, `docs/research/jev-route-bench-2
 | `AISIS_JEV` | `off` | `off`: no Jev. `shadow`: decide **concurrently** with the brain and log; never changes or delays a reply. `on`: act per class (below); with both switches off it is `shadow`. |
 | `VERCEL_JEV_KEY` | unset | Gateway key. Without it Jev is not used whatever `AISIS_JEV` says. Never logged. |
 | `AISIS_JEV_REFUSE` | `off` | `on`: a `command` at or above the threshold gets «Этого я пока не умею.» instead of waiting for the brain. |
-| `AISIS_JEV_REPROMPT` | `off` | `on`: a `garbled` at or above the threshold gets «Не расслышал. Повтори, пожалуйста.» (microphone stays open; shares the grammar's one-reprompt-a-minute cooldown, so it needs `AISIS_INTENT_GRAMMAR` not `off`). |
+| `AISIS_JEV_REPROMPT` | `off` | `on`: a `garbled` at or above the threshold gets the clarifier's answer (the likeliest action as a question, else «Прозвучало «…», но что сделать, не ясно: …?»; never a request to repeat; microphone stays open; shares the grammar's one-line-a-minute cooldown, so it needs `AISIS_INTENT_GRAMMAR` not `off`). |
 | `AISIS_JEV_THRESHOLD` | `0.95` | The confidence an answer needs to act; 0.5 to 1.0, anything else falls back to 0.95 and is logged by name. The tier and effort hints degrade to «balanced» / «medium» below it too. |
 | `AISIS_JEV_URL`, `AISIS_JEV_MODEL`, `AISIS_JEV_TIMEOUT` | gateway, `typesafe-ai/jev`, 0.4 s | Endpoint, model, per-call budget (can only be lowered). |
 

@@ -12,12 +12,15 @@ Layers (nothing here re-implements them):
   intent_route         runs the dialog's outcomes (it owns every executor and the overlay's `rerun` route); see `IntentRouter.route`.
 
 States per station (`Dialog.state`), window `WINDOW_S`, injected clock (`now` is the router's monotonic clock):
-  awaiting_confirm   «Мне послышалось «X». Вы имели в виду «Y»?»   да -> run Y   нет -> repeat   X -> run X   повтори -> again   отмена -> end
-  awaiting_choice    «Включить или выключить?»                     a verb -> run it   нет -> repeat   повтори -> again   отмена -> end
-  awaiting_repeat    «Не расслышал. Повторите, пожалуйста.»        only «отмена» is a reply; anything else is a fresh utterance
+  awaiting_confirm   «Мне послышалось «X». Вы имели в виду «Y»?»   да -> run Y   нет -> say what can be done   X -> run X   повтори -> again   отмена -> end
+  awaiting_choice    «Включить или выключить?»                     a verb -> run it   нет -> say what can be done   повтори -> again   отмена -> end
+  awaiting_repeat    «Прозвучало «X», но что сделать, не ясно: свет, музыка или телевизор?»   only «отмена» is a reply; anything else is a fresh utterance
 Anything the context does not read leaves it (outcome `fallthrough`) and takes its normal route; the timeout is checked lazily when
 the next utterance arrives. One retry (a repeat request, a question said again, a «да»/«нет» that the second opinion contradicts), then
 «Ладно, не буду.» and the context is closed.
+`ask` opens the same two states over the options of the clarifier (clarify.py, #307: a phrase nobody read, «Поставить телевизор на паузу?»); a
+reading may then carry one Home Assistant call (`Reading.call`) that the router makes instead of running its phrase. Every line of the engine that
+used to ask to repeat (a relisten, a «нет») is `describe(heard, denied)`: what was heard and which kinds of action exist, never a bare request.
 
 Safety, in code and tests: nothing runs from a hypothesis without a spoken «да» (or the reading said back); the engine vetoes every
 utterance whose primary reading or any listed hypothesis or proposed alternative is an emergency phrase (grammar intent
@@ -33,11 +36,14 @@ import json
 import logging
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 import extra_dict
 import utterance_trace
 from intent_grammar import ActiveContext, Decision
+
+if TYPE_CHECKING:
+    from clarify import HaCall, Option
 
 MODES = ("off", "shadow", "on")
 LOG = logging.getLogger("aisis.correction")
@@ -55,8 +61,17 @@ SAFE_EXECUTORS = frozenset(("ha.light", "ha.light_color", "ha.light_brightness",
 CONFIRM, CHOICE, REPEAT = "awaiting_confirm", "awaiting_choice", "awaiting_repeat"
 CONTEXT_OF = {CONFIRM: "repair.confirm", CHOICE: "repair.choice", REPEAT: "repair.repeat"}
 
-RELISTEN_TEXT = "Не расслышал. Повторите, пожалуйста."
-REPEAT_TEXT = "Повторите, пожалуйста."
+Describe = Callable[[str, bool], str]   # (heard text, after a «нет») -> what is said when no option is left; never a bare request to repeat
+
+
+def plain_describe(heard: str, denied: bool) -> str:
+    """The line when nothing is left to propose and the router gave no catalog to name the kinds of action: what was heard, and the question."""
+    if denied:
+        return "Тогда что сделать?"
+    spoken = heard.strip(_PUNCTUATION)[:60]
+    return f"Прозвучало «{spoken}», но что сделать, не ясно." if spoken else "Ничего не расслышал. Что сделать?"
+
+
 GIVE_UP_TEXT = "Ладно, не буду."
 YES_OR_NO_TEXT = "Скажите «да» или «нет»."
 SAY_AGAIN_TEXT = "Скажите ещё раз: {phrase}."
@@ -73,11 +88,11 @@ def shown(text: str) -> str:
 @dataclass(frozen=True)
 class Reading:
     """One phrase the dialog may run: its text, the short label a choice question uses and what a reply may say for it
-    (the whole phrase and the verb alone: «выключи свет», «выключи»)."""
+    (the whole phrase and the verb alone: «выключи свет», «выключи»). `call`: a clarification option made of one Home Assistant call."""
     text: str
     label: str | None
     says: tuple[str, ...]
-
+    call: HaCall | None = None
 
 @dataclass
 class Dialog:
@@ -126,7 +141,7 @@ class Step:
     run: str | None = None                  # the phrase to run for real (alternative, kept reading or chosen one)
     risky: bool = False                     # `run` belongs to a risky action: never the overlay's rerun
     end: bool = False                       # «отмена»: the dialog ends, nothing is said
-
+    call: HaCall | None = None              # a clarification option that is one Home Assistant service call: made instead of running `run`
 
 def _compound_key(parts: Iterable[Decision]) -> str | None:
     """The key of a compound's clauses joined; None as soon as one clause has no executable action."""
@@ -186,7 +201,7 @@ class Correction:
 
     def __init__(self, classify: Callable[[str], Decision | None], decide_in: Callable[[str, ActiveContext], Decision | None],
                  hypotheses: Any | None = None, *, mode: str = "on", core: Any | None = None, policy: Any | None = None,
-                 window_s: float = WINDOW_S, extra_dict_mode: str = "off") -> None:
+                 window_s: float = WINDOW_S, extra_dict_mode: str = "off", describe: Describe = plain_describe) -> None:
         if mode not in MODES or mode == "off":
             raise ValueError(f"correction mode must be shadow or on, got {mode!r}")
         self.mode = mode
@@ -207,6 +222,7 @@ class Correction:
         self.chains: dict[str, float] = {}                  # station -> until: a repeat was asked, the next doubtful utterance gives up
         self.quiet: dict[tuple[str, str], float] = {}       # (station, normalised phrase) -> until: no new dialog about it
         self.hints: dict[str, tuple[str, float]] = {}       # station -> (question, asked at): an unanswered question for the brain
+        self.describe = describe
 
     # ── state ──────────────────────────────────────────────────────────────
     def active(self, station: str, now: float) -> Dialog | None:
@@ -406,7 +422,7 @@ class Correction:
         options = list(decision.options)
         common = dict(station=station, heard=text, asked_at=now, opened_at=now, risky=risky, origin=origin, canon=self._canon(text))
         if decision.kind == "relisten":
-            return Dialog(state=REPEAT, question=RELISTEN_TEXT, readings=(), heard_says=(), **common)
+            return Dialog(state=REPEAT, question=self.describe(text, False), readings=(), heard_says=(), **common)
         if decision.kind == "ask" and len(options) == 1:
             alt = options[0]
             alt_reading, heard_reading = self._reading(alt.text, text), self._reading(text, alt.text)
@@ -440,6 +456,27 @@ class Correction:
                 state = state_word(subject, noop["desired"] == "on")
                 return f"{subject[0].upper()}{subject[1:]} уже {state}. Вы хотели {shown(label) if label else shown(alt)}?"
         return f"Мне послышалось «{shown(heard)}». Вы имели в виду «{shown(alt)}»?"
+
+    def ask(self, station: str, heard: str, options: "Sequence[Option]", question: str, *, now: float, via_quasar: bool) -> Offer | None:
+        """Open a dialog over the options the clarifier found for a phrase nobody read (#307): one option is a confirm question, two a choice.
+        The answer is read by the same machinery as a correction (`reply`). None: no question (a phrase the dialog may never touch, or one that
+        was just answered): the caller says what it found instead. Nothing runs from here; only a spoken «да» or a pick does."""
+        if not options or self.quiet.get((station, self._canon(heard)), 0.0) > now or self._protected(heard):
+            return None
+        sets = [set(option.says) for option in options]
+
+        def distinct(index: int) -> tuple[str, ...]:   # a word both options say (the verb of «поставить X» and «поставить Y») picks neither
+            return tuple(word for word in options[index].says if not any(word in sets[other] for other in range(len(sets)) if other != index))
+
+        readings = tuple(Reading(option.phrase, shown(option.ask), distinct(index), option.call) for index, option in enumerate(options))
+        origin = {"trigger": "clarify", "reason": None, "decision": "ask" if len(options) == 1 else "ask-choice", "heard": heard, "nbest": [],
+                  "nbest_ms": None, "cue": [],
+                  "options": [{"phrase": o.phrase, "score": round(o.score, 2), "source": o.source, "detail": o.detail} for o in options]}
+        dialog = Dialog(station=station, state=CONFIRM if len(options) == 1 else CHOICE, question=question, heard=heard, readings=readings,
+                        heard_says=(), asked_at=now, opened_at=now, risky=True, origin=origin, canon=self._canon(heard), via_quasar=via_quasar)
+        self.dialogs[station] = dialog
+        utterance_trace.note(correction={**origin, "dialog": self._dialog_trace(dialog, None, None)})
+        return Offer(question, True)
 
     # ── the answer ─────────────────────────────────────────────────────────
     def reply(self, station: str, text: str, *, now: float, via_quasar: bool, probe: bool = False) -> Step | None:
@@ -479,11 +516,12 @@ class Correction:
             return self._retry(dialog, now, YES_OR_NO_TEXT if dialog.state == CONFIRM else dialog.question)
         if intent == "repair.again":
             return self._retry(dialog, now, dialog.question)
-        if intent == "repair.deny":
-            return Step(outcome="denied", say=REPEAT_TEXT, listen=True)
+        if intent == "repair.deny" or (intent == "repair.keep" and dialog.origin.get("trigger") == "clarify"):   # «я так и сказал» to a guess about garbled words: no
+            return Step(outcome="denied", say=self.describe(dialog.heard, True), listen=True)
         chosen = self._selected(dialog, decision)
         outcome = {"repair.accept": "accepted", "repair.keep": "kept"}.get(intent, f"chose:{chosen}")
-        return Step(outcome=outcome, run=chosen, risky=dialog.risky)
+        call = next((reading.call for reading in dialog.readings if reading.text == chosen), None)
+        return Step(outcome=outcome, run=chosen, risky=dialog.risky, call=call)
 
     @staticmethod
     def _selected(dialog: Dialog, decision: Decision) -> str | None:
@@ -546,7 +584,7 @@ class Correction:
         """An outcome that ends the dialog (or turns it into a repeat request)."""
         del self.dialogs[station]
         if step.outcome == "denied":
-            dialog = dataclasses.replace(dialog, state=REPEAT, question=REPEAT_TEXT, asked_at=now, retries=dialog.retries + 1)
+            dialog = dataclasses.replace(dialog, state=REPEAT, question=step.say or "", asked_at=now, retries=dialog.retries + 1)
             self.dialogs[station] = dialog
             self._note(dialog, text, "denied")
             return

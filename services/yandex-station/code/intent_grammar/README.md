@@ -122,7 +122,7 @@ intent inside each of its contexts with the context's `sample` values.
 otherwise real intents (priority >= 0, compounds included) -> arithmetic -> weather -> catch-alls (priority < 0). `route()` executes the decision
 (canned/reprompt lines, clock, timers, Home Assistant climate and colour, weather, music) and returns `reply | silent | volume | dialog_end | none`; every
 failure, a guessed (fuzzy/confirm) reading, or an executor owned by the quasar container is `none`, so the old path continues untouched.
-Reprompts are said once a minute per station: a second miss goes to the brain. The catch-alls (priority < 0) are also skipped while the last line to the
+Reprompts (the catch-alls `asr.*` of tier `reprompt`; their text is built by `clarify.py`, never a request to repeat: the likeliest action as a question, else what was heard and the kinds of action of this home) are said once a minute per station: a second miss goes to the brain. The catch-alls (priority < 0) are also skipped while the last line to the
 station was a question the **brain** asked («Рассказать подробнее?»): «да», «про собак» are the brain's to continue. The mark lasts five minutes
 (`BRAIN_QUESTION_WINDOW_S`: the brain's text is ready long before it is spoken; lines the hook or the quasar layer answer never reach
 `note_reply`, so only a clock bounds it) or until the next line of any kind replaces it. The adapter tells the router which

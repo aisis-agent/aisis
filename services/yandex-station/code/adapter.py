@@ -28,6 +28,8 @@ import asr_correct
 import dialog_context
 import dialogstore
 import extra_dict
+import clarify
+import correction
 import ha_actions
 import hypothesis_store
 import intent_route
@@ -57,8 +59,6 @@ HYPOTHESES_MAX_BYTES = 49152   # /asr/hypotheses: an NBest of a few readings is 
 BRACHO_REFERENCE = "5cd1ffa5dbb4419cb5766435139c6d92"
 ERROR_REPLY = "Не удалось получить ответ ChatGPT. Проверь авторизацию и подключение. Я не буду повторять запрос автоматически."
 
-
-NO_SPEECH_REPLY = "Повтори?"
 
 EXTRACT_PROMPT = ('Из диалога голосового ассистента выпиши устойчивые факты о владельце и его доме: '
     'имена, предпочтения, привычки, устройства, расписание, даты. Игнорируй сиюминутные просьбы и '
@@ -254,7 +254,9 @@ class Adapter:
                                          hypotheses=self.hypotheses,
                                          status_bare="on" if self.env.get("AISIS_STATUS_BARE", "shadow").lower() == "on" else "shadow",
                                          correction_mode=self.correction_mode if self.correction_mode in ("shadow", "on") else "off",
-                                         extra_dict_mode=extra_dict.parse_mode(self.env.get("AISIS_EXTRA_DICT")))
+                                         extra_dict_mode=extra_dict.parse_mode(self.env.get("AISIS_EXTRA_DICT")),
+                                         clarify_mode="off" if self.env.get("AISIS_CLARIFY", "on").lower() == "off" else "on",
+                                         home=clarify.HaHome(self._ha_get_json, self._ha_post_json) if ha is not None else None)
 
     def _hacli(self) -> ClientSession:
         """One short-timeout session for ha-cli calls: a stuck Home Assistant must not stall a voice turn for a minute."""
@@ -458,7 +460,7 @@ class Adapter:
                 if inject and not native:
                     self.store.persona_sent(station, digest)
                 reply = reply_guard.tidy(result["text"].strip())
-                if self.memory is not None:
+                if self.memory is not None and not reply_guard.is_unheard(reply):
                     self.memory.record_episode(station, text, reply)
                     self._schedule_remember(station, text, reply)
                     self._schedule_upkeep(station)
@@ -684,10 +686,12 @@ class Adapter:
         layer = "none"
         try:
             station, text = self._turn_input(data)
-            if text is None:
+            if text is None:   # a turn with no speech: what to say is the same line as for a phrase nobody could read
+                route = await self.intents.unheard(station, "") if self._clarifies() else None
+                said, listens = (route.text, route.listen) if route is not None else (correction.plain_describe("", False), False)
                 if not ws.closed:
-                    await ws.send_json({"type": "partialResponse", "data": {"text": NO_SPEECH_REPLY,
-                        "directives": [], "finished": True, "shouldListen": False}})
+                    await ws.send_json({"type": "partialResponse", "data": {"text": said,
+                        "directives": [], "finished": True, "shouldListen": listens}})
                 return
             trace = utterance_trace.start("turn", text, station)
             # The grammar route answers what needs no model: canned lines, reprompts, the clock, timers, climate and
@@ -724,7 +728,11 @@ class Adapter:
                 reply = await self.turn(station, text)
                 from_brain = True
                 layer = "brain"
-                if listen is False and reply.rstrip().endswith("?"):
+                if reply_guard.is_unheard(reply):   # the brain gave up («Повтори?»): the likeliest actions, or what was heard and what can be asked for
+                    route = await self.intents.unheard(station, text) if self._clarifies() else None
+                    reply, listen = (route.text, route.listen) if route is not None else (correction.plain_describe(text, False), False)
+                    from_brain = False
+                elif listen is False and reply.rstrip().endswith("?"):
                     trace.note(asked="brain")
         except asyncio.CancelledError:
             if trace is not None:
@@ -778,7 +786,7 @@ class Adapter:
             with utterance_trace.stage("jev"):
                 verdict = await self.jev.assess(jev.RouteTurn(text))
             LOG.info("jev_route %s", jev.describe(verdict, turn))
-            route = self._jev_action(station, verdict.decision)
+            route = await self._jev_action(station, text, verdict.decision)
             utterance_trace.note(jev=self._jev_trace(verdict, "on", route is not None))
             return route
         except Exception as err:   # fail open: a bug in the optional layer sends the turn to the brain
@@ -798,13 +806,16 @@ class Adapter:
                                   "route": answer("route"), "decision": candidate.reason_code if candidate else None,
                                   "outcome": verdict.reason, "ms": verdict.latency_ms, "acted": acted}.items() if v is not None}
 
-    def _jev_action(self, station: str, decision: jev.RouteDecision | None) -> intent_route.Route | None:
+    def _clarifies(self) -> bool:
+        """The router answers (and may open a dialog): not with AISIS_INTENT_GRAMMAR=shadow, where the router only classifies and nothing could read the answer."""
+        return self.intents is not None and self.intent_mode == "on"
+
+    async def _jev_action(self, station: str, text: str, decision: jev.RouteDecision | None) -> intent_route.Route | None:
         if decision is None:
             return None
         settings = self.jev_settings
-        if decision.reason_code == "jev_garbled" and settings.reprompt and self.intents is not None \
-                and self.intents.allow_reprompt(station):
-            return intent_route.Route("reply", intent_route.REPROMPT_TEXT, listen=True, intent="jev.garbled", source="jev")
+        if decision.reason_code == "jev_garbled" and settings.reprompt and self._clarifies():
+            return await self.intents.unheard(station, text, cooldown=True, intent="jev.garbled")   # the likeliest actions or what was heard, never a bare request to repeat; one line a minute, then the brain
         if decision.reason_code == "jev_command_unsupported" and settings.refuse:
             return intent_route.Route("reply", intent_route.UNSUPPORTED_TEXT, intent="jev.command", source="jev")
         return None

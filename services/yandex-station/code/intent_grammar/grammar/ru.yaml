@@ -99,7 +99,7 @@ contexts:
   - {id: repair.confirm, values: [alt, heard], sample: {alt: ["выключи свет", "выключи"], heard: ["включи свет", "включи"]}}
   # «Включить или выключить?»
   - {id: repair.choice, values: [first, second], sample: {first: ["включи свет", "включи"], second: ["выключи свет", "выключи"]}}
-  # «Не расслышал. Повторите, пожалуйста.» and after a «нет»: a fresh utterance is expected, only «отмена» is a reply
+  # «Прозвучало «…», но что сделать, не ясно: свет, музыка или телевизор?» and after a «нет»: a fresh utterance is expected, only «отмена» is a reply
   - {id: repair.repeat, values: []}
 
 intents:
@@ -275,7 +275,7 @@ intents:
     reply: {kind: canned, say: ["Звонить и писать сообщения я пока не умею."]}
     examples: ["позвони маме", "напиши смс", "отправь сообщение Ивану привет"]
 
-  # ── incomplete or garbled speech: ask again instead of waiting for a model ──
+  # ── incomplete or garbled speech: never «повтори», always the likeliest actions or what was heard (clarify.py, #307) ──
   - id: asr.dangling_verb
     tier: clarify
     labels: [FRAGMENT, HOME_CMD]
@@ -287,7 +287,7 @@ intents:
     labels: [FRAGMENT, ASR_GARBAGE]
     max_tokens: 6
     patterns: ["... (а|и|но|чтобы|что|как|если|потому|или|в|на|с|к|по|из|для|про|у|о) (ты)?"]
-    reply: {kind: canned, say: ["Не расслышал. Повтори, пожалуйста."]}
+    note: "The reply is built by the router (clarify.py): the likeliest action as a question, else what was heard and the kinds of action of this home."
     priority: -20
     guards: [not_question]
     examples: ["а чтобы ты", "я хотел бы чтобы"]
@@ -298,7 +298,7 @@ intents:
     max_tokens: 3
     guards: [not_question, "not_has:chat_markers", "not_has:lookup_nouns"]
     patterns: ["..."]
-    reply: {kind: canned, say: ["Не расслышал. Повтори, пожалуйста."]}
+    note: "The reply is built by the router (clarify.py): the likeliest action as a question, else what was heard and the kinds of action of this home."
 
   - id: refuse.unknown_device
     tier: canned

@@ -12,7 +12,7 @@ Record (JSON, all keys optional except v/ts/via/text):
   layer    what answered: grammar | skill | calc | jev | brain | none (the old path continues) | error
   intent, tier, conf, fuzzy, priority, pattern, slots, executor, args, labels   the grammar's decision (also when declined)
   declined why the decision was not run by the adapter («owner: quasar», «not configured», ...)
-  asked    clarify | reprompt | brain: the reply is a question that waits for an answer; joined: the clarification text this phrase was joined to
+  asked    clarify | reprompt | brain: the reply is a question that waits for an answer (`clarify`: the clarifier's question about the likeliest action, clarify.py; `reprompt`: what was heard and the kinds of action); joined: the clarification text this phrase was joined to
   reply, listen, suppressed (reprompt_cooldown, ...)
   reply_why  the reason code of the reply of a Home Assistant command (ha_verified | ha_not_confirmed | ha_unverified | ha_down_observed | ...,
            ha_action_log.WHY_RU); the sentence names only what ha-cli observed on the device

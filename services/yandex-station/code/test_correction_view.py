@@ -72,9 +72,9 @@ class CorrectionLines(unittest.TestCase):
         self.assertNotIn("ждём", got)
 
     def test_a_denied_answer_is_still_waiting_for_the_repeat(self):
-        denied = dict(CORRECTION, dialog={"state": "awaiting_repeat", "ask": "Повторите, пожалуйста.", "answer": "нет",
+        denied = dict(CORRECTION, dialog={"state": "awaiting_repeat", "ask": "Тогда что сделать: свет или телевизор?", "answer": "нет",
                                           "outcome": "denied", "retries": 1})
-        self.assertIn((1, "❓ «Повторите, пожалуйста.» → «нет»: отклонено · ждём повтор фразы"), self.lines(denied))
+        self.assertIn((1, "❓ «Тогда что сделать: свет или телевизор?» → «нет»: отклонено · ждём, что сделать"), self.lines(denied))
 
     def test_a_shadow_question_is_labelled_as_never_asked(self):
         shadow = dict(CORRECTION, shadow=True, dialog={"state": "awaiting_confirm", "ask": "Вы имели в виду «выключи свет»?",
@@ -334,11 +334,11 @@ class SessionPage(unittest.TestCase):
         self.assertNotIn("120 мс", page)
 
     def test_a_denied_answer_still_waits_for_the_repeat_on_the_page(self):
-        denied = dict(CORRECTION, dialog={"state": "awaiting_repeat", "ask": "Повторите, пожалуйста.", "answer": "нет",
+        denied = dict(CORRECTION, dialog={"state": "awaiting_repeat", "ask": "Тогда что сделать: свет или телевизор?", "answer": "нет",
                                           "outcome": "denied", "retries": 1})
         page = self.render([dict(SPOTTER_TRACE, id=1, ts=OWNER_CLIP["ts"] + 1, correction=denied)], None)
         self.assertIn("итог диалога: отклонено", page)
-        self.assertIn("состояние: ждём повтор фразы", page)
+        self.assertIn("состояние: ждём, что сделать", page)
 
 
 if __name__ == "__main__":

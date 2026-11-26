@@ -181,7 +181,7 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         clock = iter([100.0, 110.0, 170.0, 100.0])
         r = router(monotonic=lambda: next(clock))
         first = await r.route("st", "голи со спортом")
-        self.assertEqual((first.kind, first.text, first.listen), ("reply", "Не расслышал. Повтори, пожалуйста.", True))
+        self.assertEqual((first.kind, first.text, first.listen), ("reply", "Прозвучало «голи со спортом», но что сделать, не ясно.", True))
         self.assertEqual((await r.route("st", "лица в ключике")).kind, "none")      # 10 s later: the brain takes it
         self.assertEqual((await r.route("st", "голи со спортом")).kind, "reply")      # 70 s later: again
         self.assertEqual((await r.route("other", "голи со спортом")).kind, "reply")   # another station has its own clock
@@ -194,7 +194,7 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         clock[0] += intent_route.REPROMPT_COOLDOWN_S
         self.assertTrue(r.allow_reprompt("st"))
         self.assertTrue(r.allow_reprompt("other"))     # per station
-        self.assertEqual(intent_route.REPROMPT_TEXT, "Не расслышал. Повтори, пожалуйста.")
+        self.assertFalse(hasattr(intent_route, "REPROMPT_TEXT"))      # no canned request to repeat is left to say
         self.assertEqual(intent_route.UNSUPPORTED_TEXT, "Этого я пока не умею.")
 
     async def test_a_clarification_answer_is_joined_to_its_question(self):
@@ -753,7 +753,7 @@ class AdapterIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.spoken(adapter, "да"), "про собак — да, расскажу")     # the brain, not «Не расслышал»
         self.assertEqual(adapter.turn.await_count, 2)
         self.assertEqual(await self.spoken(adapter, "Громкость."), "Какую громкость поставить?")   # the grammar's question
-        self.assertEqual(await self.spoken(adapter, "голи со спортом"), "Не расслышал. Повтори, пожалуйста.")
+        self.assertEqual(await self.spoken(adapter, "голи со спортом"), "Прозвучало «голи со спортом», но что сделать, не ясно: музыка?")
         self.assertEqual(adapter.turn.await_count, 2)
         self.assertEqual(adapter.intents.brain_asked, {})
 

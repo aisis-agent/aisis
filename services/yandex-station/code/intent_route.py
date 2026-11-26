@@ -37,15 +37,15 @@ from intent_grammar.timewords import plural
 from timers import duration_accusative, left_text
 import voice_skills
 import capabilities
+import clarify
 import correction
 import utterance_trace
 
 LOG = logging.getLogger("aisis.intent")
 
 BUNDLE = Path(__file__).parent / "intent_grammar" / "grammar" / "ru.json"
-REPROMPT_COOLDOWN_S = 60.0     # a second miss right after «не расслышал» goes to the brain: noise cannot loop the speaker
+REPROMPT_COOLDOWN_S = 60.0     # the «what was heard, what can be asked for» line asks the microphone open once a minute per station: noise cannot loop the speaker
 TIMERS_OFF = "Таймеры и будильники я пока не умею."
-REPROMPT_TEXT = "Не расслышал. Повтори, пожалуйста."    # what a reprompt says when the decision does not come from a grammar reply (Jev)
 UNSUPPORTED_TEXT = "Этого я пока не умею."              # the plain refusal of a command nobody implements (Jev)
 TIMER_CANCEL_REMINDER_HINT = "Таймеров нет, есть напоминание. Чтобы отменить его, скажи: отмени напоминание."
 
@@ -154,18 +154,31 @@ class IntentRouter:
     correction_core: Any | None = None  # the stt_cli.hypotheses module (tests pass a fake); None imports the real one
     extra_dict_mode: str = "off"        # AISIS_EXTRA_DICT: off | shadow (log the extra confusables' candidates) | on (the engine decides with them)
     status_bare: str = "shadow"         # AISIS_STATUS_BARE: shadow (traced, declined; anything but `on`) | on: «кондиционер на втором этаже» alone is answered with the status
+    clarify_mode: str = "on"            # AISIS_CLARIFY: on (a phrase nobody read gets the likeliest actions as a question) | off (only the line that says what was heard)
+    home: clarify.Home | None = None    # the catalog and the one service call of a clarification option (clarify.HaHome over the adapter's ha-cli access)
     capabilities: capabilities.Capabilities | None = field(default=None, init=False)
     correction: correction.Correction | None = field(default=None, init=False)
+    clarifier: clarify.Clarifier | None = field(default=None, init=False)
+    _engine_failed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.capabilities = capabilities.Capabilities(ha=self.ha, timers=self.timers, skills=self.skills, now=self.now,
                                                       pick=self.pick, monotonic=self.monotonic)
+        self.clarifier = clarify.Clarifier(self.grammar, lambda text: self.classify(text, fallback=False), self._runs_here, self.home,
+                                           now=lambda: self.now(), monotonic=lambda: self.monotonic(), abilities=self._abilities)
         if self.correction_mode in ("shadow", "on"):
             try:
                 self.correction = correction.Correction(self.classify, self._decide_in, self.hypotheses, mode=self.correction_mode,
-                                                        core=self.correction_core, extra_dict_mode=self.extra_dict_mode)
+                                                        core=self.correction_core, extra_dict_mode=self.extra_dict_mode,
+                                                        describe=self.clarifier.describe)
             except Exception as err:   # no core installed, bad data: the speaker runs exactly as before
                 LOG.warning("correction_unavailable class=%s", type(err).__name__)
+
+    def _guessable(self, decision: Decision | None, phase: str | None, via_quasar: bool, station: str) -> bool:
+        """A turn nothing answered that may still be a command misheard: no reading at all, or only a guess that needs a «да». Not an answer to the
+        brain's own question, not the quasar hook's call (it has 250 ms and no catalog), and not a phrase the grammar read and declined."""
+        return (self.clarify_mode == "on" and not via_quasar and phase is None and not self.asked_a_question(station)
+                and (decision is None or decision.fuzzy or decision.tier == "confirm"))
 
     def _decide_in(self, text: str, context: Any) -> Decision | None:
         return self.grammar.decide(text, context=context)
@@ -355,6 +368,10 @@ class IntentRouter:
                 route = await self._run_decision(station, text, decision, via_quasar)
                 if decision is not None and decision.tier == "clarify":
                     self.pending[station] = (text, self.monotonic())
+                if route.kind == "none" and self._guessable(decision, phase, via_quasar, station):
+                    route = await self._clarify(station, key, text, floor=clarify.ASK_AT, always=False) or route
+                elif route.kind != "none" and decision is not None and decision.tier in ("execute", "query"):
+                    self.clarifier.remember(station, text)
         except Exception as err:  # fail open: the old path answers
             LOG.warning("intent_route_failed class=%s", type(err).__name__)
             utterance_trace.error("route: " + type(err).__name__)
@@ -427,7 +444,7 @@ class IntentRouter:
             step = engine.reply(key, text, now=now, via_quasar=via_quasar, probe=noop is not None)
             if step is not None:
                 return await self._dialog_route(key, step, via_quasar, rerun)
-        offer = engine.consult(key, text, now=now, via_quasar=via_quasar, noop=noop)
+        offer = engine.consult(key, text, now=now, via_quasar=via_quasar, noop=noop) if self.correction_mode in ("shadow", "on") else None
         if offer is None or offer.shadow:
             return None
         return Route("reply", offer.say, listen=offer.listen, intent="repair.give_up" if offer.outcome else "repair.ask", source="correction")
@@ -444,7 +461,16 @@ class IntentRouter:
         adapter executes (never a guess that needs a «да», never a risky action the overlay would run) is. A quasar-owned action goes back to
         the overlay as `rerun` when it asked for it and the action is not risky; every other case asks the owner to say it again.
         `station` is the speaker's own key (the device id of the hook, else the turn's station): a roomless command is resolved against
-        the room of that speaker, never against the hook's generic `quasar` label."""
+        the room of that speaker, never against the hook's generic `quasar` label. A clarification option that is a Home Assistant call is
+        made as that one standard service call and answered from the state that was observed."""
+        if step.call is not None:
+            try:
+                done = await self.clarifier.home.act(step.call)
+            except Exception as err:   # ha-cli unreachable: said, never silently dropped
+                LOG.warning("clarify_act_failed class=%s", type(err).__name__)
+                utterance_trace.error("clarify act: " + type(err).__name__)
+                done = clarify.ACT_FAILED
+            return Route("reply", done, intent="clarify.act", source="correction")
         phrase = step.run
         decision = self.classify(phrase, fallback=False)
         if decision is not None and decision.tier in ("execute", "query") and not decision.fuzzy \
@@ -459,6 +485,55 @@ class IntentRouter:
             return Route("rerun", phrase, intent="repair.rerun", source="correction")
         return Route("reply", correction.SAY_AGAIN_TEXT.format(phrase=correction.shown(phrase)), listen=True, intent="repair.say_again",
                      source="correction")
+
+    # ── proactive clarification (clarify.py, #307) ──────────────────────────
+    def _runs_here(self, decision: Decision, station: str) -> bool:
+        """The speaker's own turn can run the decision itself (a clarification option must be one a «да» really does)."""
+        return self.executable(decision, via_quasar=False, station=station)
+
+    def _abilities(self) -> tuple[str, ...]:
+        """Kinds of action the adapter has besides the home's own: what is configured, in the owner's words."""
+        return (("музыка",) if self.skills is not None else ()) + (("таймер",) if self.timers is not None else ())
+
+    def _engine(self) -> correction.Correction | None:
+        """The dialog engine; a clarification needs one even when AISIS_CORRECTION is off (then it never consults a second opinion)."""
+        if self.correction is None and not self._engine_failed:
+            try:
+                self.correction = correction.Correction(self.classify, self._decide_in, self.hypotheses, mode="shadow", core=self.correction_core,
+                                                        describe=self.clarifier.describe)
+            except Exception as err:   # no core installed: a question cannot be answered, so none is asked
+                self._engine_failed = True
+                LOG.warning("clarify_engine_unavailable class=%s", type(err).__name__)
+        return self.correction
+
+    async def _clarify(self, station: str, key: str | None, text: str, *, floor: float, always: bool, cooldown: bool = False,
+                       intent: str = "clarify.nothing", via_quasar: bool = False) -> Route | None:
+        """The likeliest actions for a phrase nobody read as ONE short question (dialog opened, microphone kept open), or, when there is none and
+        `always`, a line that says what was heard and which kinds of action exist. Never a request to repeat. None: nothing to say (not `always`,
+        or `cooldown` and a line was already said to this station inside REPROMPT_COOLDOWN_S: the brain takes the phrase)."""
+        clarifier = self.clarifier
+        listen = self.allow_reprompt(station) if always else True   # one open-microphone line a minute per station: noise cannot loop the speaker
+        if always and cooldown and not listen:
+            return None
+        options = await clarifier.options(station, text, floor=floor) if self.clarify_mode == "on" else []
+        if options:
+            engine = self._engine()
+            offer = None if engine is None or key is None else engine.ask(key, text, options, clarifier.question(options),
+                                                                      now=self.monotonic(), via_quasar=via_quasar)
+            if offer is not None:
+                utterance_trace.note(asked="clarify")
+                return Route("reply", offer.say, listen=True, intent="clarify.ask", source="correction")
+        if not always:
+            return None
+        await clarifier.refresh()   # the kinds of action for the line (a read younger than a few seconds is reused)
+        utterance_trace.note(asked="reprompt")
+        return Route("reply", clarifier.describe(text), listen=listen, intent=intent, source="correction")
+
+    async def unheard(self, station: str, text: str, *, cooldown: bool = False, intent: str = "clarify.nothing") -> Route | None:
+        """A turn nobody could read and the brain (or Jev) gave up on («Повтори?», «Не расслышал»), or one without speech: what to say instead.
+        None only with `cooldown` (see `_clarify`). `intent` names the line in the trace."""
+        route = await self._clarify(station, station, text, floor=clarify.FALLBACK_AT, always=True, cooldown=cooldown, intent=intent)
+        return None if route is None else self._mark_open_dialog(station, route)
 
     def _trace(self, decision: Decision | None, route: Route, via_quasar: bool, station: str) -> None:
         trace = utterance_trace.current()
@@ -504,12 +579,12 @@ class IntentRouter:
         if tier == "drop":
             return Route("silent", intent=intent, source="grammar")
         if tier in ("canned", "reprompt", "clarify"):
-            if tier == "reprompt" and not self.allow_reprompt(station):
-                return NONE
+            if tier == "reprompt":   # nothing was read: the likeliest actions as a question, else what was heard and what can be asked for
+                return await self._clarify(station, station, decision.text, floor=clarify.FALLBACK_AT, always=True, cooldown=True, intent=intent) or NONE
             line = render_reply(decision, self.pick)
             if not line:
                 return NONE
-            return Route("reply", line, listen=tier in ("reprompt", "clarify"), intent=intent, source="grammar")
+            return Route("reply", line, listen=tier == "clarify", intent=intent, source="grammar")
         if not self.executable(decision, via_quasar=via_quasar, station=station):
             return self._declined(decision)
         return await self._execute(station, decision, via_quasar)

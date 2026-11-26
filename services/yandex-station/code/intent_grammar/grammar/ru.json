@@ -595,16 +595,11 @@
      "ASR_GARBAGE"
     ],
     "max_tokens": 6,
+    "note": "The reply is built by the router (clarify.py): the likeliest action as a question, else what was heard and the kinds of action of this home.",
     "patterns": [
      "... (а|и|но|чтобы|что|как|если|потому|или|в|на|с|к|по|из|для|про|у|о) (ты)?"
     ],
     "priority": -20,
-    "reply": {
-     "kind": "canned",
-     "say": [
-      "Не расслышал. Повтори, пожалуйста."
-     ]
-    },
     "tier": "reprompt"
    },
    {
@@ -620,16 +615,11 @@
      "YES_NO"
     ],
     "max_tokens": 3,
+    "note": "The reply is built by the router (clarify.py): the likeliest action as a question, else what was heard and the kinds of action of this home.",
     "patterns": [
      "..."
     ],
     "priority": -30,
-    "reply": {
-     "kind": "canned",
-     "say": [
-      "Не расслышал. Повтори, пожалуйста."
-     ]
-    },
     "tier": "reprompt"
    },
    {
@@ -3276,5 +3266,5 @@
   "locale": "ru",
   "version": 1
  },
- "source_sha256": "8be6cd5086e7bfe90310175adbfe759548365c886b1594818e251f400ca2cee2"
+ "source_sha256": "563e267ddcf1de937596617429627e2785c6d7aaf7a73cbcc06426dbf562c164"
 }
