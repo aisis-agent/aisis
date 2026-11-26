@@ -162,6 +162,19 @@ class WordingTests(unittest.TestCase):
         self.assertEqual(clarify.accusative("телевизор"), "телевизор")
         self.assertEqual(clarify.accusative("свеча"), "свечу")
 
+    def test_every_feminine_word_of_a_multi_word_name_is_a_direct_object(self):
+        self.assertEqual(clarify.accusative("станция мини гостиная"), "станцию мини гостиную")
+        self.assertEqual(clarify.accusative("синяя лампа"), "синюю лампу")
+        self.assertEqual(clarify.accusative("ультра лампа"), "ультра лампу")
+        self.assertEqual(clarify.accusative("колонка ультра"), "колонку ультра")
+        self.assertEqual(clarify.accusative("лампа в студии"), "лампу в студии")
+        self.assertEqual(clarify.accusative("телевизор гостиная"), "телевизор гостиная")
+        self.assertEqual(clarify.accusative("яндекс станция мини гостиная"), "яндекс станцию мини гостиную")
+
+    def test_the_continue_question_names_a_multi_word_player_in_the_accusative(self):
+        self.assertEqual(" ".join(clarify.CONTINUE.ask.format(n=clarify.accusative("станция мини гостиная")).split()),
+                         "продолжить станцию мини гостиную")
+
     def test_the_imperative_becomes_the_question_infinitive(self):
         self.assertEqual(clarify.infinitive("поставь телевизор на паузу"), "поставить телевизор на паузу")
         self.assertEqual(clarify.infinitive("который час"), "который час")
