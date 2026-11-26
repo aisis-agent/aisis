@@ -249,14 +249,28 @@ def nearness(words: Words, heard: Sequence[str], phrase: Sequence[str], name: fr
     return matched / total - min(_MAX_EXTRA, extra * extra_cost), not named
 
 
+_INDECLINABLE = frozenset(("ультра", "мини", "макси", "мега", "супер", "гипер", "экстра", "плюс", "про", "макс"))   # foreign name parts keep their form
+
+
+def _feminine_noun(word: str) -> bool:
+    return len(word) > 3 and word not in _INDECLINABLE and word.endswith(("а", "я")) and not word.endswith(("ая", "яя"))
+
+
 def accusative(name: str) -> str:
-    """«лампа в студии» -> «лампу в студии», «ультра лампа» -> «ультра лампу»: the head noun of a feminine name as a direct object (the word
-    before the first preposition, else the last word; a masculine inanimate noun is unchanged)."""
+    """«лампа в студии» -> «лампу в студии», «станция мини гостиная» -> «станцию мини гостиную», «ультра лампа» -> «ультра лампу»: when the
+    name before its first preposition has a feminine noun (the first one is its head), the head and the feminine adjectives next to it take
+    the direct-object case. A masculine head («телевизор гостиная») and indeclinable foreign parts (мини, ультра) are unchanged."""
     words = name.split()
     stop = next((index for index, word in enumerate(words) if word in _PREPOSITIONS and index > 0), len(words))
-    head = words[stop - 1] if words else ""
-    if len(head) > 3 and head.endswith(("а", "я")) and not head.endswith(("ая", "яя")):
-        words[stop - 1] = head[:-1] + ("у" if head.endswith("а") else "ю")
+    head = next((index for index in range(stop) if _feminine_noun(words[index])), None)
+    if head is None:
+        return name
+    for index in range(stop):
+        word = words[index]
+        if index == head:
+            words[index] = word[:-1] + ("у" if word.endswith("а") else "ю")
+        elif len(word) > 3 and word.endswith(("ая", "яя")):
+            words[index] = word[:-2] + ("ую" if word.endswith("ая") else "юю")
     return " ".join(words)
 
 
