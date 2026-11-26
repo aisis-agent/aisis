@@ -8,7 +8,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import ha_client
 import voice_skills
+
+
+class ConnectedClient:
+    url = "http://ha:8123"
+
+    def access_token(self):
+        return "fresh-token"
+
+
+class DisconnectedClient:
+    @property
+    def url(self):
+        raise ha_client.NotConnected("not connected")
 
 
 class WeatherParseTests(unittest.TestCase):
@@ -195,6 +209,9 @@ class WeatherRunnerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.object(voice_skills.ha_client, "default", return_value=DisconnectedClient())
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def fake_weather(self, body: str) -> str:
         path = os.path.join(self.tmp.name, "weather")
@@ -209,10 +226,19 @@ class WeatherRunnerTests(unittest.TestCase):
             env["AISIS_WEATHER_COMMAND"] = '["%s"]' % self.fake_weather(weather_body)
         return voice_skills.Skills(env)
 
-    def test_weather_runs_the_cli_with_the_mode_and_the_ha_cli_proxy(self):
-        skills = self.skills('echo "$@ $WEATHER_HA_URL"')
-        reply = asyncio.run(skills.answer("Какая погода завтра"))
-        self.assertEqual(reply, "say --tomorrow http://127.0.0.1:8795")
+    def test_weather_runs_the_cli_with_the_mode_and_the_connected_home_assistant(self):
+        skills = self.skills('echo "$@ $WEATHER_HA_URL $WEATHER_HA_TOKEN"')
+        with mock.patch.object(voice_skills.ha_client, "default", return_value=ConnectedClient()):
+            reply = asyncio.run(skills.answer("Какая погода завтра"))
+        self.assertEqual(reply, "say --tomorrow http://ha:8123 fresh-token")
+
+    def test_weather_runs_without_home_assistant_settings_when_not_connected(self):
+        skills = self.skills('echo "$@ [$WEATHER_HA_URL][$WEATHER_HA_TOKEN]"')
+        with mock.patch.object(voice_skills.ha_client, "default", return_value=DisconnectedClient()), \
+                self.assertLogs(voice_skills.LOG, "INFO") as logged:
+            reply = asyncio.run(skills.answer("Какая погода завтра"))
+        self.assertEqual(reply, "say --tomorrow [][]")
+        self.assertEqual(len([line for line in logged.output if "weather_ha_not_connected" in line]), 1)
 
     def test_weather_failure_is_an_honest_sentence(self):
         self.assertEqual(asyncio.run(self.skills("exit 3").answer("какая погода")), voice_skills.WEATHER_FAILED)
@@ -261,8 +287,8 @@ class WeatherRunnerTests(unittest.TestCase):
         self.assertEqual(child["HOME"], self.tmp.name)
         self.assertEqual(child["LANG"], "C.UTF-8")
         self.assertEqual(child["WEATHER_LAT"], "1.5")
-        self.assertEqual(child["WEATHER_HA_URL"], "http://127.0.0.1:8795")
-        self.assertEqual(child["WEATHER_HA_TOKEN"], "via-ha-cli")
+        self.assertNotIn("WEATHER_HA_URL", child)
+        self.assertNotIn("WEATHER_HA_TOKEN", child)
 
     def test_missing_cli_is_an_honest_sentence(self):
         skills = voice_skills.Skills({"PATH": "/nonexistent"})
@@ -291,11 +317,13 @@ class WeatherRunnerTests(unittest.TestCase):
             voice_skills.Skills({"AISIS_WEATHER_COMMAND": '["/bin/true\\u0000ignored"]'})
 
     def test_the_child_environment_is_one_function_shared_with_the_installer_check(self):
-        env = voice_skills.weather_child_env({"PATH": "/usr/bin", "HOME": "/h", "WEATHER_LAT": "1", "HA_TOKEN": "x"},
-                                             "http://ha-cli")
+        env = voice_skills.weather_child_env({"PATH": "/usr/bin", "HOME": "/h", "WEATHER_LAT": "1", "HA_TOKEN": "x",
+                                              "WEATHER_HA_TOKEN": "stale"}, ConnectedClient())
         self.assertEqual(env["WEATHER_LAT"], "1")
-        self.assertEqual(env["WEATHER_HA_URL"], "http://ha-cli")
-        self.assertEqual(env["WEATHER_HA_TOKEN"], "via-ha-cli")
+        self.assertEqual(env["WEATHER_HA_URL"], "http://ha:8123")
+        self.assertEqual(env["WEATHER_HA_TOKEN"], "fresh-token")
+        self.assertEqual(voice_skills.describe_child_env(env), "WEATHER_HA_URL=http://ha:8123 WEATHER_HA_TOKEN=<set>")
+        self.assertNotIn("WEATHER_HA_URL", voice_skills.weather_child_env({"PATH": "/usr/bin"}, DisconnectedClient()))
         self.assertNotIn("HA_TOKEN", env)
         self.assertTrue(env["PATH"].startswith("/usr/bin"))
 

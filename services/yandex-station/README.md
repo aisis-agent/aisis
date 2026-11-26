@@ -34,7 +34,7 @@ Yandex Station Mini (rooted, LAN 192.168.0.56)
                  ├─ adapter aisis-station-adapter :31117  (ChatGPT + Bracho TTS + processor)
                  │    ├─ pm aisis-station-pm :31118        (speech prompts via ChatGPT browser CDP)
                  │    ├─ embed aisis-station-embed          (e5-small ONNX memory sidecar)
-                 │    └─ ha-cli :8795                      (Home Assistant proxy w/ state cache)
+                 │    └─ Home Assistant (mDNS-discovered, signed in via /ha) ← adapter, dashboard, quasar layer
                  └─ stt aisis-station-stt :31121            (streaming gateway → Wyoming whisper
                                                             tcp://100.75.131.84:10300, CUDA)
 support services: aisis-station-kit :18080 (eQuasar sync server, ~/lite-kit),
@@ -49,7 +49,6 @@ support services: aisis-station-kit :18080 (eQuasar sync server, ~/lite-kit),
 | 31117 | adapter (processor + TTS/v1) | aisis-station-adapter.service |
 | 31118 | pm (ChatGPT browser CDP) | aisis-station-pm.service |
 | 31121 | streaming STT gateway | aisis-station-stt.service |
-| 8795  | Home Assistant CLI proxy | aisis-ha-cli.service |
 | 8781  | dashboard | aisis-dashboard.service |
 | 31119 | postgres (loopback) | aisis-yandex-postgres-1 |
 | 31115/31116/31114 | quasar switch (uniproxy+HTTP/API/f-state): 31115 and 31114 listen on all interfaces, 31116 on loopback | aisis-switch-prod |
@@ -106,8 +105,8 @@ weather-cli takes the Home Assistant home zone; idempotent, `--check` reports dr
 on PATH or in `~/.local/bin` at call time (no restart); `AISIS_WEATHER_COMMAND='["/path/weather"]'` overrides. A missing
 CLI shows up as `weather_failed reason=weather_cli_not_found` in the adapter log (a failing run as `reason=exit_N` with
 its stderr). Without a place config every answer depends on Home Assistant being up (the home zone is read from it). weather-cli
-reads Home Assistant through `aisis-ha-cli` (`WEATHER_HA_URL`, default `AISIS_HACLI_URL`); ha-cli forwards the
-query string, which `weather.get_forecasts?return_response` needs.
+reads Home Assistant directly: `WEATHER_HA_URL` and a fresh access token (`WEATHER_HA_TOKEN`) are resolved from the connection store
+each time the CLI is started.
 
 ## Quasar source
 
@@ -128,8 +127,8 @@ Not yet supported: **deploying** an image built that way. The corpus-evidence pr
 `COPY src /src` layer over a base image with overlay provenance (`deploy.sh` `build_image overlay`), which a from-scratch build is
 not; teaching the protocol a checkout-built candidate is part of https://github.com/alex-mextner/aisis/issues/188. Until then the
 overlay path above is the only deploy path and nothing in it changed. `verify_quasar_image.py` only reads the image
-(`docker create --pull=never` + `docker cp`, no run, no environment). The Home Assistant token is passed at run time
-(`AISIS_HA_TOKEN` or an untracked `/src/ha.config.json`), never read from the repository.
+(`docker create --pull=never` + `docker cp`, no run, no environment). The quasar layer reads the Home Assistant connection store
+(`/run/aisis-ha/connection.json`, see «Home Assistant connection»), never a token from the repository.
 
 | Public repository | What | Base and license |
 |---|---|---|
@@ -144,42 +143,51 @@ hash pins refuse it). The `weather-via-cli` baseline (`entity-index.ts`, sha256 
 patched files (`asr-correct.ts` `1f337435…`, `ha-intents.ts` after speaker-room `f4ab25c3…`, `grammar-hook.ts` `f6f6021e…`) are
 the ones at `aisis-pre-weather-20261117`.
 
-### A command is done when the device says so (ha-cli verification)
+### A command is done when the device says so (confirmed service calls)
 
 2026-11-19 21:21 «выключи свет»: the light was off 0.85 s after the command, Home Assistant's own HTTP answer took longer than the
-2 s ha-cli then allowed, ha-cli treated the silence as «Home Assistant is down», queued the call (and replayed it behind the
+2 s the old proxy allowed, the proxy treated the silence as «Home Assistant is down», queued the call (and replayed it behind the
 speaker's back) and the quasar layer announced «Умный дом перезагружается»: a reboot nobody observed (HA's log is continuous since
 04:33). Rule since: after any state-changing call the outcome is read from the DEVICE STATE, and what is said never names a cause
 that was not observed.
 
-- **Where**: `hacli.py` runs every `POST /api/services/<domain>/<service>` against `ha_verify.py` (per domain: light/switch/fan on-off,
-  brightness and colour temperature, climate mode and setpoint, media volume/mute/play/pause, cover, lock, number/select;
-  `entity_id: all` for lights/switches/fans through one template read). While the call is in flight it polls the target states
-  and answers as soon as they are as expected; when Home Assistant's answer is an error or never comes it checks the state anyway.
-  A call with nothing to check (tts, scripts, scenes, area/device targets) is answered as Home Assistant answered it.
-- **Answers** (all inside `CALL_BUDGET_S` = 2.5 s, the callers abort at 3 s): `200` + `X-Aisis-Verify: ok` (state as expected,
-  `X-Aisis-Verified-State`, `X-Aisis-Verify-Ms`); `502` + `failed` (Home Assistant answered, the device did not follow, or is
-  `unavailable`; `X-Aisis-Ha-Status` is what Home Assistant said); `504` + `unknown` (no state could be read: silence, never a
-  restart); `202` + `X-Aisis-Queue`, `X-Aisis-Eta`, `X-Aisis-Down: refused|reset|dns|unreachable|starting` only when Home Assistant
-  was OBSERVED gone (refused/reset/502-504/«starting» on the call AND on a second look) — the call then waits for its return
-  and is replayed and checked; `4xx` Home Assistant's own rejection. `X-Aisis-Action` is the journal id of the action.
-- **Availability** (`/health`: `status` up|slow|down, `last_error`): one unanswered request is `slow`, `down` needs evidence or 5 s
-  of silence; only down windows are measured into `ha-outages.json` (they feed the recovery ETA), a slow answer is not an outage.
+- **Where**: `ha_call.py` (the adapter, in process) sends the call over Home Assistant's WebSocket (`call_service`) and, on the same
+  connection, subscribes to the state triggers of the target entities (`subscribe_trigger`). It answers as soon as Home Assistant's
+  own events show the state `ha_verify.py` expects (per domain: light/switch/fan on-off, brightness and colour temperature, climate
+  mode and setpoint, media volume/mute/play/pause, cover, lock, number/select; `entity_id: all` for lights/switches/fans through one
+  template read after Home Assistant's answer) — not when its HTTP answer finally arrives. A call with nothing to check (tts, scripts,
+  scenes, area/device targets) is answered as Home Assistant answered it. No polling, no cache, no queue.
+- **Verdicts** (all inside `CALL_BUDGET_S` = 2.5 s; the quasar layer's fetch aborts at 3 s, the adapter's session at 3 s): `ok` (state as
+  expected), `failed` (Home Assistant answered, the device did not follow within the budget, or is `unavailable`), `unknown` (no state
+  could be read, Home Assistant did not answer in time, the connection was lost in flight, or a climate unit has not shown the command YET
+  — 2026-11-15 and 2026-11-20: an air conditioner takes seconds), `skipped` (nothing in the state tells, or Home Assistant rejected the
+  call). When Home Assistant cannot be reached at all (refused, reset, DNS, unreachable, «starting», 5xx) NOTHING is sent and nothing is
+  kept for later; the verdict says so (`ha_down_observed`, with the evidence) and the speaker says «Home Assistant сейчас недоступен,
+  команда не выполнена.» A silence of a few seconds is never called a reboot.
 - **Adapter** (`ha_actions.py`): the reply is chosen from the verdict: «Яркость 40 процентов.» when verified, «Команду отправил,
   но не вижу, чтобы устройство её выполнило.» when Home Assistant said yes and the device did not move, «Не получилось проверить
-  ответ Home Assistant.» when nothing could be read, «Home Assistant недоступен, команду выполню, когда он вернётся.» only on an
-  observed outage. The utterance trace keeps per call `verify`, `aid`, `ha`, `down` and per reply `reply_why` (reason code).
-- **Logs**: one JSON line per action, availability change and replay: `journalctl --user -u aisis-ha-cli -g ha_action` or
-  `~/.local/share/aisis/ha-actions.jsonl` (+ `.1`, `.2`, 1 MB each, lines ≤ 1800 chars, scalar arguments only, no tokens, long texts
-  as `(N chars)`). Fields: `service`, `entities`, `expect`, `before`, `call` {status|error, ms; `pending` when the caller was answered
-  first, the end follows as an `ha_response` line}, `verify` {result, reason, attempts, ms, after, wrong}, `reply` {status, why}, `ms`.
-  The clip post and the session page show them (`проверено: light.x выкл за 0.8 с` / `не подтверждено: …`) by time, and by journal
-  id for the adapter's own calls. `ha_fakes.py` is the fake Home Assistant of the tests; `test_ha_replay.py` replays the clip through
-  an isolated adapter + ha-cli + fake Home Assistant.
-- **Quasar layer**: its own Home Assistant calls (`ha-intents.ts`, in the image) get the verdict from the same headers: `200` is a verified
-  success; it still reads `202` as «перезагружается» and any other non-2xx as «Не удалось выполнить команду»; an overlay that says what
-  ha-cli observed (`X-Aisis-Verify`, `X-Aisis-Down`) instead is the open follow-up. `deploy.sh unit ha-cli hacli.py` installs `ha_verify.py` and
-  `ha_action_log.py` with it.
+  ответ Home Assistant.» when nothing could be read. The utterance trace keeps per call `verify`, `ha`, `down` and per reply `reply_why`.
+- **Quasar layer**: its own calls go to Home Assistant directly through the same connection store (`ha-intents.ts` in aisis-quasar) and
+  it confirms them by its own read-back.
+- **Record**: Home Assistant's own logbook is the journal. The clip post and the session page show the logbook entries of the time window
+  made by AISIS' own Home Assistant user (`ha_logbook.py`). `ha_fakes.py` is the fake Home Assistant of the tests (REST, the auth
+  endpoints, the WebSocket); `test_ha_call.py` replays the incidents, `test_ha_replay.py` replays the clip through an isolated adapter.
+
+### What the old local proxy did, and what became of each layer
+
+`aisis-ha-cli` (port 8795, `hacli.py`) stood between every consumer and Home Assistant, with a fake token. It is gone; each layer was judged
+by whether Home Assistant's own API cannot do it:
+
+| Layer of the proxy | Verdict | Why |
+|---|---|---|
+| Forwarding with the real token | retired | Every component signs in itself through the shared client; the quasar layer reads the same connection store |
+| State cache served while Home Assistant is down | retired | A cached state is not a reading; every consumer already treated it as «no reading». Names for recognition are rebuilt from Home Assistant when it is up (`extra_dict_dynamic` keeps its previous layer on a failed read) |
+| Verification by polling the states | replaced | Home Assistant's own `state_changed` triggers over the WebSocket give the same answer sooner and without a timer (`ha_call.py`); the per-domain expectations of `ha_verify.py` stay: they are the definition of «done», not a copy of Home Assistant |
+| Queue of calls while Home Assistant is down, replayed on its return | retired | Replaying a voice command minutes later is unsafe (an older write could land after a newer one; a light turns on at 03:00 after the nightly restart); the speaker says it was not done |
+| Outage statistics, recovery ETA | retired | The ETA is no longer spoken; Home Assistant's availability is what it answers now |
+| Private action journal (`ha-actions.jsonl`) | replaced | Home Assistant's logbook, filtered to AISIS' user |
+
+The adapter keeps no copy of Home Assistant's state either: reads are fresh per question.
 
 ## Home Assistant connection (found by itself, signed in with two clicks)
 
@@ -252,7 +260,7 @@ directory the quasar containers mount read-only), through one client, `code/ha_c
   The deploy never touches the active color until stage + idle-color checks pass.
   `deploy.sh rollback` flips back. `bgctl.py status` shows the current colors.
 - **Failover**: `aisis-failover.service` runs `bluegreen/failover.py --env prod`,
-  probing adapter/stt/pm/ha-cli/kit/lan-proxy/embed units and the postgres,
+  probing adapter/stt/pm/kit/lan-proxy/embed units and the postgres,
   tls-voice, dns-relay containers. A `maintenance` file in
   `~/.local/share/aisis/bluegreen-state/` suspends it during deploys.
 - **The `pm` component** is `aisis-station-pm`, this repository's bridge to the ChatGPT browser that the pm product (the
@@ -427,7 +435,7 @@ directory the quasar containers mount read-only), through one client, `code/ha_c
   «Лисы, включи свет» loses it; as the whole utterance they stay an activation.
   **Dynamic layer** (`code/extra_dict_dynamic.py`, ticket #269): a second layer, in the same format, built at runtime from the home itself and never
   committed. Vocabulary: the friendly names and rooms of Home Assistant (`voice_vocab.fetch_catalog`, the read-only `/api/states` list and the area
-  template through ha-cli: nothing is actuated; names that carry a digit run, a dot, a colon, an at-sign, a slash or a long hexadecimal token are never
+  template of Home Assistant: nothing is actuated; names that carry a digit run, a dot, a colon, an at-sign, a slash or a long hexadecimal token are never
   taken, so ids, addresses and serials cannot reach the file) and the imperatives and comparatives of the intent grammar (`on/off/set/play/cmd`
   verbs, «громче», «тише», «теплее» ...). Evidence: the stored Whisper transcripts of `voice_clips` (`sent`, not the speaker's own spotter text),
   read-only. An entry is a word that is none of the known words (the vocabulary, every word of the grammar bundle, the home's own names) but is
@@ -538,8 +546,10 @@ Prepare the cache once after the Home Assistant `remote_announcements` component
 has generated its five clips:
 
 ```bash
-python3 services/yandex-station/code/announcement_cache.py --source http://HA_HOST:8123
+python3 services/yandex-station/code/announcement_cache.py
 ```
+
+It reads the clips from the Home Assistant AISIS is connected to (the dashboard's `/ha` page); `--source <base URL>` imports from another instance.
 
 This command downloads and validates the fixed labels only; it does not play them.
 The Home Assistant component deliberately exposes these generic labels and their
@@ -761,7 +771,7 @@ Three grammar intents answer from live data instead of a fixed line or the langu
   through it («а ещё?» or the same question again within two minutes) and ends with an example phrase the grammar is tested to read. Home Assistant
   not answering within 1.5 s leaves the home out and says so. A leading reaction («Тоже неплохо. А что ты умеешь?») changes nothing.
 - **«какой кондиционер включён»** (`home.climate_status`, a `pre` intent, so the quasar layer cannot turn it into a question): `ha.climate_status` reads the
-  `climate.*` states through ha-cli (fresh per question, read-only, never a service call) and says which units are on, mode, set-point, room temperature and
+  `climate.*` states of Home Assistant (fresh per question, read-only, never a service call) and says which units are on, mode, set-point, room temperature and
   since when, rounded («около 20 минут», «больше часа», «с утра»); `code/home_status.py` holds the sentences and the rounding. Every failure is one
   short «состояние … узнать не удаётся».
 - **a bare «кондиционер на втором этаже»** (`home.climate_bare`) is the same answer, in shadow: traced with `declined: … AISIS_STATUS_BARE`, nothing is said, the

@@ -9,7 +9,9 @@ Test double only: nothing here talks to a real Home Assistant.
 """
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import json
 import re
 import secrets
@@ -21,6 +23,8 @@ import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
+
+import ha_ws
 
 
 def entity(entity_id: str, state: str, **attrs: Any) -> dict:
@@ -68,6 +72,49 @@ def default_effect(domain: str, service: str, body: dict, states: dict[str, dict
         state["last_changed"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
 
 
+class _WsConn:
+    """One WebSocket of the fake: server-side frames (unmasked out, masked in), a write lock because events come from other threads."""
+
+    def __init__(self, handler: "_Handler") -> None:
+        self.handler = handler
+        self.lock = threading.Lock()
+        self.subs: dict[int, set[str]] = {}
+        self.authed = False
+
+    def send(self, message: dict) -> None:
+        frame = ha_ws.encode_frame(json.dumps(message).encode(), 1, mask=False)
+        with self.lock:
+            try:
+                self.handler.wfile.write(frame)
+                self.handler.wfile.flush()
+            except OSError:
+                pass
+
+    def recv(self) -> dict | None:
+        rfile = self.handler.rfile
+        head = rfile.read(2)
+        if len(head) < 2:
+            return None
+        size = head[1] & 0x7F
+        if size == 126:
+            size = struct.unpack(">H", rfile.read(2))[0]
+        elif size == 127:
+            size = struct.unpack(">Q", rfile.read(8))[0]
+        key = rfile.read(4) if head[1] & 0x80 else b""
+        payload = rfile.read(size)
+        if key:
+            payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+        if head[0] & 0x0F == 8:
+            return None
+        return json.loads(payload.decode())
+
+    def close(self) -> None:
+        try:
+            self.handler.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -87,7 +134,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
         except OSError:
-            pass                    # the caller gave up (ha-cli's own timeout)
+            pass                    # the caller gave up (its own timeout)
 
     def _starting(self) -> bool:
         if self.ha.starting:
@@ -100,12 +147,63 @@ class _Handler(BaseHTTPRequestHandler):
         if not self.ha.require_auth:
             return True
         header = self.headers.get("Authorization") or ""
-        token = header[7:] if header.startswith("Bearer ") else ""
-        expires = self.ha.access_tokens.get(token)
-        if token in self.ha.long_lived or (expires is not None and expires > time.time()):
+        if self.ha.token_valid(header[7:] if header.startswith("Bearer ") else ""):
             return True
         self._reply(401, "401: Unauthorized")
         return False
+
+    def _websocket(self) -> None:
+        """`/api/websocket`: the upgrade, `auth_required` -> `auth`, `subscribe_trigger` (state triggers), `call_service`."""
+        if self.ha.hang_ws:
+            self.ha.stopping.wait(30)
+            return
+        accept = base64.b64encode(hashlib.sha1((self.headers["Sec-WebSocket-Key"] + ha_ws.GUID).encode()).digest()).decode()
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        self.close_connection = True
+        conn = _WsConn(self)
+        conn.send({"type": "auth_required", "ha_version": "2026.9.3"})
+        try:
+            while True:
+                message = conn.recv()
+                if message is None:
+                    return
+                if message.get("type") == "auth":
+                    ok = not self.ha.require_auth or self.ha.token_valid(str(message.get("access_token")))
+                    conn.send({"type": "auth_ok", "ha_version": "2026.9.3"} if ok else {"type": "auth_invalid", "message": "Invalid access token"})
+                    if not ok:
+                        return
+                    self.ha.sockets.append(conn)
+                    conn.authed = True
+                elif not conn.authed:
+                    return
+                elif message.get("type") == "subscribe_trigger":
+                    wanted = message["trigger"]["entity_id"]
+                    conn.subs[message["id"]] = set([wanted] if isinstance(wanted, str) else wanted)
+                    conn.send({"id": message["id"], "type": "result", "success": True, "result": None})
+                elif message.get("type") == "auth/current_user":
+                    conn.send({"id": message["id"], "type": "result", "success": True, "result": {"id": self.ha.user_id, "name": "AISIS"}})
+                elif message.get("type") == "call_service":
+                    threading.Thread(target=self._call_service, args=(conn, message), daemon=True).start()
+        except OSError:
+            return
+        finally:
+            if conn in self.ha.sockets:
+                self.ha.sockets.remove(conn)
+
+    def _call_service(self, conn: "_WsConn", message: dict) -> None:
+        self.ha.requests.append(("WS", f"/api/services/{message['domain']}/{message['service']}", message.get("service_data") or {}))
+        status, answered = self.ha.run_script(message["domain"], message["service"], message.get("service_data") or {})
+        if not answered:
+            return
+        if status == 200:
+            conn.send({"id": message["id"], "type": "result", "success": True, "result": {"context": {"id": "ctx"}, "response": None}})
+        else:
+            code = {400: "invalid_format", 404: "not_found"}.get(status, "home_assistant_error")
+            conn.send({"id": message["id"], "type": "result", "success": False, "error": {"code": code, "message": "service call failed"}})
 
     def do_GET(self):
         self.ha.requests.append(("GET", self.path, None))
@@ -113,6 +211,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/auth/providers":
             self._reply(200, {"providers": [{"name": "Home Assistant Local", "id": None, "type": "homeassistant"}]})
+            return
+        if self.path == "/api/websocket":
+            self._websocket()
             return
         if self.path.startswith("/api/") and not self._authorized():
             return
@@ -128,6 +229,8 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/states/"):
             state = self.ha.states.get(self.path.rsplit("/", 1)[1])
             self._reply(200, state) if state else self._reply(404, {"message": "Entity not found."})
+        elif self.path.startswith("/api/logbook/"):
+            self._reply(200, list(self.ha.logbook))
         else:
             self._reply(404, {})
 
@@ -177,6 +280,10 @@ class FakeHomeAssistant:
         self.refresh_tokens: dict[str, str] = {}    # refresh token -> client id
         self.access_tokens: dict[str, float] = {}   # access token -> expiry (epoch)
         self.long_lived: set[str] = set()
+        self.sockets: list[_WsConn] = []
+        self.hang_ws = False            # the WebSocket upgrade is never answered (a wedged Home Assistant)
+        self.logbook: list[dict] = []   # the entries `GET /api/logbook/<time>` answers with
+        self.user_id = "user-aisis"     # `auth/current_user` answers with this id
         self.stopping = threading.Event()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -258,27 +365,59 @@ class FakeHomeAssistant:
         self.stopping.set()
         self.stop_listening()
 
-    def service(self, domain: str, service: str, body: dict, handler: _Handler) -> None:
+    def token_valid(self, token: str) -> bool:
+        expires = self.access_tokens.get(token)
+        return token in self.long_lived or (expires is not None and expires > time.time())
+
+    def _apply(self, domain: str, service: str, body: dict, script: Script) -> None:
+        """Run the effect of a service call and tell every WebSocket trigger subscription which states it changed."""
+        effect = script.effect or (lambda b, states: default_effect(domain, service, b, states))
+        before = copy.deepcopy(self.states)
+        effect(body, self.states)
+        for entity_id, state in self.states.items():
+            old = before.get(entity_id)
+            if old is None or {k: v for k, v in old.items() if k != "last_changed"} != {k: v for k, v in state.items() if k != "last_changed"}:
+                self.publish(entity_id, old, copy.deepcopy(state))
+
+    def publish(self, entity_id: str, old: dict | None, new: dict) -> None:
+        for conn in list(self.sockets):
+            for sub_id, wanted in list(conn.subs.items()):
+                if entity_id in wanted:
+                    conn.send({"id": sub_id, "type": "event", "event": {"variables": {"trigger": {
+                        "platform": "state", "entity_id": entity_id, "from_state": old, "to_state": new}}}})
+
+    def drop_sockets(self) -> None:
+        """Home Assistant goes away while a WebSocket is open."""
+        for conn in list(self.sockets):
+            conn.close()
+
+    def run_script(self, domain: str, service: str, body: dict) -> tuple[int, bool]:
+        """Do what the script says for one call: change the device `state_after` later, then wait `respond_after`. Returns (status,
+        answered); not answered means the answer never comes (a hung Home Assistant)."""
         script = self.scripts.get(f"{domain}.{service}", Script())
         arrived = time.monotonic()
-        effect = script.effect or (lambda b, states: default_effect(domain, service, b, states))
         if script.state_after is not None:
             if script.state_after <= 0:
-                effect(body, self.states)
+                self._apply(domain, service, body, script)
             else:
-                timer = threading.Timer(script.state_after, effect, (body, self.states))
+                timer = threading.Timer(script.state_after, self._apply, (domain, service, body, script))
                 timer.daemon = True
                 timer.start()
         if script.respond_after is None:
             self.stopping.wait(30)
-            return
+            return script.status, False
         remaining = script.respond_after - (time.monotonic() - arrived)
         if remaining > 0 and self.stopping.wait(remaining):
-            return
-        handler._reply(script.status, [] if script.status == 200 else {"message": "service call failed"})
+            return script.status, False
+        return script.status, True
+
+    def service(self, domain: str, service: str, body: dict, handler: _Handler) -> None:
+        status, answered = self.run_script(domain, service, body)
+        if answered:
+            handler._reply(status, [] if status == 200 else {"message": "service call failed"})
 
     def render(self, template: str) -> str:
-        """Just the templates ha-cli and the adapter send: the entities of a domain that are not in a state
+        """Just the templates the client and the adapter send: the entities of a domain that are not in a state
         (ha_verify.whole_domain_template), the entities of an area, the registry (entity, name, area per line), the media players
         with state, area and device (tvpause.ROOM_TEMPLATE)."""
         match = re.search(r"states\.(\w+) .*rejectattr\('state', 'eq', \"(\w+)\"\)", template)

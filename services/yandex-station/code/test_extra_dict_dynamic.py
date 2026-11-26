@@ -209,45 +209,45 @@ class Refresh(unittest.TestCase):
         conn.commit()
         conn.close()
 
-    def fetch(self, url, strict=False):
+    def fetch(self, strict=False):
         self.assertTrue(strict, "a refresh that installs for hours must not take a degraded catalog")
         return HOME
 
-    def unreachable(self, url, strict=False):
+    def unreachable(self, strict=False):
         raise voice_vocab.CatalogUnavailable("Home Assistant gave no device states")
 
     def test_only_sent_whisper_clips_are_evidence(self):
         self.assertEqual([clip_id for clip_id, _ in reversed(dynamic.stored_transcripts(self.db))], ["c0", "c1", "c2"])
 
     def test_refresh_installs_the_layer(self):
-        self.assertEqual(dynamic.refresh(self.out, self.db, "http://ha", self.fetch), 0)
+        self.assertEqual(dynamic.refresh(self.out, self.db, self.fetch), 0)
         self.assertEqual([entry.id for entry in extra_dict.load(self.out, layer="dynamic").entries], [dynamic.entry_id("люстра", HEARD)])
 
     def test_an_unreadable_home_keeps_the_previous_layer(self):
-        dynamic.refresh(self.out, self.db, "http://ha", self.fetch)
+        dynamic.refresh(self.out, self.db, self.fetch)
         installed = Path(self.out).read_bytes()
         with self.assertLogs("aisis.extra_dict_dynamic", level="WARNING"):
-            self.assertEqual(dynamic.refresh(self.out, self.db, "http://ha", self.unreachable), 3)
+            self.assertEqual(dynamic.refresh(self.out, self.db, self.unreachable), 3)
         self.assertEqual(Path(self.out).read_bytes(), installed)
 
     def test_a_failed_build_keeps_the_previous_layer(self):
-        dynamic.refresh(self.out, self.db, "http://ha", self.fetch)
+        dynamic.refresh(self.out, self.db, self.fetch)
         installed = Path(self.out).read_bytes()
         with self.assertLogs("aisis.extra_dict_dynamic", level="ERROR"):
-            self.assertEqual(dynamic.refresh(self.out, os.path.join(self.tmp.name, "missing.sqlite3"), "http://ha", self.fetch), 1)
+            self.assertEqual(dynamic.refresh(self.out, os.path.join(self.tmp.name, "missing.sqlite3"), self.fetch), 1)
         self.assertEqual(Path(self.out).read_bytes(), installed)
 
     def test_a_refresh_with_no_change_reports_unchanged(self):
-        dynamic.refresh(self.out, self.db, "http://ha", self.fetch)
+        dynamic.refresh(self.out, self.db, self.fetch)
         before = Path(self.out).stat().st_mtime_ns
         with self.assertLogs("aisis.extra_dict_dynamic", level="INFO") as logs:
-            self.assertEqual(dynamic.refresh(self.out, self.db, "http://ha", self.fetch), 0)
+            self.assertEqual(dynamic.refresh(self.out, self.db, self.fetch), 0)
         self.assertIn("extra_dict_dynamic_unchanged", logs.output[0])
         self.assertEqual(Path(self.out).stat().st_mtime_ns, before)
 
     def test_the_database_is_opened_read_only(self):
         before = Path(self.db).read_bytes()
-        dynamic.refresh(self.out, self.db, "http://ha", self.fetch)
+        dynamic.refresh(self.out, self.db, self.fetch)
         conn = sqlite3.connect(self.db)
         try:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM voice_clips").fetchone(), (6,))

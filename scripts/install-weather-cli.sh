@@ -14,7 +14,7 @@
 #   WEATHER_LAT / WEATHER_LON / WEATHER_TZ
 #                      home place (the zone is checked with Python's zoneinfo, which is what weather-cli >= 0.2 uses); written (mode 0600) to ~/.config/weather-cli/config.json only when that path does
 #                      not exist yet.
-#                      Without them weather-cli takes the home zone of Home Assistant (reached through aisis-ha-cli),
+#                      Without them weather-cli takes the home zone of Home Assistant (read through the connected Home Assistant),
 #                      so a fresh host needs no file edit.
 #
 # Exit codes: 0 ok, 2 usage, 3 drift (--check), anything else a failed step (a line says which).
@@ -67,7 +67,7 @@ if argv is None:
         print("unset")  # the adapter's own rule: blank counts as unset
         sys.exit(0)
     argv = [sys.argv[2]]
-env = voice_skills.weather_child_env(dict(os.environ), os.environ.get("AISIS_HACLI_URL", voice_skills.DEFAULT_HACLI_URL))
+env = voice_skills.weather_child_env(dict(os.environ))
 try:
     # Its own session, like the adapter's child: on a timeout the whole group goes, not only the wrapper.
     probe = subprocess.Popen([*argv, "--version"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -95,12 +95,22 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import voice_skills
 
-env = voice_skills.weather_child_env(dict(os.environ), os.environ.get("AISIS_HACLI_URL", voice_skills.DEFAULT_HACLI_URL))
+env = voice_skills.weather_child_env(dict(os.environ))
 os.chdir(sys.argv[1])
 found = shutil.which("weather", path=env["PATH"])
 print(os.path.abspath(found) if found else "")
 PY
   }
+  # What the child gets from Home Assistant: the address, and only whether a token is set.
+  python3 -I - "$code_dir" <<'PY' >&2
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import voice_skills
+
+print("weather-cli: child env " + voice_skills.describe_child_env(voice_skills.weather_child_env(dict(os.environ))))
+PY
   override="$(adapter_run "")"
   if [ "$override" != unset ]; then
     # The adapter runs this argv as is, so it is the thing to check (no link, no PATH lookup).

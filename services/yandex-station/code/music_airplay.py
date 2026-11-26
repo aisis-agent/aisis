@@ -74,10 +74,37 @@ def _read_env_file(path: str) -> dict[str, str]:
     return out
 
 
+MA_SERVICE_TYPE = "_mass._tcp.local"
+MA_DISCOVERY_TTL_S = 60.0
+_discovered: tuple[float, str] | None = None   # (when, url) of the last mDNS look, an empty url when nothing answered
+_discovery_lock = threading.Lock()
+
+
+def _discover_ma_url(now: float | None = None) -> str:
+    """Where Music Assistant announces itself on the local network (`_mass._tcp`), cached for a minute; "" when nobody does."""
+    global _discovered
+    with _discovery_lock:
+        moment = time.monotonic() if now is None else now
+        if _discovered is not None and moment - _discovered[0] < MA_DISCOVERY_TTL_S:
+            return _discovered[1]
+        import ha_client
+        url = ""
+        for service in ha_client.browse(MA_SERVICE_TYPE):
+            announced = service.txt.get("base_url", "").rstrip("/")
+            if announced:
+                url = announced
+            elif service.addresses:
+                url = f"http://{service.addresses[0]}:{service.port}"
+            if url:
+                break
+        _discovered = (moment, url)
+        return url
+
+
 def _cfg() -> dict[str, str]:
     file_cfg = _read_env_file(MA_ENV_FILE)
     return {
-        "url": (os.environ.get("MA_URL") or file_cfg.get("MA_URL") or "http://192.168.0.39:8095").rstrip("/"),
+        "url": (os.environ.get("MA_URL") or file_cfg.get("MA_URL") or _discover_ma_url()).rstrip("/"),
         "token": os.environ.get("MA_TOKEN") or file_cfg.get("MA_TOKEN") or "",
         "player": os.environ.get("MA_PLAYER_ID") or file_cfg.get("MA_PLAYER_ID") or "",
     }
@@ -91,6 +118,8 @@ def ma_call(command: str, args: dict[str, Any] | None = None, timeout: float = 2
     cfg = _cfg()
     if not cfg["token"]:
         raise MaError("MA_TOKEN не задан")
+    if not cfg["url"]:
+        raise MaError("Music Assistant не найден в сети")
     req = urllib.request.Request(
         cfg["url"] + "/api",
         data=json.dumps({"command": command, "args": args or {}}).encode(),

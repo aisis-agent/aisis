@@ -16,10 +16,9 @@ import re
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import dialogstore
-import ha_action_log
 import session_links
 import trace_view
 import voiceclips
@@ -313,17 +312,15 @@ def _times(count: int) -> str:
     return "раз" if count % 100 in range(11, 15) or count % 10 not in (2, 3, 4) else "раза"
 
 
-def _ha_block(records: list[dict], known: set[str]) -> str:
-    """What ha-cli journalled for a phrase: the Home Assistant calls of the quasar layer (the adapter's own are in its trace, by id),
-    each with the verdict on the device state, and Home Assistant's availability changes."""
-    lines = ha_action_log.record_lines(records, known)
+def _ha_block(lines: list[tuple[int, str]]) -> str:
+    """Home Assistant's own logbook of what AISIS did during a phrase: the calls of the quasar layer and of the adapter alike."""
     if not lines:
         return ""
-    return "<div class=card><h2>Home Assistant (ha-cli)</h2><ul>" + "".join(f"<li>{e(text)}</li>" for _, text in lines) + "</ul></div>"
+    return "<div class=card><h2>Home Assistant</h2><ul>" + "".join(f"<li>{e(text)}</li>" for _, text in lines) + "</ul></div>"
 
 
 def render_session(dialog: dict | None, clips: list[dict], traces: list[dict], focus_clip: str | None = None, key: str = "",
-                   ha_actions: list[dict] | None = None) -> str:
+                   ha_lines: Callable[[float, float], list[tuple[int, str]]] | None = None) -> str:
     """`dialog`: dialogstore.get_dialog (None for a clip that has no dialog); `clips`: voice_clips rows (dicts) of the session, oldest
     first; `traces`: the adapter's records that fall into it. Orphan traces (matching no clip) are listed at the end."""
     if dialog is None and not clips:
@@ -353,8 +350,8 @@ def render_session(dialog: dict | None, clips: list[dict], traces: list[dict], f
         mine = [t for t in trace_view.traces_of_clip(clip, traces, until) if t["id"] not in used]
         used.update(t["id"] for t in mine)
         body.append(_clip_block(clip, mine, focus_clip, dialog, until, n == 0))
-        known = {call["aid"] for t in mine for call in t.get("calls") or [] if call.get("aid")}
-        body.append(_ha_block([r for r in ha_actions or () if clip["ts"] - trace_view.MATCH_BEFORE_S <= r["ts"] <= (until or clip["ts"] + 45)], known))
+        if ha_lines:
+            body.append(_ha_block(ha_lines(clip["ts"] - trace_view.MATCH_BEFORE_S, until or clip["ts"] + 45)))
     if dialog and not ordered:
         heard = "".join(f"<li>{e(h)}</li>" for h in dialog.get("heard") or [])
         if heard:

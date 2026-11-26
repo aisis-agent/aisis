@@ -280,6 +280,15 @@ class CacheTests(unittest.TestCase):
         finally:
             os.umask(previous_umask)
 
+    def test_without_a_source_the_connected_home_assistant_is_imported(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as folder, patch.object(module, "install", return_value={}) as install, \
+                patch("ha_client.default") as default, patch("sys.argv", ["importer", "--folder", folder]), \
+                redirect_stdout(io.StringIO()):
+            default.return_value.url = "http://connected-ha:8123"
+            module.main()
+        self.assertEqual(install.call_args.args[0], "http://connected-ha:8123")
+
     def test_normal_speech_does_not_enter_cache_path(self):
         module = load_module()
         self.assertFalse(module.is_marker("Обычная речь"))

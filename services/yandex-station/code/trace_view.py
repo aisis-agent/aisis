@@ -9,7 +9,7 @@ import math
 import re
 from typing import Any
 
-import ha_action_log
+import ha_wording
 
 # `skill` is the adapter's own handlers (voice_skills.py: weather, arithmetic, «включи музыку»), aisis code: not a Yandex Alice skill.
 LAYERS = {"grammar": "грамматика", "skill": "встроенный обработчик", "calc": "калькулятор", "jev": "Jev", "brain": "ИИ", "error": "ошибка"}
@@ -199,12 +199,11 @@ def call_line(call: dict) -> str:
     if kind == "ha":
         status = call.get("status") or call.get("error") or "—"
         extra = f" {call['data']}" if call.get("data") else ""
-        queued = " (в очереди)" if call.get("queued") else ""
         head = f"HA {call.get('service', '?')} {call.get('entity') or ''}{extra}"
-        if call.get("verify"):   # ha-cli read the device state after the call: that verdict, not Home Assistant's HTTP answer, is the result
-            verdict = ha_action_log.verdict_line(call["verify"], ha=call.get("ha"), down=call.get("down"), queued=bool(call.get("queued")))
+        if call.get("verify"):   # the device state was read after the call: that verdict, not Home Assistant's HTTP answer, is the result
+            verdict = ha_wording.verdict_line(call["verify"], ha=call.get("ha"), down=call.get("down"))
             return f"{head} → {verdict} · {ms_text(call.get('ms'))}".replace("  ", " ")
-        return f"{head} → {status}{queued} · {ms_text(call.get('ms'))}".replace("  ", " ")
+        return f"{head} → {status} · {ms_text(call.get('ms'))}".replace("  ", " ")
     if kind == "weather-cli":
         return f"weather-cli {call.get('argv', '')} → {'ок' if call.get('ok') else 'сбой'} · {ms_text(call.get('ms'))}"
     if kind == "music":
@@ -319,7 +318,7 @@ def ranked_lines(trace: dict, compact: bool = False, answered: str | None = None
     for call in trace.get("calls") or []:
         out.append((2, "🔧 " + call_line(call)))
     if trace.get("reply_why"):
-        out.append((2, "💬 причина ответа: " + ha_action_log.WHY_RU.get(trace["reply_why"], trace["reply_why"])))
+        out.append((2, "💬 причина ответа: " + ha_wording.WHY_RU.get(trace["reply_why"], trace["reply_why"])))
     if trace.get("jev"):
         out.append((3, "🧠 " + jev_line(trace["jev"])))
     if trace.get("brain"):

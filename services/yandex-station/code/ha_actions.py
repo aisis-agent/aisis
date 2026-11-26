@@ -35,8 +35,7 @@ AREAS = {
     "upstairs": "Второй этаж",
 }
 
-# Entity registry of the quasar layer and hacli (`entity \t friendly name \t area` per entity that has a device). hacli
-# answers this very template from its cache, with status 200, while Home Assistant is down.
+# Entity registry of the quasar layer (`entity \t friendly name \t area` per entity that has a device).
 REGISTRY_TEMPLATE = (
     "{% for e in states %}{% set d = device_id(e.entity_id) %}"
     "{% if d %}{{ e.entity_id }}\t{{ e.attributes.friendly_name }}\t"
@@ -71,11 +70,10 @@ REPLY_BAD_DELTA = "Не понял, на сколько изменить тем�
 REPLY_NO_COLOR = "Эта лампа не меняет цвет."
 REPLY_NO_BRIGHTNESS = "Эта лампа не регулируется по яркости."
 REPLY_LIGHT_UNAVAILABLE = "Свет сейчас недоступен."
-# What is said after a command is decided by what was OBSERVED (ha-cli verifies every call against the device state): the state said
-# yes, the state said no, or nothing could be read. A cause (a restart, an outage) is only named when ha-cli observed it.
-REPLY_QUEUED = "Home Assistant недоступен, команду выполню, когда он вернётся."
-REPLY_QUEUED_STARTING = "Home Assistant запускается, команду выполню, когда он вернётся."
-REPLY_QUEUED_UNKNOWN = "Не получилось проверить ответ Home Assistant, команда ждёт в очереди."
+# What is said after a command is decided by what was OBSERVED (the client verifies every call against the device state): the state said
+# yes, the state said no, or nothing could be read. A cause (an outage) is only named when it was observed: Home Assistant could not be
+# reached and nothing was sent. Nothing is queued: a command that did not go through is never run later.
+REPLY_HA_DOWN = "Home Assistant сейчас недоступен, команда не выполнена."
 REPLY_UNVERIFIED = "Не получилось проверить ответ Home Assistant."
 REPLY_NOT_CONFIRMED = "Команду отправил, но не вижу, чтобы устройство её выполнило."
 REPLY_DEVICE_UNAVAILABLE = "Home Assistant видит это устройство недоступным."
@@ -96,35 +94,16 @@ _UNAVAILABLE = ("unavailable", "unknown")
 
 @dataclass(frozen=True)
 class HaReply:
-    """What a POST to ha-cli answered. `verify` is ha-cli's verdict on the device state after the call (hacli.py, ha_verify.py):
-    {"result": ok|failed|unknown|skipped, "reason", "ms", "attempts", "after": {entity: state}}; None from a proxy that does not
-    verify. `ha`: Home Assistant's own outcome as ha-cli saw it (an HTTP status or an error kind), `down`: the evidence that
-    Home Assistant is gone, on a call that was queued."""
+    """What a service call to Home Assistant came to. `verify` is the verdict on the device state after the call (ha_call.py, ha_verify.py):
+    {"result": ok|failed|unknown|skipped, "reason", "ms", "after": {entity: state}}; None when the call was not verified. `ha`: Home
+    Assistant's own outcome (an HTTP status or an error kind), `down`: the kind of failure when Home Assistant could not be reached at
+    all and nothing was sent (status 0)."""
     status: int
     body: Any = None
     verify: dict | None = None
     action: str | None = None
     ha: str | None = None
     down: str | None = None
-
-    @classmethod
-    def from_response(cls, status: int, body: Any, headers: Any) -> "HaReply":
-        result = headers.get("X-Aisis-Verify")
-        verify = None
-        if result:
-            after = {}
-            for item in (headers.get("X-Aisis-Verified-State") or "").split(","):
-                entity, _, state = item.partition("=")
-                if entity and state:
-                    after[entity] = state
-            ms, attempts = headers.get("X-Aisis-Verify-Ms"), headers.get("X-Aisis-Verify-Attempts")
-            verify = {"result": result, "reason": headers.get("X-Aisis-Verify-Reason"),
-                      "ms": int(ms) if ms and ms.isdigit() else None, "attempts": int(attempts) if attempts and attempts.isdigit() else None,
-                      "after": after or None}
-            unchecked = [part for part in (headers.get("X-Aisis-Verify-Unchecked") or "").split(",") if part]
-            if unchecked:
-                verify["unchecked"] = unchecked
-        return cls(status, body, verify, headers.get("X-Aisis-Action"), headers.get("X-Aisis-Ha-Status"), headers.get("X-Aisis-Down"))
 
 
 class _Outcome(Exception):
@@ -172,12 +151,9 @@ def _parse_time(value: Any) -> datetime | None:
 
 
 class _Command:
-    """The service calls of one voice command. hacli answers 202 when it OBSERVED Home Assistant gone and queued the call for the
-    recovery: the command goes on, so that every operation of it (all the entities, the mode and the setpoint) is queued.
-    `queued` is None, or the evidence of the outage hacli gave (empty from a proxy that gave none)."""
+    """The service calls of one voice command and what each of them came to."""
 
     def __init__(self) -> None:
-        self.queued: str | None = None
         self.verified = 0           # calls whose device state was read and was as expected
         self.partial = 0            # calls whose state matched but part of the request (a colour the lamp cannot show) could not be checked
         self.unverified = 0         # calls Home Assistant acknowledged without a verdict
@@ -243,10 +219,6 @@ class HaActions:
         self._registry: tuple[float, dict[str, str]] | None = None
         self._climate_turn = asyncio.Lock()      # one climate command at a time: a «теплее» reads, sends and confirms before the next reads
 
-    @staticmethod
-    def _queued_reply(evidence: str) -> str:
-        return {"": REPLY_QUEUED_UNKNOWN, "starting": REPLY_QUEUED_STARTING}.get(evidence, REPLY_QUEUED)
-
     async def run(self, executor: str, args: dict, station: str | None = None) -> str:
         """`station`: the speaker that heard the command, for a command that names no room."""
         if executor == "ha.climate_status":
@@ -270,17 +242,11 @@ class HaActions:
                 reply = await handler(area, args, command)
         except _Outcome as out:
             utterance_trace.note(outcome=out.reply, reply_why=out.why)
-            if command.queued is not None:
-                # Other calls of the command were queued for Home Assistant's return: the failure is not the whole story.
-                return f"{out.reply} {self._queued_reply(command.queued)}"
             return out.reply
         except Exception as err:
             utterance_trace.error("ha: " + type(err).__name__)
             utterance_trace.note(reply_why="ha_exception")
             return REPLY_FAILED
-        if command.queued is not None:
-            utterance_trace.note(reply_why="ha_down_observed" if command.queued else "ha_queued_unverified")
-            return self._queued_reply(command.queued)
         if not command.verified and not command.partial and not command.unverified:
             utterance_trace.note(reply_why="not_executed")     # a reply that needed no Home Assistant call at all
         elif command.partial:
@@ -304,11 +270,11 @@ class HaActions:
     # -- read-only state answers (spec 150): nothing here ever calls a service ----------------------------------------
 
     async def _climate_status(self, args: dict) -> str:
-        """Which air conditioners are on, in what mode, since when, from the states ha-cli holds (read fresh from it: the adapter's own
+        """Which air conditioners are on, in what mode, since when, from the states Home Assistant holds (read fresh from it: the adapter's own
         cache could be a minute old). A room named in the phrase narrows it; no room is every unit of the home."""
         try:
             return await self._climate_status_text(args)
-        except Exception as err:   # Home Assistant or ha-cli did not answer, or answered something unreadable
+        except Exception as err:   # Home Assistant did not answer, or answered something unreadable
             utterance_trace.error("ha status: " + type(err).__name__)
             utterance_trace.note(reply_why="ha_status_unavailable")
             return home_status.STATUS_UNAVAILABLE
@@ -341,7 +307,7 @@ class HaActions:
 
     async def rooms_with(self, domain: str) -> tuple[str, ...]:
         """The areas that have at least one entity of the domain (`light`, `climate`), in the home's own order; entities that are
-        printers' equipment are not «свет». Raises when Home Assistant or ha-cli does not answer."""
+        printers' equipment are not «свет». Raises when Home Assistant does not answer."""
         states = await self._all_states()
         areas = await self._area_registry()
         found = {areas[entity_id] for entity_id, entity in states.items()
@@ -390,9 +356,7 @@ class HaActions:
         try:
             parsed = json.loads(body) if isinstance(body, str) else body
         except ValueError:
-            # hacli answers every template with its cached registry while Home Assistant is down: read the area off that
-            registry = _registry(body)
-            parsed = [entity_id for entity_id, name in registry.items() if name == area] if registry else None
+            raise _Outcome(REPLY_FAILED, "ha_read_failed")
         if not isinstance(parsed, list):
             raise _Outcome(REPLY_FAILED, "ha_read_failed")
         ids = [e for e in parsed if isinstance(e, str)]
@@ -415,13 +379,12 @@ class HaActions:
             raise _Outcome(REPLY_UNVERIFIED, "ha_unreachable")
         verify = reply.verify or {}
         result = verify.get("result")
-        ok = reply.status == 202 or result == "ok" or (result not in ("failed", "unknown") and 200 <= reply.status < 300)
-        utterance_trace.call("ha", **fields, status=reply.status, ok=ok, queued=True if reply.status == 202 else None,
-                             verify=reply.verify, aid=reply.action, ha=reply.ha, down=reply.down,
+        ok = result == "ok" or (result not in ("failed", "unknown") and 200 <= reply.status < 300)
+        utterance_trace.call("ha", **fields, status=reply.status, ok=ok, verify=reply.verify, aid=reply.action, ha=reply.ha, down=reply.down,
                              ms=int((time.monotonic() - started) * 1000))
-        if reply.status == 202:
-            command.queued = reply.down or ""
-        elif result == "ok":
+        if reply.down:
+            raise _Outcome(REPLY_HA_DOWN, "ha_down_observed")
+        if result == "ok":
             if verify.get("unchecked"):
                 command.partial += 1
             else:
@@ -441,12 +404,12 @@ class HaActions:
 
     async def _each(self, command: _Command, call: Awaitable[Any]) -> tuple[bool, Any]:
         """One of several calls that do not depend on each other (the lamps of a room, the units of an area): a call that was not
-        confirmed does not stop the others, the first such failure is spoken after all of them were sent. An unreachable ha-cli
+        confirmed does not stop the others, the first such failure is spoken after all of them were sent. An unreachable Home Assistant
         still stops the command: every further call would wait for the same timeout."""
         try:
             return True, await call
         except _Outcome as outcome:
-            if outcome.why == "ha_unreachable":
+            if outcome.why in ("ha_unreachable", "ha_down_observed"):
                 raise
             command.failure = command.failure or outcome
             return False, None
@@ -465,14 +428,10 @@ class HaActions:
     async def _fresh(self, entity: dict) -> dict:
         """The entity as Home Assistant reports it now. The list of states is cached for `ttl`: a unit switched off a moment ago by hand must
         not be taken for running. The cached dict is updated in place, so the next command starts from what was read. A read that fails
-        marks the entity `_unread` (its state is a guess). While Home Assistant is down hacli serves its old cache with `_stale` set: that
-        is no reading either, and the entity keeps the setpoint of the command still waiting in the queue (a second «теплее» adds to it)."""
+        marks the entity `_unread` (its state is a guess)."""
         try:
             seen = await self._get("/api/states/" + entity["entity_id"])
         except Exception:
-            entity["_unread"] = True
-            return entity
-        if isinstance(seen, dict) and seen.get("_stale"):
             entity["_unread"] = True
             return entity
         if isinstance(seen, dict) and seen.get("entity_id") == entity["entity_id"]:
@@ -539,8 +498,6 @@ class HaActions:
                 got = await self._get("/api/states/" + entity_id)
             except Exception:
                 break      # an unreadable Home Assistant is not asked four times in a voice turn
-            if isinstance(got, dict) and got.get("_stale"):
-                break      # hacli's old cache is not what the unit reports
             if isinstance(got, dict):
                 seen = got
                 if self._shows(got, mode, temp):
@@ -554,10 +511,8 @@ class HaActions:
             raise _Outcome(REPLY_CLIMATE_UNAVAILABLE, "ha_device_unavailable")
         raise _Outcome(REPLY_NOT_CONFIRMED, "ha_not_confirmed")
 
-    async def _settle(self, command: _Command, plans: list["_Plan"]) -> list[dict]:
-        """What each unit reports after the command. Nothing is read for a queued command (Home Assistant is down) or for a unit that got none."""
-        if command.queued is not None:
-            return []
+    async def _settle(self, plans: list["_Plan"]) -> list[dict]:
+        """What each unit reports after the command: read back for a unit that got a call, as it was for a unit that got none."""
         return [await self._confirm(p.entity["entity_id"], p.mode, p.temp) if p.sent else p.entity for p in plans]
 
     @staticmethod
@@ -631,9 +586,7 @@ class HaActions:
                 if sent:
                     plans.append(_Plan(entity, was_off, result[1], result[0]))
         command.raise_failure()
-        seen = await self._settle(command, plans)
-        if command.queued is not None:
-            return REPLY_QUEUED
+        seen = await self._settle(plans)
         if not any(p.sent for p in plans):
             return self._reply_already_on(seen[0])
         woken = [state for p, state in zip(plans, seen) if p.was_off]
@@ -676,9 +629,7 @@ class HaActions:
         command.raise_failure()
         if not plans:
             return REPLY_NO_CURRENT_TEMP
-        seen = await self._settle(command, plans)
-        if command.queued is not None:
-            return REPLY_QUEUED
+        seen = await self._settle(plans)
         woken = [state for p, state in zip(plans, seen) if p.was_off]
         if woken:
             return self._reply_switched_on(woken[0])

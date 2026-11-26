@@ -8,7 +8,7 @@
 #   deploy.sh stage-check           verified corpus evidence + API + handshake on each stage color and the switch
 #   deploy.sh stage-down
 #   deploy.sh adopt [CONTAINER]     one-time move of the running single quasar container into blue/green
-#   deploy.sh unit NAME [FILE]      checked restart (with rollback) of adapter|stt|ha-cli|pm
+#   deploy.sh unit NAME [FILE]      checked restart (with rollback) of adapter|stt|pm
 #   deploy.sh status
 #
 # A deploy never touches the active color or the switch until the new image has
@@ -302,29 +302,44 @@ cmd_adopt() {
 # module the new code newly depends on (or calls a new function of) would otherwise be missing or stale at the restart.
 unit_companion_candidates() {
   case $1 in
-    adapter) echo "announcement_cache.py hypothesis_store.py laya_route.py laya_quality.py classifier_journal.py asr_correct.py" ;;
+    adapter) echo "announcement_cache.py hypothesis_store.py laya_route.py laya_quality.py classifier_journal.py asr_correct.py ha_client.py ha_call.py ha_ws.py ha_verify.py" ;;
     stt) echo "second_opinion.py spotter_clips.py voiceclips.py" ;;
-    ha-cli) echo "ha_verify.py ha_action_log.py" ;;
   esac
 }
 
-# unit_imported_companions ENTRY_FILE MODULE.py...: those of the modules that ENTRY_FILE imports, one per line.
+# unit_imported_companions ENTRY_FILE MODULE.py...: those of the modules that ENTRY_FILE imports, directly or through another of the
+# modules that sits next to it (the adapter imports ha_call, which imports ha_ws), one per line.
 unit_imported_companions() {
   python3 - "$@" <<'PY'
 import ast
+import os
 import sys
 import tokenize
-with tokenize.open(sys.argv[1]) as source:
-    tree = ast.parse(source.read())
-imported = set()
-for node in ast.walk(tree):
-    if isinstance(node, ast.Import):
-        imported.update(item.name for item in node.names)
-    elif isinstance(node, ast.ImportFrom) and node.module:
-        imported.add(node.module)
-for module in sys.argv[2:]:
-    if module[:-3] in imported:
-        print(module)
+
+
+def imports(path):
+    with tokenize.open(path) as source:
+        tree = ast.parse(source.read())
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.update(item.name for item in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            found.add(node.module)
+    return found
+
+
+entry, candidates = sys.argv[1], sys.argv[2:]
+folder = os.path.dirname(entry)
+wanted, queue = [], [entry]
+while queue:
+    names = imports(queue.pop())
+    for module in candidates:
+        if module[:-3] in names and module not in wanted:
+            wanted.append(module)
+            if os.path.isfile(os.path.join(folder, module)):
+                queue.append(os.path.join(folder, module))
+print("\n".join(wanted))
 PY
 }
 
@@ -361,22 +376,17 @@ cmd_unit() {
   case $name in
     adapter) file=adapter.py unit=aisis-station-adapter.service url=http://127.0.0.1:31117/healthz ;;
     stt)     file=stt_wyoming.py unit=aisis-station-stt.service url=http://127.0.0.1:31121/healthz ;;
-    ha-cli)  file=hacli.py unit=aisis-ha-cli.service url=http://127.0.0.1:8795/health ;;
     pm)      file=pm_cdp_server.py unit=aisis-station-pm.service url=http://127.0.0.1:31118/health ;;
-    *) die "unknown unit $name (adapter|stt|ha-cli|pm)" ;;
+    *) die "unknown unit $name (adapter|stt|pm)" ;;
   esac
   local -a files=("$file")
   candidates=$(unit_companion_candidates "$name")
   if [[ -n $newfile ]]; then
     python3 -m py_compile "$newfile" || die "$newfile does not compile"
     if [[ -n $candidates ]]; then
-      # ha-cli always carries both of its modules; the others only those the new entry file imports
-      if [[ $name == ha-cli ]]; then
-        imported=$candidates
-      else
-        # shellcheck disable=SC2086  # plain module file names, split on purpose
-        imported=$(unit_imported_companions "$newfile" $candidates) || die "cannot inspect $name dependencies"
-      fi
+      # only the modules the new entry file imports, directly or through another candidate (adapter -> ha_call -> ha_ws)
+      # shellcheck disable=SC2086  # plain module file names, split on purpose
+      imported=$(unit_imported_companions "$newfile" $candidates) || die "cannot inspect $name dependencies"
       for module in $imported; do
         [[ -f $(dirname -- "$newfile")/$module ]] || die "$module must accompany the new $name"
         python3 -m py_compile "$(dirname -- "$newfile")/$module" || die "$module does not compile"

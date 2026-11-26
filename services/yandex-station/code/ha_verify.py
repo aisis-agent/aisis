@@ -1,9 +1,9 @@
 """What a Home Assistant service call must leave in the device state, and whether the state read afterwards says so.
 
 A command is done when the DEVICE says so, not when Home Assistant's HTTP answer came back: the answer can time out after the
-device already obeyed (2026-11-19 21:21: `light.turn_off` took longer than ha-cli's 2 s, the light was off 0.85 s after the
-command and the speaker still announced a reboot). ha-cli (`hacli.py`) runs every service call against these expectations; the
-adapter reads the outcome from its answer headers. Stdlib only: ha-cli runs on the system Python without the adapter's venv.
+device already obeyed (2026-11-19 21:21: `light.turn_off` took longer than the old proxy's 2 s, the light was off 0.85 s after the
+command and the speaker still announced a reboot). ha_call.py runs every service call against these expectations, over Home
+Assistant's own WebSocket events; the adapter reads the outcome from the verdict it returns. Stdlib only.
 
 `expectation(domain, service, body, before)` -> `Expectation` or None (nothing in the device state tells whether the call
 worked: tts.speak, scripts, scenes, a call that targets an area or a device instead of entities).

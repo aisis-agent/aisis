@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import ha_client
 import utterance_trace
 
 LOG = logging.getLogger(__name__)
@@ -34,7 +35,6 @@ WEATHER_FAILED = "Не получилось узнать погоду, попр�
 MUSIC_FAILED = "Не получилось включить музыку."
 MUSIC_UNAVAILABLE = "Музыка сейчас недоступна."
 WEATHER_TIMEOUT_S = 8.0
-DEFAULT_HACLI_URL = "http://127.0.0.1:8795"
 
 _NON_WORD = re.compile(r"[^a-zа-я0-9\s\-]")
 _SPACES = re.compile(r"\s+")
@@ -276,16 +276,34 @@ _WEATHER_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "XDG_CONFIG_HOME", "XDG_C
 _WEATHER_ENV_PREFIX = "WEATHER_"
 
 
-def weather_child_env(env: dict[str, str], ha_url: str) -> dict[str, str]:
-    """The environment weather-cli runs in: the allowlist above, PATH extended with ~/.local/bin, and the ha-cli
-    proxy as its Home Assistant (the real token stays in ha-cli). `scripts/install-weather-cli.sh --check` runs the
-    command under this exact environment."""
+def weather_child_env(env: dict[str, str], client: Any = None) -> dict[str, str]:
+    """The environment weather-cli runs in: the allowlist above, PATH extended with ~/.local/bin, and, when Home Assistant is
+    connected, its current address and a fresh access token (resolved now, so the 30-minute token is valid for this run).
+    Not connected: neither is set and weather-cli falls back to its own place config. `scripts/install-weather-cli.sh --check`
+    runs the command under this exact environment."""
     child = {key: value for key, value in env.items() if key in _WEATHER_ENV_KEYS or key.startswith(_WEATHER_ENV_PREFIX)}
     child.setdefault("HOME", str(Path.home()))
-    child["PATH"] = os.pathsep.join((child.get("PATH", os.defpath), str(Path.home() / ".local" / "bin")))
-    child.setdefault("WEATHER_HA_URL", ha_url)
-    child.setdefault("WEATHER_HA_TOKEN", "via-ha-cli")
+    child["PATH"] = _weather_path(child)
+    child.pop("WEATHER_HA_URL", None)
+    child.pop("WEATHER_HA_TOKEN", None)
+    try:
+        client = client if client is not None else ha_client.default()
+        child["WEATHER_HA_URL"] = client.url
+        child["WEATHER_HA_TOKEN"] = client.access_token()
+    except ha_client.HaError as err:
+        child.pop("WEATHER_HA_URL", None)
+        LOG.info("weather_ha_not_connected: weather-cli runs without Home Assistant (%s)", err)
     return child
+
+
+def _weather_path(env: dict[str, str]) -> str:
+    """Where `weather` is looked for, without minting a Home Assistant token."""
+    return os.pathsep.join((env.get("PATH", os.defpath), str(Path.home() / ".local" / "bin")))
+
+
+def describe_child_env(child: dict[str, str]) -> str:
+    """The child environment's Home Assistant settings for a human, the token never shown."""
+    return f"WEATHER_HA_URL={child.get('WEATHER_HA_URL', '<unset>')} WEATHER_HA_TOKEN={'<set>' if child.get('WEATHER_HA_TOKEN') else '<unset>'}"
 
 
 def _kill_group(pid: int) -> None:
@@ -302,8 +320,6 @@ class Skills:
     def __init__(self, env: dict[str, str]):
         self.env = env
         self.configured_weather_command = configured_weather_command(env)
-        # weather-cli reads Home Assistant through the ha-cli proxy (state cache, the real token stays there).
-        self.ha_url = env.get("AISIS_HACLI_URL", DEFAULT_HACLI_URL)
 
     async def answer(self, text: str) -> str | None:
         mode = parse_weather_ask(text)
@@ -324,7 +340,7 @@ class Skills:
 
     def weather_available(self) -> bool:
         """weather-cli is configured or found where a weather question would look for it (nothing is run)."""
-        return self.weather_command(weather_child_env(self.env, self.ha_url)["PATH"]) is not None
+        return self.weather_command(_weather_path(self.env)) is not None
 
     async def weather(self, mode: str) -> str:
         started = time.monotonic()
@@ -333,7 +349,7 @@ class Skills:
         return reply
 
     async def _weather(self, mode: str) -> str:
-        env = weather_child_env(self.env, self.ha_url)
+        env = await asyncio.to_thread(weather_child_env, self.env)   # a token refresh is a blocking request
         command = self.weather_command(env["PATH"])
         if command is None:
             LOG.warning("weather_failed reason=weather_cli_not_found hint=run scripts/install-weather-cli.sh")

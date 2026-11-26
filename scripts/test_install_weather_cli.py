@@ -175,12 +175,24 @@ class InstallWeatherCliTest(unittest.TestCase):
 
     def test_check_runs_a_configured_wrapper_under_the_adapters_environment(self):
         # The adapter passes WEATHER_* through and nothing else secret; --check must judge the same run.
-        command = self.wrapper('[ "$WEATHER_LAT" = 44.8 ] && [ -z "$HA_TOKEN" ] && [ "$WEATHER_HA_TOKEN" = via-ha-cli ]')
+        command = self.wrapper('[ "$WEATHER_LAT" = 44.8 ] && [ -z "$HA_TOKEN" ] && [ -z "$WEATHER_HA_TOKEN" ]')
         done = self.run_script("--check", AISIS_WEATHER_COMMAND=command, WEATHER_LAT="44.8", HA_TOKEN="secret")
         self.assertEqual(done.returncode, 0, done.stderr)
         wrong = self.run_script("--check", AISIS_WEATHER_COMMAND=command, WEATHER_LAT="1", HA_TOKEN="secret")
         self.assertEqual(wrong.returncode, 3)
         self.assertIn("weather_cli_not_runnable", wrong.stderr)
+
+    def test_check_shows_the_home_assistant_settings_without_the_token(self):
+        command = self.wrapper('[ "$WEATHER_HA_URL" = http://ha.test:8123 ] && [ "$WEATHER_HA_TOKEN" = secret-llat ]')
+        store = self.root / "connection.json"
+        store.write_text(json.dumps({"version": 1, "url": "http://ha.test:8123", "auth": {"kind": "long_lived", "token": "secret-llat"}}))
+        store.chmod(0o600)
+        done = self.run_script("--check", AISIS_WEATHER_COMMAND=command, AISIS_HA_STORE=str(store))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("WEATHER_HA_URL=http://ha.test:8123 WEATHER_HA_TOKEN=<set>", done.stderr)
+        self.assertNotIn("secret-llat", done.stdout + done.stderr)
+        absent = self.run_script("--check", AISIS_WEATHER_COMMAND=self.wrapper('[ -z "$WEATHER_HA_URL" ]'))
+        self.assertIn("WEATHER_HA_URL=<unset> WEATHER_HA_TOKEN=<unset>", absent.stderr)
 
     def test_check_refuses_a_nul_in_the_configured_command(self):
         done = self.run_script("--check", AISIS_WEATHER_COMMAND='["/bin/true\\u0000ignored"]')

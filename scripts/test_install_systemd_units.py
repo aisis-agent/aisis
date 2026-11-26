@@ -111,10 +111,10 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(self.run_script("--check").returncode, 0)
 
     def test_check_reports_an_enabled_unit_that_is_not_running_until_it_runs(self):
-        self.run_script(fail_start="aisis-ha-cli.service")
+        self.run_script(fail_start="aisis-station-embed.service")
         result = self.run_script("--check")
         self.assertEqual(result.returncode, 3)
-        self.assertIn("not active: aisis-ha-cli.service", result.stdout)
+        self.assertIn("not active: aisis-station-embed.service", result.stdout)
         self.assertEqual(self.run_script().returncode, 0)   # the next apply starts it
         self.assertEqual(self.run_script("--check").returncode, 0)
 
@@ -133,20 +133,20 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("not verified running", result.stdout)
 
     def test_no_start_does_not_hide_a_stopped_unit_from_check(self):
-        self.run_script(fail_start="aisis-ha-cli.service")
+        self.run_script(fail_start="aisis-station-embed.service")
         result = self.run_script("--check", "--no-start")
         self.assertEqual(result.returncode, 3)
-        self.assertIn("not active: aisis-ha-cli.service", result.stdout)
+        self.assertIn("not active: aisis-station-embed.service", result.stdout)
 
     def test_a_masked_enable_link_and_a_loose_file_mode_are_drift_and_get_repaired(self):
         self.run_script()
-        link = self.dest / "default.target.wants" / "aisis-ha-cli.service"
+        link = self.dest / "default.target.wants" / "aisis-station-embed.service"
         link.unlink()
         link.symlink_to("/dev/null")
         (self.dest / "aisis-dashboard.service").chmod(0o666)
         check = self.run_script("--check")
         self.assertEqual(check.returncode, 3)
-        self.assertIn("not enabled: aisis-ha-cli.service", check.stdout)
+        self.assertIn("not enabled: aisis-station-embed.service", check.stdout)
         self.assertIn("mode:", check.stdout)
         repaired = self.run_script()
         self.assertEqual(repaired.returncode, 0)
@@ -182,16 +182,16 @@ class InstallerTest(unittest.TestCase):
 
     def test_a_running_unit_whose_file_changed_is_named_not_restarted(self):
         self.run_script()
-        (self.dest / "aisis-ha-cli.service").write_text("[Unit]\nDescription=stale\n")
+        (self.dest / "aisis-station-embed.service").write_text("[Unit]\nDescription=stale\n")
         (self.state / "calls").unlink()
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("restart to apply: aisis-ha-cli.service", result.stdout)
+        self.assertIn("restart to apply: aisis-station-embed.service", result.stdout)
         self.assertEqual([c for c in self.calls() if c.split()[0] in ("stop", "restart")], [])
 
     def test_check_reports_a_drifted_file_and_exits_3(self):
         self.run_script()
-        with (self.dest / "aisis-ha-cli.service").open("a") as handle:
+        with (self.dest / "aisis-station-embed.service").open("a") as handle:
             handle.write("# local edit\n")
         result = self.run_script("--check")
         self.assertEqual(result.returncode, 3)
@@ -204,13 +204,13 @@ class InstallerTest(unittest.TestCase):
             (checkout / "wyoming-whisper.service.d" / path.name).write_bytes(path.read_bytes())
         self.dest.mkdir(parents=True)
         (self.dest / "wyoming-whisper.service.d").symlink_to(checkout / "wyoming-whisper.service.d")
-        (self.dest / "aisis-ha-cli.service").symlink_to(UNITS / "aisis-ha-cli.service")
+        (self.dest / "aisis-station-embed.service").symlink_to(UNITS / "aisis-station-embed.service")
         check = self.run_script("--check")
         self.assertIn("symlink:", check.stdout)
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.dest / "wyoming-whisper.service.d").is_symlink())
-        self.assertFalse((self.dest / "aisis-ha-cli.service").is_symlink())
+        self.assertFalse((self.dest / "aisis-station-embed.service").is_symlink())
         for path in (UNITS / "wyoming-whisper.service.d").iterdir():
             self.assertEqual((self.dest / "wyoming-whisper.service.d" / path.name).read_bytes(), path.read_bytes())
         self.assertEqual(self.run_script("--check").returncode, 0)
@@ -231,11 +231,11 @@ class InstallerTest(unittest.TestCase):
 
     def test_restart_notice_is_printed_even_when_the_reload_fails(self):
         self.run_script()
-        (self.dest / "aisis-ha-cli.service").write_text("[Unit]\nDescription=stale\n")
+        (self.dest / "aisis-station-embed.service").write_text("[Unit]\nDescription=stale\n")
         (self.state / "reload-fails").touch()
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("restart to apply: aisis-ha-cli.service", result.stdout)
+        self.assertIn("restart to apply: aisis-station-embed.service", result.stdout)
 
     def test_no_user_session_needs_manual(self):
         (self.bin_dir / "systemctl").write_text("#!/usr/bin/env bash\nexit 1\n")

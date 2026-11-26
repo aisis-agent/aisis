@@ -1,13 +1,10 @@
-"""The verification verdict is visible where the owner looks: the utterance trace, the clip post in Telegram and the session page (owner tg#30861)."""
-import io
-import os
-import tempfile
+"""The verification verdict is visible where the owner looks: the utterance trace, the clip post in Telegram and the session page (owner tg#30861);
+Home Assistant's own logbook line sits beside it."""
 import time
 import unittest
 from unittest import mock
 
 import clipfeed
-import ha_action_log
 import session_pages
 import trace_view
 
@@ -15,21 +12,7 @@ NOW = time.time() - 7200
 CLIP = {"id": "20261119T212142-d20a57", "ts": NOW + 1.0, "dur": 2.0, "transcript": "выключи свет", "status": "sent", "reason": None,
         "trigger": "spotter", "peak": 189, "rms": 19, "dialog_id": "80649d63-df9a-4e48-b796-52bdd30e0bb4", "station": "st1"}
 HOOK_TRACE = {"id": 1, "ts": NOW + 0.2, "via": "hook", "text": "выключи свет", "layer": "none", "stages_ms": {"route": 5, "total": 6}}
-ACTION = {"v": 1, "kind": "action", "ts": NOW + 0.4, "id": "9f3a1c20", "service": "light.turn_off", "entities": ["light.studiia"],
-          "expect": "turn_off", "before": {"light.studiia": "on"}, "call": {"pending": True},
-          "verify": {"result": "ok", "reason": "state_matched", "attempts": 3, "ms": 940, "after": {"light.studiia": "off"}},
-          "reply": {"status": 200, "why": "verified_state"}, "ms": 960}
-
-
-class Journal(unittest.TestCase):
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.path = os.path.join(tmp.name, "ha-actions.jsonl")
-        self.journal = ha_action_log.Journal(self.path, stream=io.StringIO())
-        patch = mock.patch.object(ha_action_log, "JOURNAL_PATH", self.path)
-        patch.start()
-        self.addCleanup(patch.stop)
+LOGBOOK_LINE = (2, "Home Assistant: Студия → выключен (21:21:43)")
 
 
 class TraceLines(unittest.TestCase):
@@ -43,6 +26,13 @@ class TraceLines(unittest.TestCase):
         call = {"kind": "ha", "service": "climate.set_temperature", "entity": "climate.ac", "status": 200, "ms": 10}
         self.assertEqual(trace_view.call_line(call), "HA climate.set_temperature climate.ac → 200 · 10 мс")
 
+    def test_an_outage_call_says_it_was_not_sent(self):
+        call = {"kind": "ha", "service": "light.turn_off", "entity": "light.lamp", "status": 0, "ms": 3, "ha": "refused", "down": "refused",
+                "verify": {"result": "unknown", "reason": "ha_down_observed", "ms": 260}}
+        line = trace_view.call_line(call)
+        self.assertIn("Home Assistant был недоступен, команда не отправлена (соединение отклонено)", line)
+        self.assertNotIn("очеред", line)
+
     def test_the_reason_of_the_reply_is_a_line_of_the_trace(self):
         lines = trace_view.lines({"layer": "grammar", "intent": "light.brightness", "reply": "Яркость 50 процентов.", "reply_why": "ha_verified"})
         self.assertIn("💬 причина ответа: состояние устройства проверено и совпало", lines)
@@ -53,57 +43,53 @@ class TraceLines(unittest.TestCase):
         self.assertIn("💬 причина ответа: new_code", trace_view.lines({"layer": "grammar", "reply_why": "new_code"}))
 
 
-class ClipPost(Journal):
-    def post_lines(self, traces):
-        with mock.patch.object(clipfeed.dialogstore, "traces_between", return_value=traces):
-            return [line for _, line in clipfeed.processing_lines(mock.Mock(), dict(CLIP), CLIP["ts"] + 5)]
+class ClipPost(unittest.TestCase):
+    def post_lines(self, traces, logbook=(LOGBOOK_LINE,)):
+        with mock.patch.object(clipfeed.dialogstore, "traces_between", return_value=traces), \
+                mock.patch.object(clipfeed.ha_client, "default"), \
+                mock.patch.object(clipfeed.ha_logbook, "lines", return_value=list(logbook)) as lines:
+            out = [line for _, line in clipfeed.processing_lines(mock.Mock(), dict(CLIP), CLIP["ts"] + 5)]
+        self.lines = lines
+        return out
 
-    def test_the_clip_the_quasar_layer_handled_shows_what_ha_cli_verified(self):
-        self.journal.write(ACTION)
+    def test_the_clip_shows_home_assistants_own_record_of_the_phrase(self):
         lines = self.post_lines([HOOK_TRACE])
-        self.assertIn("🧭 грамматика не знает эту фразу → дальше решал квазар (быстрый интент или ИИ)", lines)   # the hook declined: the quasar layer answered
-        self.assertIn("🔧 HA light.turn_off light.studiia → проверено: light.studiia выкл за 0.9 с", lines)
-
-    def test_a_call_the_adapter_traced_is_not_shown_twice(self):
-        self.journal.write(ACTION)
-        traced = {**HOOK_TRACE, "via": "turn", "layer": "grammar", "calls": [{"kind": "ha", "service": "light.turn_off", "aid": "9f3a1c20", "status": 200}]}
-        lines = self.post_lines([traced])
-        self.assertFalse([line for line in lines if "проверено: light.studiia" in line])
-
-    def test_an_outage_that_was_observed_is_a_line_and_a_cause_that_was_not_is_not(self):
-        self.journal.write({"kind": "ha_status", "ts": NOW + 0.5, "from": "up", "to": "down", "error": "refused"})
-        self.journal.write({**ACTION, "id": "q1", "call": {"error": "refused", "ms": 3},
-                            "verify": {"result": "unknown", "reason": "ha_down_observed", "ms": 260}, "reply": {"status": 202, "why": "queued_ha_down"}})
-        text = "\n".join(self.post_lines([HOOK_TRACE]))
-        self.assertIn("⚠ HA: up → down (соединение отклонено)", text)
-        self.assertIn("HA недоступен (соединение отклонено)", text)
-        self.assertIn("причина ответа ha-cli: HA недоступен: наблюдалось, команда в очереди", text)
-        self.assertNotIn("перезагруж", text)
+        self.assertIn("🧭 грамматика не знает эту фразу → дальше решал квазар (быстрый интент или ИИ)", lines)
+        self.assertIn(LOGBOOK_LINE[1], lines)
+        start, end = self.lines.call_args.args[1:]
+        self.assertAlmostEqual(start, CLIP["ts"] - trace_view.MATCH_BEFORE_S)
+        self.assertAlmostEqual(end, CLIP["ts"] + 5 + trace_view.MATCH_AFTER_S)
 
     def test_a_noise_clip_never_borrows_a_neighbours_ha_actions(self):
-        self.journal.write(ACTION)
-        with mock.patch.object(clipfeed.dialogstore, "traces_between", return_value=[HOOK_TRACE]):
-            lines = clipfeed.processing_lines(mock.Mock(), {**CLIP, "status": "gate", "transcript": ""}, CLIP["ts"] + 5)
-        self.assertEqual(lines, [])
+        with mock.patch.object(clipfeed.dialogstore, "traces_between", return_value=[HOOK_TRACE]), \
+                mock.patch.object(clipfeed.ha_logbook, "lines", return_value=[LOGBOOK_LINE]) as lines:
+            out = clipfeed.processing_lines(mock.Mock(), {**CLIP, "status": "gate", "transcript": ""}, CLIP["ts"] + 5)
+        self.assertEqual(out, [])
+        lines.assert_not_called()
 
-    def test_an_unreadable_journal_never_keeps_the_clip_from_the_owner(self):
-        with mock.patch.object(ha_action_log, "read", side_effect=PermissionError("denied")):
-            lines = self.post_lines([HOOK_TRACE])
-        self.assertTrue(any("диагностика обработки недоступна" in line for line in lines))
+    def test_an_unreadable_logbook_never_keeps_the_clip_from_the_owner(self):
+        with mock.patch.object(clipfeed.dialogstore, "traces_between", return_value=[HOOK_TRACE]), \
+                mock.patch.object(clipfeed.ha_client, "default"), \
+                mock.patch.object(clipfeed.ha_logbook, "lines", side_effect=PermissionError("denied")):
+            out = [line for _, line in clipfeed.processing_lines(mock.Mock(), dict(CLIP), CLIP["ts"] + 5)]
+        self.assertTrue(any("диагностика обработки недоступна" in line for line in out))
 
 
 class SessionPage(unittest.TestCase):
-    def test_the_session_page_lists_the_ha_cli_actions_of_the_phrase(self):
-        page = session_pages.render_session(None, [CLIP], [HOOK_TRACE], key=CLIP["id"], ha_actions=[ACTION])
-        self.assertIn("Home Assistant (ha-cli)", page)
-        self.assertIn("HA light.turn_off light.studiia → проверено: light.studiia выкл за 0.9 с", page)
+    def test_the_session_page_lists_home_assistants_record_of_the_phrase(self):
+        page = session_pages.render_session(None, [CLIP], [HOOK_TRACE], key=CLIP["id"], ha_lines=lambda start, end: [LOGBOOK_LINE])
+        self.assertIn("<h2>Home Assistant</h2>", page)
+        self.assertIn("Home Assistant: Студия → выключен (21:21:43)", page)
 
-    def test_no_ha_card_when_ha_cli_did_nothing(self):
-        self.assertNotIn("Home Assistant (ha-cli)", session_pages.render_session(None, [CLIP], [HOOK_TRACE], key=CLIP["id"]))
+    def test_no_ha_card_without_entries(self):
+        self.assertNotIn("<h2>Home Assistant</h2>", session_pages.render_session(None, [CLIP], [HOOK_TRACE], key=CLIP["id"]))
+        self.assertNotIn("<h2>Home Assistant</h2>", session_pages.render_session(None, [CLIP], [HOOK_TRACE], key=CLIP["id"], ha_lines=lambda s, e: []))
 
-    def test_actions_of_another_time_are_not_attributed_to_the_phrase(self):
-        far = {**ACTION, "ts": NOW + 600}
-        self.assertNotIn("Home Assistant (ha-cli)", session_pages.render_session(None, [CLIP], [HOOK_TRACE], key=CLIP["id"], ha_actions=[far]))
+    def test_each_phrase_asks_for_its_own_window(self):
+        second = {**CLIP, "id": "20261119T212150-bbbbbb", "ts": NOW + 9.0, "transcript": "включи свет"}
+        windows = []
+        session_pages.render_session(None, [CLIP, second], [], key="x", ha_lines=lambda start, end: windows.append((start, end)) or [])
+        self.assertEqual(windows, [(CLIP["ts"] - trace_view.MATCH_BEFORE_S, second["ts"]), (second["ts"] - trace_view.MATCH_BEFORE_S, second["ts"] + 45)])
 
 
 if __name__ == "__main__":

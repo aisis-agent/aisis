@@ -31,6 +31,8 @@ import extra_dict
 import clarify
 import correction
 import ha_actions
+import ha_call
+import ha_client
 import hypothesis_store
 import intent_route
 import jev
@@ -55,6 +57,7 @@ from calc import evaluate as calc_evaluate
 from memory import MEMORY_HINT_RE, Memory, parse_facts, sync_dialogs
 
 LOG = logging.getLogger("aisis.yandex")
+HA_READ_TIMEOUT_S = 3.0        # a read of Home Assistant inside a voice turn: the session's own limit
 HYPOTHESES_MAX_BYTES = 49152   # /asr/hypotheses: an NBest of a few readings is a few kilobytes
 BRACHO_REFERENCE = "5cd1ffa5dbb4419cb5766435139c6d92"
 ERROR_REPLY = "Не удалось получить ответ ChatGPT. Проверь авторизацию и подключение. Я не буду повторять запрос автоматически."
@@ -183,8 +186,7 @@ class Adapter:
         self.hypotheses = hypothesis_store.HypothesisStore()
         self.intents: intent_route.IntentRouter | None = None
         self.timers: timers.TimerBook | None = None
-        self.hacli_session: ClientSession | None = None
-        self.intent_ha_url = self.env.get("AISIS_HACLI_URL", "http://127.0.0.1:8795").rstrip("/")
+        self.ha_client = ha_client.default()
         if self.intent_mode != "off":
             self.intents = self._build_intents()
         # Jev (decision model on the Vercel AI Gateway) for the turns the grammar and the quasar layer could not answer:
@@ -258,29 +260,27 @@ class Adapter:
                                          clarify_mode="off" if self.env.get("AISIS_CLARIFY", "on").lower() == "off" else "on",
                                          home=clarify.HaHome(self._ha_get_json, self._ha_post_json) if ha is not None else None)
 
-    def _hacli(self) -> ClientSession:
-        """One short-timeout session for ha-cli calls: a stuck Home Assistant must not stall a voice turn for a minute."""
-        if self.hacli_session is None:
-            self.hacli_session = ClientSession(timeout=ClientTimeout(total=3), trust_env=False)
-        return self.hacli_session
-
     async def _ha_get_json(self, path: str):
-        async with self._hacli().get(self.intent_ha_url + path) as result:
-            result.raise_for_status()
-            data = await result.json(content_type=None)
-            if isinstance(data, dict) and result.headers.get("X-Aisis-Cache") == "stale":
-                data["_stale"] = True      # hacli's old cache while Home Assistant is down: not what the device reports
-            return data
+        """A read of Home Assistant's REST API. Raises when it does not answer in time (a stuck Home Assistant must not stall a voice
+        turn for a minute: the client's 3 s)."""
+        reply = await asyncio.to_thread(self.ha_client.get, path, HA_READ_TIMEOUT_S)
+        if not reply.ok:
+            raise RuntimeError(f"Home Assistant {reply.status or reply.error}")
+        return reply.json()
 
     async def _ha_post_json(self, path: str, body: dict) -> ha_actions.HaReply:
-        """POST through ha-cli: the answer carries ha-cli's verdict on the device state after the call (headers X-Aisis-*)."""
-        async with self._hacli().post(self.intent_ha_url + path, json=body) as result:
-            text = await result.text()
-            try:
-                parsed = json.loads(text) if text else None
-            except ValueError:
-                parsed = text
-            return ha_actions.HaReply.from_response(result.status, parsed, result.headers)
+        """A service call is confirmed by the device state through Home Assistant's own events (ha_call.py: the reply carries its
+        verdict); any other POST (a template) is a plain request."""
+        parts = path.split("?")[0].split("/")
+        if path.startswith("/api/services/") and len(parts) == 5:
+            result = await asyncio.to_thread(ha_call.service_call, self.ha_client, parts[3], parts[4], body)
+            return ha_actions.HaReply(result.status, result.body, result.verify, None, result.ha, result.down)
+        reply = await asyncio.to_thread(self.ha_client.post, path, body, HA_READ_TIMEOUT_S)
+        try:
+            parsed = reply.json() if reply.raw else None
+        except ValueError:
+            parsed = reply.text()
+        return ha_actions.HaReply(reply.status, parsed)
 
     async def _ha_post_status(self, path: str, body: dict) -> int:
         return (await self._ha_post_json(path, body)).status
@@ -372,8 +372,6 @@ class Adapter:
         await self._close_background()
         if self.timers is not None:
             await self.timers.close()
-        if self.hacli_session is not None:
-            await self.hacli_session.close()
         if self.http is not None:
             await self.http.close()
         if self.corrector_http is not None:
@@ -1143,7 +1141,7 @@ class Adapter:
         """Entity names, rooms and library artists; refreshed at most every 5 minutes, stale copy on a failed refresh."""
         now = time.monotonic()
         if self.catalog_cache is None or now - self.catalog_cache[0] > 300:
-            fresh = voice_vocab.fetch_catalog(self.env.get("AISIS_HACLI_URL", "http://127.0.0.1:8795"), voice_vocab.library_artists)
+            fresh = voice_vocab.fetch_catalog(artists=voice_vocab.library_artists)
             if not fresh.empty() or self.catalog_cache is None:
                 self.catalog_cache = (now, fresh)
             else:

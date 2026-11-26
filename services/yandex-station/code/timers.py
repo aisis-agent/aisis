@@ -274,7 +274,7 @@ class TimerBook:
 
 
 class HaAnnouncer:
-    """Speaks through Home Assistant `tts.speak`. 202 = hacli queued the call for HA recovery, which counts as sent."""
+    """Speaks through Home Assistant `tts.speak`; only Home Assistant's own acceptance counts as sent (an unreachable Home Assistant is False)."""
 
     def __init__(self, post: Callable[[str, dict], Awaitable[int]], tts_entity: str, player_entity: str) -> None:
         self._post = post
@@ -287,4 +287,4 @@ class HaAnnouncer:
             status = await self._post("/api/services/tts/speak", body)
         except Exception:
             return False
-        return status in (200, 201, 202)
+        return status in (200, 201)

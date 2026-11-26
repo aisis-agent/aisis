@@ -71,17 +71,15 @@ class Now:
 
 
 class FakeHa:
-    def __init__(self, states=None, service_status=200, template_as_text=True, outage=False, service_reply=None,
-                 apply=True, lag=0, unreadable=False, stale=False):
+    def __init__(self, states=None, service_status=200, template_as_text=True, service_reply=None,
+                 apply=True, lag=0, unreadable=False):
         self.states = copy.deepcopy(STATES if states is None else states)
         self.service_status = service_status
         self.template_as_text = template_as_text
-        self.outage = outage            # hacli answers every template with its cached registry TSV (status 200)
-        self.service_reply = service_reply   # what hacli answers a service call (HaReply with its verdict); default: the plain status
+        self.service_reply = service_reply   # what a service call answers (HaReply with its verdict); default: the plain status
         self.apply = apply              # the unit takes a command Home Assistant accepted (False: accepted, the device does not change)
         self.lag = lag                  # reads of one entity that still show its old state after a command
         self.unreadable = unreadable    # reading one entity fails
-        self.stale = stale              # reading one entity answers hacli's old cache (X-Aisis-Cache: stale, marked `_stale` by the adapter)
         self.hidden: dict[str, list] = {}
         self.gets = 0
         self.entity_gets = 0
@@ -100,7 +98,7 @@ class FakeHa:
                 hidden[0] -= 1
                 return copy.deepcopy(hidden[1])
             seen = copy.deepcopy(next(s for s in self.states if s["entity_id"] == entity_id))
-            return {**seen, "_stale": True} if self.stale else seen
+            return seen
         assert path == "/api/states"
         self.gets += 1
         return copy.deepcopy(self.states)      # a JSON answer, not the fake's own dicts: what the executor caches must not change the device
@@ -119,7 +117,7 @@ class FakeHa:
     async def post(self, path, body):
         if path == "/api/template":
             self.template_posts += 1
-            if self.outage or "area_entities" not in body["template"]:
+            if "area_entities" not in body["template"]:
                 return HaReply(200, registry_tsv())
             self.templates.append(body["template"])
             area = json.loads(re.fullmatch(r"\{\{ area_entities\((.*)\) \| tojson \}\}", body["template"], re.DOTALL).group(1))
@@ -385,34 +383,9 @@ class AirConditionerOff(Base):
     async def test_an_unreadable_state_is_not_reported_as_done(self):
         self.assertEqual(await self.say({"mode": "heat"}, unreadable=True), ha_actions.REPLY_UNVERIFIED)
 
-    async def test_a_queued_command_is_not_verified(self):
-        reply = await self.say({"mode": "heat"}, service_reply=HaReply(202, down="refused"))
-        self.assertEqual(reply, ha_actions.REPLY_QUEUED)
-        self.assertEqual(self.ha.entity_gets, 1, "only the read before the command")
-
     async def test_a_running_unit_asked_for_a_mode_keeps_the_old_wording_when_the_state_shows_it(self):
         a = self.make()
         self.assertEqual(await a.run("ha.climate", {"room": "living", "mode": "heat", "temperature": 30}), "Обогрев, 30 градусов.")
-
-    async def test_consecutive_deltas_queued_during_an_outage_add_up(self):
-        """hacli serves its old cached setpoint while Home Assistant is down: the fresh read must not undo the queued 25 before the next «теплее»."""
-        a = self.make(service_reply=HaReply(202, down="refused"), stale=True)
-        for _ in range(2):
-            self.assertEqual(await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None}), ha_actions.REPLY_QUEUED)
-        self.assertEqual([body["temperature"] for path, body in self.ha.services if path.endswith("set_temperature")], [25, 26])
-
-    async def test_hacli_serving_its_old_cache_does_not_authorise_already_on(self):
-        """The old cache says the unit runs while it was switched off: that is no reading, «включи» sends the command and verifies nothing."""
-        self.make(states=self.unit(last_hvac_mode="heat"), stale=True)
-        cached = copy.deepcopy(self.unit(last_hvac_mode="heat"))
-        cached[0]["state"] = "cool"
-
-        async def old_cache(path):
-            return {**cached[0], "_stale": True} if path.startswith("/api/states/") else cached
-
-        a = LivingRoomActions(old_cache, self.ha.post, ttl=60.0, clock=self.now, sleep=self.sleep)
-        self.assertEqual(await a.run("ha.climate", {"room": "living", "mode": None, "temperature": None}), ha_actions.REPLY_UNVERIFIED)
-        self.assertEqual(self.svc(), [("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "heat"})])
 
     async def test_a_setpoint_wakes_a_unit_whose_state_could_not_be_read(self):
         a = self.make(states=[climate("climate.kondei_1", state="cool", temperature=22, current_temperature=20, last_hvac_mode="heat")], unreadable=True)
@@ -422,16 +395,6 @@ class AirConditionerOff(Base):
         a = self.make(states=[climate("climate.kondei_1", state="cool", temperature=22, current_temperature=20, last_hvac_mode="heat")], unreadable=True)
         await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None})
         self.assertEqual([name for name, _ in self.svc()], ["climate/set_hvac_mode", "climate/set_temperature"])
-
-    async def test_a_setpoint_set_after_the_outage_is_not_overwritten_by_the_queued_one(self):
-        """Queued 25 during an outage, Home Assistant recovers, someone sets 22: «теплее» reads the live 22."""
-        a = self.make(service_reply=HaReply(202, down="refused"), stale=True)
-        await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None})
-        self.ha.services.clear()
-        self.ha.stale, self.ha.service_status, self.ha.service_reply = False, 200, None
-        self.ha.states[0]["attributes"]["temperature"] = 22
-        await a.run("ha.climate_delta", {"room": "living", "direction": 1, "delta": None})
-        self.assertEqual([body["temperature"] for path, body in self.ha.services if path.endswith("set_temperature")], [23])
 
     async def test_overlapping_deltas_add_up_when_the_device_reports_late(self):
         async def yielding(seconds):
@@ -522,12 +485,6 @@ class Failures(Base):
                          ha_actions.REPLY_UNKNOWN_ROOM)
         self.assertEqual(await a.run("ha.nope", {}), ha_actions.REPLY_UNKNOWN_COMMAND)
         self.assertEqual(self.ha.gets, 0)
-
-    async def test_202_without_evidence_is_neutral(self):
-        a = self.make(service_status=202)
-        reply = await a.run("ha.light_brightness", {"percent": 40, "room": None})
-        self.assertEqual(reply, ha_actions.REPLY_QUEUED_UNKNOWN)
-        self.assertNotIn("перезагруж", reply)
 
     async def test_400_and_500(self):
         for status, expected in ((400, ha_actions.REPLY_REJECTED), (500, ha_actions.REPLY_FAILED)):
@@ -624,49 +581,30 @@ class SpeakerRoom(Base):
 
 
 class Outage(Base):
-    async def test_the_whole_command_is_queued_not_only_its_first_call(self):
-        a = self.make(service_reply=HaReply(202, None, None, "a1", "refused", "refused"))
-        reply = await a.run("ha.climate", {"room": "living", "mode": "heat", "temperature": 30})
-        self.assertEqual(reply, ha_actions.REPLY_QUEUED)
-        self.assertEqual(self.svc(), [
-            ("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "heat"}),
-            ("climate/set_temperature", {"entity_id": "climate.kondei_1", "temperature": 30}),
-        ])
-        self.ha.services.clear()
-        self.assertEqual(await a.run("ha.light_brightness", {"percent": 50, "room": "living"}), ha_actions.REPLY_QUEUED)
-        self.assertEqual([body["entity_id"] for _, body in self.svc()], ["light.living_lamp", "light.living_strip"])
+    DOWN = HaReply(0, None, {"result": "unknown", "reason": "ha_down_observed"}, None, None, "refused")
 
-    async def test_the_cached_registry_hacli_serves_during_an_outage_still_reaches_the_queue(self):
-        a = self.make(service_reply=HaReply(202, None, None, "a1", "refused", "refused"), outage=True)      # every template answers with the tab-separated registry, status 200
-        reply = await a.run("ha.light_brightness", {"percent": 50, "room": None})
-        self.assertEqual(reply, ha_actions.REPLY_QUEUED)
-        self.assertEqual([body["entity_id"] for _, body in self.svc()], ["light.living_lamp", "light.living_strip"])
+    async def say_traced(self, executor, args):
+        trace = utterance_trace.start("turn", "команда")
+        try:
+            text = await self.make(service_reply=self.DOWN).run(executor, args)
+        finally:
+            record = utterance_trace.end(trace)
+        return text, record
 
-    async def test_a_failure_after_a_queued_call_is_still_a_failure(self):
-        a = self.make()
-        statuses = iter([202, 500])
+    async def test_an_outage_on_the_first_call_stops_the_command(self):
+        text, record = await self.say_traced("ha.climate", {"room": "living", "mode": "heat", "temperature": 30})
+        self.assertEqual((text, record["reply_why"]), (ha_actions.REPLY_HA_DOWN, "ha_down_observed"))
+        self.assertEqual(self.svc(), [("climate/set_hvac_mode", {"entity_id": "climate.kondei_1", "hvac_mode": "heat"})])   # no setpoint after it
+        self.assertEqual(self.ha.entity_gets, 1, "only the read before the command: nothing was sent, nothing is read back")
 
-        async def post(path, body):
-            if path == "/api/template":
-                return await self.ha.post(path, body)
-            return HaReply(next(statuses))
+    async def test_an_outage_stops_the_remaining_lamps_too(self):
+        text, record = await self.say_traced("ha.light_brightness", {"percent": 50, "room": "living"})
+        self.assertEqual((text, record["reply_why"]), (ha_actions.REPLY_HA_DOWN, "ha_down_observed"))
+        self.assertEqual([body["entity_id"] for _, body in self.svc()], ["light.living_lamp"])
 
-        a = LivingRoomActions(self.ha.get, post, ttl=60.0, clock=self.now)
-        self.assertEqual(await a.run("ha.light_brightness", {"percent": 50, "room": "living"}),
-                         f"{ha_actions.REPLY_FAILED} {ha_actions.REPLY_QUEUED_UNKNOWN}")      # the queued lamp still changes after recovery: say so
-
-    async def test_a_failure_before_a_queued_call_still_reports_the_queued_work(self):
-        self.make()
-        statuses = iter([500, 202])
-
-        async def post(path, body):
-            if path == "/api/template":
-                return await self.ha.post(path, body)
-            return HaReply(next(statuses))
-
-        a = LivingRoomActions(self.ha.get, post, ttl=60.0, clock=self.now)
-        self.assertEqual(await a.run("ha.light_brightness", {"percent": 50, "room": "living"}),
-                         f"{ha_actions.REPLY_FAILED} {ha_actions.REPLY_QUEUED_UNKNOWN}")
+    async def test_the_down_reply_promises_no_later_run(self):
+        self.assertNotIn("вернётся", ha_actions.REPLY_HA_DOWN)
+        self.assertNotIn("очеред", ha_actions.REPLY_HA_DOWN)
 
 
 class EquipmentLights(Base):
@@ -721,13 +659,13 @@ class TemplateEncoding(Base):
 
 
 def verdict(status=200, result="ok", reason="state_matched", ha="200", down=None, after=None):
-    """The answer of ha-cli to a service call, with its verdict on the device state (hacli.py)."""
-    return HaReply(status, None, {"result": result, "reason": reason, "ms": 840, "attempts": 3, "after": after or {"light.living_lamp": "on 40%"}},
+    """What a confirmed in-process call to Home Assistant answers, with its verdict on the device state."""
+    return HaReply(status, None, {"result": result, "reason": reason, "ms": 840, "after": after or {"light.living_lamp": "on 40%"}},
                    "a1b2c3d4", ha, down)
 
 
 class Verification(Base):
-    """The reply is chosen by what ha-cli OBSERVED on the device, and says no cause that was not observed (2026-11-19 21:21: «перезагружается»)."""
+    """The reply is chosen by what was OBSERVED on the device, and says no cause that was not observed (2026-11-19 21:21: «перезагружается»)."""
 
     async def run_traced(self, reply, args=None):
         a = self.make(service_reply=reply)
@@ -761,13 +699,14 @@ class Verification(Base):
         for word in ("перезагруж", "выключен", "офлайн", "недоступ"):
             self.assertNotIn(word, text)
 
-    async def test_an_observed_outage_is_named_with_its_evidence(self):
-        text, record = await self.run_traced(HaReply(202, None, {"result": "unknown", "reason": "ha_down_observed", "ms": 260}, "a1", "refused", "refused"))
-        self.assertEqual((text, record["reply_why"]), (ha_actions.REPLY_QUEUED, "ha_down_observed"))
-        self.assertEqual((record["calls"][0]["down"], record["calls"][0]["queued"]), ("refused", True))
+    async def test_an_observed_outage_is_named_and_traced_as_down_not_queued(self):
+        down = HaReply(0, None, {"result": "unknown", "reason": "ha_down_observed"}, None, None, "refused")
+        text, record = await self.run_traced(down)
+        self.assertEqual((text, record["reply_why"]), (ha_actions.REPLY_HA_DOWN, "ha_down_observed"))
+        call = record["calls"][0]
+        self.assertEqual((call["down"], call["ok"], call["status"]), ("refused", False, 0))
+        self.assertNotIn("queued", call)
         self.assertNotIn("перезагруж", text)
-        starting, _ = await self.run_traced(HaReply(202, None, None, "a1", "503", "starting"))
-        self.assertEqual(starting, ha_actions.REPLY_QUEUED_STARTING)
 
     async def test_a_rejection_by_home_assistant_is_said_so(self):
         text, record = await self.run_traced(HaReply(400, None, {"result": "skipped", "reason": "rejected"}, "a1", "400"))
@@ -784,16 +723,10 @@ class Verification(Base):
         self.assertEqual(record["reply_why"], "ha_partially_verified")
         self.assertEqual(record["calls"][0]["verify"]["unchecked"], ["color_temp_kelvin"])
 
-    async def test_the_unchecked_header_survives_parsing(self):
-        parsed = HaReply.from_response(200, None, {"X-Aisis-Verify": "ok", "X-Aisis-Verify-Reason": "state_matched",
-                                                   "X-Aisis-Verify-Unchecked": "color_temp_kelvin,rgb_color"})
-        self.assertEqual(parsed.verify["unchecked"], ["color_temp_kelvin", "rgb_color"])
-        self.assertNotIn("unchecked", HaReply.from_response(200, None, {"X-Aisis-Verify": "ok"}).verify)
-
-    async def test_ha_cli_unreachable_is_neutral(self):
+    async def test_a_client_that_raises_is_neutral(self):
         async def post(path, body):
             if path.startswith("/api/services/"):
-                raise OSError("ha-cli is not there")
+                raise OSError("the client is not there")
             return await self.ha.post(path, body)
 
         self.ha = FakeHa()
@@ -835,22 +768,6 @@ class Verification(Base):
             await a.run("ha.light_brightness", {"percent": 50, "room": "studio"})   # the studio has only an on/off plug
         self.assertEqual(self.svc(), [])
         self.assertIn(mock.call(reply_why="not_executed"), note.call_args_list)
-
-
-class HeadersToReply(unittest.TestCase):
-    def test_ha_cli_headers_become_the_verdict(self):
-        reply = HaReply.from_response(200, [], {"X-Aisis-Action": "ab12", "X-Aisis-Verify": "ok", "X-Aisis-Verify-Reason": "state_matched",
-                                                "X-Aisis-Verify-Ms": "842", "X-Aisis-Verify-Attempts": "3",
-                                                "X-Aisis-Verified-State": "light.studiia=off,light.kitchen=on 40%", "X-Aisis-Ha-Status": "timeout"})
-        self.assertEqual(reply.verify, {"result": "ok", "reason": "state_matched", "ms": 842, "attempts": 3,
-                                        "after": {"light.studiia": "off", "light.kitchen": "on 40%"}})
-        self.assertEqual((reply.action, reply.ha, reply.down), ("ab12", "timeout", None))
-
-    def test_a_proxy_without_a_verdict(self):
-        self.assertEqual(HaReply.from_response(200, None, {}).verify, None)
-
-    def test_a_queued_call_carries_its_evidence(self):
-        self.assertEqual(HaReply.from_response(202, None, {"X-Aisis-Down": "refused", "X-Aisis-Queue": "1"}).down, "refused")
 
 
 if __name__ == "__main__":

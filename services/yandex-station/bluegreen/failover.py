@@ -4,7 +4,7 @@
 Every tick (default 1.5 s) it probes, in parallel:
   * the active and the standby quasar color (API /devices 200 + uniproxy port answers),
   * the switch (end to end, through its canonical ports),
-  * with --components (prod default): adapter, stt, pm, ha-cli, postgres, tls-voice,
+  * with --components (prod default): adapter, stt, pm, postgres, tls-voice,
     dns-relay, kit (sync helper on :18080), lan-proxy, embed sidecar, asr (a real transcription of silence).
 
 A quasar color or the switch counts as failed after `--threshold` consecutive failed ticks
@@ -152,7 +152,6 @@ COMPONENTS = (
     Component("pm", "http", "http://127.0.0.1:31118/health", unit="aisis-station-pm.service", needs_port=9226,
               needs_port_env="AISIS_PM_CDP",
               label="pm (aisis-station-pm: мост к браузеру ChatGPT, резервный мозг ответов)"),
-    Component("ha-cli", "http", "http://127.0.0.1:8795/health", unit="aisis-ha-cli.service"),
     Component("postgres", "container", "aisis-yandex-postgres-1", container="aisis-yandex-postgres-1", every=3),
     Component("tls-voice", "container", "aisis-yandex-network-tls-voice-1",
               container="aisis-yandex-network-tls-voice-1", tcp_port=443, every=3),
@@ -493,7 +492,7 @@ def main() -> int:
                              "tolerates a manual `systemctl restart`)")
     parser.add_argument("--http-timeout", type=float, default=1.2)
     parser.add_argument("--components", action=argparse.BooleanOptionalAction, default=None,
-                        help="also watch adapter/stt/ha-cli/... (default: on for prod, off for stage)")
+                        help="also watch adapter/stt/pm/... (default: on for prod, off for stage)")
     parser.add_argument("--alert", action=argparse.BooleanOptionalAction, default=None,
                         help="send Telegram alerts (default: on for prod, off for stage)")
     args = parser.parse_args()
