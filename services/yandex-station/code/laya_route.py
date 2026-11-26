@@ -13,24 +13,28 @@ Every request is sent with an explicit `model`, chosen by the first rule that ap
    contradicts the hint (mixed or ambiguous input); any other language, and `mul`/`und`, the multilingual one;
 3. no hint: the multilingual checkpoint. The script of the text is never a reason for English: Latin letters are also German,
    Serbian, Polish, transliterated Russian, so only an explicit English hint (or model) can select the English checkpoint.
-The multilingual checkpoint is the one measured for Russian in docs/research/fast-llm-bench-2026-11.md. A model that cannot
-be served is an error, never an answer from another model: the server refuses to answer in another model's place and so does
-the proxy, which also rejects a reply whose `meta` does not name the model that was asked for (an older server ignores the
-unknown fields and would silently answer in English). The reply, `meta` included, is passed through unchanged.
+The multilingual checkpoint is the one measured for Russian in docs/research/fast-llm-bench-2026-11.md. A Laya model that cannot
+be served is an error of the Laya tier, never an answer from another Laya model: the server refuses to answer in another model's
+place and so does this module, which also rejects a reply whose `meta` does not name the model that was asked for (an older server
+ignores the unknown fields and would silently answer in English). `check_reply` passes the reply, `meta` included, through unchanged.
 
-Every failure is a JSON body `{"ok": false, "error": <code>, ...}` with its own status, so the caller can tell a missing
+A failure is a `LayaProblem`: a JSON body `{"ok": false, "error": <code>, ...}` with its own status, so the caller can tell a missing
 socket from a slow server from a nonsense answer. The proxy never invents a verdict: when it has no answer it says so and the
-caller keeps its own decision.
+caller keeps its own decision. What happens after a Laya failure (controls, the Jev and Haiku tiers, the journal) is laya_quality's:
+this module only validates requests (`parse`) and replies (`check_reply`) and builds the lines for Laya (`line_for`).
 """
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 
 MODELS = ("english", "multilingual")
+FALLBACKS = ("chain", "none")
 MAX_LEN_MIN = 512
 MAX_LEN_MAX = 2048
 MESSAGE_MAX = 2000
+QUESTIONS_MAX = 64
 CONNECT_TIMEOUT_S = 5.0
 EXCHANGE_TIMEOUT_S = 30.0  # sending the request and reading the reply line together
 READ_LIMIT_BYTES = 1 << 20  # one reply line; asyncio's default 64 KiB would turn a long answer into a stream error
@@ -57,16 +61,28 @@ def _invalid(field: str, detail: str) -> LayaProblem:
     return LayaProblem(400, "invalid_request", field=field, detail=detail)
 
 
-def build_request(body) -> tuple[dict, str]:
-    """`(the JSON line for Laya, the model its reply must confirm)`; raises a 400 `LayaProblem` for an invalid field."""
+@dataclass(frozen=True)
+class Parsed:
+    """A validated request: what the caller asked, and the Laya `model` the routing rules chose for it."""
+
+    message: str
+    questions: dict
+    model: str
+    max_len: int | None
+    language: str | None  # the caller's hint as given; never inferred from the text
+    fallback: str  # "chain": a tier that cannot answer hands over to the next one; "none": Laya only
+
+
+def parse(body) -> Parsed:
+    """The validated request with its routed model; raises a 400 `LayaProblem` for an invalid field."""
     if not isinstance(body, dict):
         raise _invalid("body", "a JSON object")
     message = body.get("message")
     if not isinstance(message, str) or not message.strip() or len(message) > MESSAGE_MAX:
         raise _invalid("message", f"a non-empty string of at most {MESSAGE_MAX} characters")
     questions = body.get("questions", {})
-    if not isinstance(questions, dict):
-        raise _invalid("questions", "an object")
+    if not isinstance(questions, dict) or len(questions) > QUESTIONS_MAX:
+        raise _invalid("questions", f"an object of at most {QUESTIONS_MAX} questions")
     model = None
     if "model" in body:
         model = body["model"]
@@ -82,13 +98,22 @@ def build_request(body) -> tuple[dict, str]:
         language = body["language"]
         if type(language) is not str or not _LANGUAGE_TAG.fullmatch(language):
             raise _invalid("language", "a language tag such as ru or en-US")
+    fallback = body.get("fallback", "chain")
+    if type(fallback) is not str or fallback not in FALLBACKS:
+        raise _invalid("fallback", "one of: " + ", ".join(FALLBACKS))
     if model is None:
         english = language is not None and language.split("-")[0].lower() == "en"
         model = "english" if english and not _CYRILLIC.search(message) else "multilingual"
-    line = {"op": "predict", "message": message, "questions": questions, "model": model}
-    if max_len is not None:
-        line["max_len"] = max_len
-    return line, model
+    return Parsed(message, questions, model, max_len, language, fallback)
+
+
+def line_for(request: Parsed, message: str | None = None, model: str | None = None) -> dict:
+    """The JSON line for Laya: `request`'s questions and max_len, on `model` (default: the routed one), for `message` (default: the request's)."""
+    line = {"op": "predict", "message": request.message if message is None else message, "questions": request.questions,
+            "model": request.model if model is None else model}
+    if request.max_len is not None:
+        line["max_len"] = request.max_len
+    return line
 
 
 def _word(value) -> str | None:

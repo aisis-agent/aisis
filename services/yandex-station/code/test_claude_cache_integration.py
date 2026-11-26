@@ -131,6 +131,31 @@ class AsrTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body['messages'][0]['content'], 'Dynamic user message and recent dialog')
         self.assertEqual(body['model'], 'claude-haiku-4-5')
 
+    async def test_a_failing_side_model_call_never_cools_the_keys_the_live_corrector_uses_and_the_reverse(self):
+        keys = [SimpleNamespace(fingerprint='one'), SimpleNamespace(fingerprint='two')]
+        failing = Mock(side_effect=RuntimeError('boom'))
+
+        async def post(credential, body, timeout):
+            if body['model'] == 'claude-haiku-5-5':
+                failing()
+                return ''
+            return '0|U|'
+
+        corrector = asr_correct.Corrector(lambda: keys, post, lambda: None)
+        self.assertEqual(await corrector.ask_model('claude-haiku-5-5', 'sys', 'msg', 1), ('', 'no_key'))
+        self.assertEqual(failing.call_count, 2)  # both keys tried for the side model, then both are cooled in ITS map
+        self.assertEqual(await corrector.ask_model('claude-haiku-5-5', 'sys', 'msg', 1), ('', 'no_key'))
+        self.assertEqual(failing.call_count, 2)  # cooled: not asked again
+        self.assertEqual(corrector._cooldown, {})
+        self.assertEqual(await corrector._ask(dict(asr_correct.DEFAULTS), 'sys', 'msg', 1), ('0|U|', 'ok'))
+
+    async def test_a_cooled_live_corrector_key_does_not_cool_the_side_model_calls(self):
+        keys = [SimpleNamespace(fingerprint='one')]
+        corrector = asr_correct.Corrector(lambda: keys, AsyncMock(return_value='x'), lambda: None)
+        corrector._cooldown['one'] = corrector._now() + 600
+        self.assertEqual(await corrector._ask(dict(asr_correct.DEFAULTS), 'sys', 'msg', 1), ('', 'no_key'))
+        self.assertEqual(await corrector.ask_model('claude-haiku-5-5', 'sys', 'msg', 1), ('x', 'ok'))
+
 
 if __name__ == '__main__':
     unittest.main()

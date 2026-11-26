@@ -618,18 +618,18 @@ then the POST is a logged, swallowed 404).
 (`code/laya_route.py`, protocol version 2). The quasar container's semantic shadow calls it and only logs the verdict; the endpoint
 never actuates anything. The socket is `LAYA_SOCKET` or the newest `laya-<version>.sock` under the task-cli state directory.
 
-Request JSON: `message` (required string, up to 2000 characters), `questions` (object, default `{}`) and three optional fields.
+Request JSON: `message` (required string, up to 2000 characters), `questions` (object of at most 64 questions, default `{}`; more is a 400) and four optional fields.
 `model` is `english` or `multilingual` and is forwarded as is. `max_len` is an integer from 512 to 2048 and is forwarded as is.
-`language` is a hint (`ru`, `en-US`, …) that is turned into a `model` and not forwarded, because the Laya protocol has no such field.
+`fallback` is `chain` (default) or `none`. `chain` lets a tier that cannot answer hand over to the next tier *that the owner switched on* (see `AISIS_LAYA_FALLBACK` below; with nothing switched on, `chain` and `none` behave the same: Laya only). `language` is a hint (`ru`, `en-US`, …) that is turned into a `model` and not forwarded, because the Laya protocol has no such field.
 Every request is sent with an explicit `model`: the caller's `model`; else, for an English hint (`en`, `en-US`) on text without Cyrillic
 letters, the English checkpoint; else the multilingual one. That includes any other language, an unknown or missing hint, mixed Russian
 and English text and an English hint on Cyrillic text (ambiguous). The script is never a reason for English: Serbian in Latin letters,
-German or transliterated Russian stay multilingual. The reply is Laya's own, unchanged: its `meta` names the checkpoint really used,
-`max_len` and whether the input was truncated. A reply that does not confirm the requested model is refused, so an older Laya that
-ignores the field can never pass for the multilingual one.
+German or transliterated Russian stay multilingual. The reply is Laya's own: its `meta` names the checkpoint really used,
+`max_len` and whether the input was truncated, and a `quality` object is added (below). A reply that does not confirm the requested
+model is refused, so an older Laya that ignores the field can never pass for the multilingual one.
 
-Failures are JSON `{"ok": false, "error": <code>, …}`; the proxy never answers in a different model's place and never invents a
-verdict, so the caller keeps its own deterministic decision:
+Failures are JSON `{"ok": false, "error": <code>, …}`; the proxy never invents a verdict, so the caller keeps its own deterministic
+decision. When a failure ends the quality chain below, the body also carries the `quality` object (`outcome: "unknown"`):
 
 | Status | `error` | Meaning |
 |---|---|---|
@@ -638,8 +638,57 @@ verdict, so the caller keeps its own deterministic decision:
 | 503 | `laya_model_unavailable` (+ `reason`) | The model is `loading` (with `Retry-After: 1`; ask again) or its load failed (`load_failed`, `dependency_missing`, `path_shadow`). |
 | 504 | `laya_connect_timeout` / `laya_timeout` | The socket did not accept in 5 s, or Laya did not answer in 30 s. |
 | 502 | `laya_empty_response`, `laya_bad_response`, `laya_connection_lost`, `laya_model_not_confirmed`, `laya_route_unsupported`, `laya_upstream_error` | The upstream answered nothing, nonsense, no model confirmation, or an error of its own. |
+| 502 | `classifier_unknown` | Laya answered, but no tier passed its controls; `quality.typed_reason` says why (`control_failed:wrong_label`, `control_failed:route_unverified`, `label_outside_domain`, …). |
 
-Tests: `code/test_adapter_laya.py` (CI). Rollback: restart the adapter on the previous commit.
+### Controls, fallback and the decision journal (aisis#250)
+
+Routing a request to the right Laya checkpoint does not show that the answer is trustworthy, so a request whose `questions` are the
+semantic shadow's `domain` choice question (`laya_quality.VOICE_COMMAND_DOMAIN`) runs through a quality envelope
+(`code/laya_quality.py`, contract `classifier-journal/1.0`; the `request` record matches revision r4 byte for byte against the contract's example, the
+`proposed` record does not yet carry r4's `facts_revision`/`expected_target`: aisis#302):
+
+1. The main call goes to Laya on the routed model. Its route (model id, checkpoint, `meta.truncated`) is read from that call's own reply
+   and kept; a malformed or empty reply, a label outside the question's vocabulary, a missing answer or a truncated input is no answer.
+2. One positive and one negative control run as **separate** calls on the same model and `max_len`, drawn from the request id (so
+   they are reproducible and cannot be re-rolled): synthetic phrases whose label is known, sent as ordinary requests. The expected
+   label and the case id never reach a model. A control that reports another model or checkpoint than the main call is replaced
+   (up to four candidates); a wrong label or a failure rejects the tier.
+3. A rejected tier hands over to hosted Jev (`VERCEL_JEV_KEY`), then to `claude-haiku-5-5` (the adapter's Claude credentials), each
+   with its own controls, **only when the owner switched them on** (below). `"fallback": "none"` in the body stops after Laya. The reply is
+   then the accepted tier's own, and `quality.tier`/`provider`/`model` say who answered; Laya's `meta` is never attached to another
+   tier's answer. A cloud tier is also not started for a caller that has already hung up.
+4. When no tier passes: an explicit unknown (the Laya status code above when Laya itself had a transport problem, else
+   `502 classifier_unknown`) and a critical incident; never a default label. The caller keeps its deterministic decision.
+
+**Privacy: the cloud tiers are OFF by default.** The message is a voice transcript, and Jev and Haiku are hosted. `AISIS_LAYA_FALLBACK`
+(adapter environment, restart to change) is a comma-separated list of the tiers that may be used: `jev`, `haiku`, `jev,haiku`, or empty/unset
+(the default: nothing leaves the host). A tier that is switched off is skipped (`skipped`, reason `disabled:aisis_laya_fallback`) and files no
+incident, since nothing is missing. A tier that is switched on but not configured (`VERCEL_JEV_KEY`, the Claude key sources) is an incident
+naming the variable. The Haiku tier uses its own key cooldowns: a failing Haiku call never cools the keys of the live ASR corrector.
+
+Questions that are not a registered domain are answered by Laya alone exactly as before, without controls, and are journaled and
+counted as `excluded:no_controls_for_questions`.
+
+The reply gains `quality`: `request_id`, `outcome` (`accepted` | `unknown`), `eligibility`, `domain`, `controls` (`passed` | `failed` |
+`none`), `fallback` (an earlier tier was tried and failed), `recorded` (the journal write succeeded) and, when accepted, `tier`,
+`provider`, `model`, `checkpoint`. There is no probability cutoff: Laya's confidences pass through untouched and no abstention is
+applied without a calibration for the exact model revision.
+
+Every request writes a `request` record and, for a registered domain, a `proposed` record into
+`$XDG_STATE_HOME/agent-tools/classifier-quality/journal/` (0600 files, one per record, idempotent by `record_id`; `code/classifier_journal.py`).
+They carry enums, hashes, tokens and numbers only: never the message, a control text or a model reply (the input is an HMAC under an
+install-private key). The semantic shadow never acts on a verdict, so no `applied` record exists. Incidents (a later tier that is not
+configured, naming the variable and never its value; a failed control; a failed call) go to `.../classifier-quality/events/` for the guardian,
+folded to one per cause per hour. The journal keeps 90 days and 64 MiB, oldest first (pruned at most once an hour), and remembers how far
+the history was cut (`.retention.json`) so a reader reports the gap instead of "no use".
+
+`GET /healthz` gains `laya`: `quality` (per domain: `model_classified`, `with_controls`, `covered`, `accepted`, `unknown`, `fallback_used`,
+`excluded` and `controls_coverage` = requests that carried controls and whose outcome was journaled, over model-classified requests),
+`journal` (written, noop, conflict, failed, pruned, and `last_failure`: the exception class or reason of the latest failed write, `null`
+when none; a rising `failed` with a `last_failure` means the journal is not being kept) and `incidents`. The counters live in the process and restart with it.
+On shutdown the adapter waits at most 10 s for `/laya` requests in flight to finish their journal write and cancels the rest.
+
+Tests: `code/test_adapter_laya.py`, `code/test_laya_quality.py`, `code/test_classifier_journal.py` (CI). Rollback: restart the adapter on the previous commit.
 
 ## Information intents with a dynamic answer
 
