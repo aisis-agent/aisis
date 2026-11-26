@@ -38,7 +38,6 @@ flowchart TB
   subgraph S_EXEC["7 EXECUTION: home, media, weather"]
     direction LR
     HA(["<b>Home Assistant</b> 2026.9.3<br/>odroid, docker"])
-    HACLI["<b>aisis-ha-cli</b> :8795<br/>state cache, offline queue"]
     MA(["<b>Music Assistant</b> 2.10.4"])
     WCLI[/"<b>weather-cli</b> own repo"/]
     ASP["<b>aisis_speaker</b> HA component<br/>vendored, author UNKNOWN"]
@@ -73,9 +72,10 @@ flowchart TB
   QFAST --> QHOOK
   QHOOK -- "6 POST /intent/decide" --> GR
   QCORE -. "A unanswered: WS /processor" .-> GR
-  QFAST -- "7 HA REST :8795" --> HACLI
-  HACLI --> HA
-  SK --> HACLI
+  QFAST -- "7 HA REST + WS :8123" --> HA
+  SK -- "REST + WS :8123" --> HA
+  WCLI -- "REST :8123" --> HA
+  DASH -- "REST + WS :8123" --> HA
   SK --> MA
   SK --> WCLI
   GR --> SK
@@ -102,7 +102,7 @@ flowchart TB
   classDef ext fill:#e1bee7,stroke:#6a1b9a,color:#1b1b1b,stroke-width:2px
   classDef unk fill:#fff9c4,stroke:#f9a825,color:#1b1b1b,stroke-width:3px,stroke-dasharray:6 4
   classDef vend fill:#f8bbd0,stroke:#ad1457,color:#1b1b1b,stroke-width:2px
-  class DNS,SW,QFAST,QHOOK,STT,WPT,GR,MEM,SK,TTS,HACLI,CP,PM,DASH,CLIP,FO,BG own
+  class DNS,SW,QFAST,QHOOK,STT,WPT,GR,MEM,SK,TTS,CP,PM,DASH,CLIP,FO,BG own
   class DEV asis
   class WH,PG,HA,MA,TLS cfg
   class KIT,QCORE fork
