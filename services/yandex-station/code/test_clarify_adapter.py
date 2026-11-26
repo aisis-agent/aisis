@@ -131,6 +131,14 @@ class NothingToOfferTests(ClarifyCase):
         self.assertNotIn("повтор", said.lower())
         self.assertNotIn("уточни", said.lower())
 
+    async def test_with_the_grammar_in_shadow_no_question_is_opened_nobody_could_answer(self):
+        adapter = await self.adapter(AISIS_INTENT_GRAMMAR="shadow")
+        said, listen = await self.spoken(adapter, "Ставьте их на паузу.")
+        self.assertEqual(said, "Прозвучало «Ставьте их на паузу», но что сделать, не ясно.")
+        self.assertFalse(listen)
+        self.assertEqual(adapter.intents.correction, None)       # no dialog engine was even built
+        self.assertEqual(self.fake.calls("/api/states"), [])      # and Home Assistant was not read for it
+
     async def test_an_emergency_phrase_is_never_turned_into_a_question(self):
         adapter = await self.adapter()
         said, _ = await self.spoken(adapter, "вызови скорую")

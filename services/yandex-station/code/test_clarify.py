@@ -99,15 +99,15 @@ class OptionTests(unittest.TestCase):
     def test_a_light_off_is_a_little_likelier_at_night(self):
         day = clarifier(LAMP, now=NOON)
         night = clarifier(LAMP, now=NIGHT)
-        self.assertGreater(options(night, "выключи лампу", floor=0)[0].score + night._prior(options(night, "выключи лампу", floor=0)[0], "st", []),
-                           options(day, "выключи лампу", floor=0)[0].score + day._prior(options(day, "выключи лампу", floor=0)[0], "st", []))
+        self.assertGreater(night._prior(options(night, "выключи лампу", floor=0)[0], "st"),
+                           day._prior(options(day, "выключи лампу", floor=0)[0], "st"))
 
     def test_a_phrase_near_a_recent_command_is_a_little_likelier(self):
         clar = clarifier(TV)
         pause = options(clar, "поставь на паузу")[0]
-        before = clar._prior(pause, "st", [])
+        before = clar._prior(pause, "st")
         clar.remember("st", "поставь телевизор на паузу")
-        self.assertGreater(clar._prior(pause, "st", []), before)
+        self.assertGreater(clar._prior(pause, "st"), before)
 
     def test_another_rooms_device_is_never_offered(self):
         studio = Entity("light.studio", "Свет в студии", "on")
@@ -132,6 +132,21 @@ class OptionTests(unittest.TestCase):
         self.assertEqual(clarify.Clarifier.question(found), "Поставить на паузу?")
         self.assertEqual(clarify.HaHome._said(found[0].call), "Воспроизведение на паузе.")
         self.assertEqual(options(clar, "выключи"), [])      # a device nobody can name is never switched off by a guess
+
+    def test_a_question_that_holds_a_pinned_phrase_goes_to_the_brain(self):
+        clar = clarifier(TV)
+        for text in ("который час в токио", "сколько времени до нового года"):
+            self.assertEqual(options(clar, text), [], text)
+
+    def test_a_long_phrase_before_the_brain_gets_none(self):
+        self.assertEqual(options(clarifier(TV), "поставь на паузу я говорю тебе вот прямо сейчас немедленно"), [])
+
+    def test_a_socket_and_a_tv_power_are_never_offered(self):
+        kettle = Entity("switch.kettle_plug_local", "Чайник", "off")
+        tv_off = Entity("media_player.projector", "Проектор", "off")
+        clar = clarifier(kettle, tv_off)
+        self.assertEqual(options(clar, "включи чайнек", floor=clarify.FALLBACK_AT), [])
+        self.assertEqual(options(clar, "включи проектор", floor=clarify.FALLBACK_AT), [])
 
     def test_a_players_device_class_names_it_when_its_own_name_is_technical(self):
         states = [{"entity_id": "media_player.televizor", "state": "playing",
@@ -227,6 +242,29 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
         said = await router.unheard("st", "Ставьте их на паузу.")
         self.assertEqual(said.text.startswith("Прозвучало «Ставьте их на паузу»"), True)
         self.assertFalse(said.context)
+
+    async def test_a_keep_reply_to_a_clarification_is_a_no_not_a_request_to_repeat(self):
+        router, home = await self.router(TV)
+        await router.unheard("st", "Ставьте их на паузу.")
+        said = await router.route("st", "я так и сказал")
+        self.assertEqual(home.calls, [])
+        self.assertNotIn("повтор", said.text.lower())
+        self.assertNotIn("Скажите ещё раз", said.text)
+
+    async def test_two_open_microphone_lines_in_a_row_are_rate_limited_on_the_noise_paths(self):
+        router, _ = await self.router(TV)
+        first = await router.unheard("st", "Ставьте их на паузу.", cooldown=True)
+        self.assertTrue(first.listen)
+        self.assertIsNone(await router.unheard("st", "Ставьте их на паузу.", cooldown=True))   # a minute: the brain takes it
+
+    async def test_a_two_word_device_is_picked_by_its_name_in_any_hash_order(self):
+        studio = Entity("light.studio", "Лампа в студии", "on")
+        kitchen = Entity("light.kitchen", "Лампа на кухне", "on")
+        router, home = await self.router(studio, kitchen)
+        asked = await router.unheard("st", "выключи лампу")
+        self.assertEqual(asked.text.count(" или "), 1)
+        await router.route("st", "лампу в студии")
+        self.assertEqual(home.calls, [("light", "turn_off", studio.entity_id)])
 
 
 if __name__ == "__main__":

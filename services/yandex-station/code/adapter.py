@@ -687,7 +687,7 @@ class Adapter:
         try:
             station, text = self._turn_input(data)
             if text is None:   # a turn with no speech: what to say is the same line as for a phrase nobody could read
-                route = await self.intents.unheard(station, "") if self.intents is not None else None
+                route = await self.intents.unheard(station, "") if self._clarifies() else None
                 said, listens = (route.text, route.listen) if route is not None else (correction.plain_describe("", False), False)
                 if not ws.closed:
                     await ws.send_json({"type": "partialResponse", "data": {"text": said,
@@ -729,7 +729,7 @@ class Adapter:
                 from_brain = True
                 layer = "brain"
                 if reply_guard.is_unheard(reply):   # the brain gave up («Повтори?»): the likeliest actions, or what was heard and what can be asked for
-                    route = await self.intents.unheard(station, text) if self.intents is not None else None
+                    route = await self.intents.unheard(station, text) if self._clarifies() else None
                     reply, listen = (route.text, route.listen) if route is not None else (correction.plain_describe(text, False), False)
                     from_brain = False
                 elif listen is False and reply.rstrip().endswith("?"):
@@ -806,11 +806,15 @@ class Adapter:
                                   "route": answer("route"), "decision": candidate.reason_code if candidate else None,
                                   "outcome": verdict.reason, "ms": verdict.latency_ms, "acted": acted}.items() if v is not None}
 
+    def _clarifies(self) -> bool:
+        """The router answers (and may open a dialog): not with AISIS_INTENT_GRAMMAR=shadow, where the router only classifies and nothing could read the answer."""
+        return self.intents is not None and self.intent_mode == "on"
+
     async def _jev_action(self, station: str, text: str, decision: jev.RouteDecision | None) -> intent_route.Route | None:
         if decision is None:
             return None
         settings = self.jev_settings
-        if decision.reason_code == "jev_garbled" and settings.reprompt and self.intents is not None:
+        if decision.reason_code == "jev_garbled" and settings.reprompt and self._clarifies():
             return await self.intents.unheard(station, text, cooldown=True, intent="jev.garbled")   # the likeliest actions or what was heard, never a bare request to repeat; one line a minute, then the brain
         if decision.reason_code == "jev_command_unsupported" and settings.refuse:
             return intent_route.Route("reply", intent_route.UNSUPPORTED_TEXT, intent="jev.command", source="jev")

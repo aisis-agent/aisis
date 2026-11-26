@@ -43,6 +43,9 @@ SECOND_WITHIN = 0.12  # a second option is offered when it scores this close to 
 MAX_RECENT = 8
 RECENT_S = 600.0
 MAX_HEARD_CHARS = 60
+ASK_MAX_WORDS = 6    # before the brain a longer phrase is chit-chat or a question
+GRAMMAR_EXTRA_COST = 0.3   # a heard word a pinned phrase does not hold costs this much (a device name's extra word costs 0.1)
+CATALOG_MAX_AGE_S = 5.0    # the live states are reused for this long
 
 # Words that carry no action: heard or in a phrase they neither confirm nor contradict it.
 _PREPOSITIONS = frozenset(("на", "в", "во", "по", "к", "с", "со", "из", "у", "о", "об", "для", "про", "за", "от", "до"))
@@ -74,7 +77,7 @@ CONTINUE = Verb("media_play", ("продолжи {n}", "продолжи вос�
 OFF = Verb("turn_off", ("выключи {n}", "отключи {n}", "вырубай {n}"), "выключить {n}", ("off",), "{N} {off}.")
 ON = Verb("turn_on", ("включи {n}", "вруби {n}", "запусти {n}"), "включить {n}", ("on", "playing", "idle", "paused"), "{N} {on}.")
 
-_ON_OFF_DOMAINS = frozenset(("light", "switch", "fan", "humidifier"))
+_ON_OFF_DOMAINS = frozenset(("light",))
 _PLAYING = frozenset(("playing", "buffering"))
 _DEAD = frozenset(("unavailable", "unknown"))
 _PLAYER_OWN = "media_player.aisis_speaker_"
@@ -221,7 +224,8 @@ class Words:
         return 0.8 if _close(kh, kw) or _close(stem(heard), stem(wanted)) else 0.0
 
 
-def nearness(words: Words, heard: Sequence[str], phrase: Sequence[str], name: frozenset[str] = frozenset()) -> tuple[float, bool]:
+def nearness(words: Words, heard: Sequence[str], phrase: Sequence[str], name: frozenset[str] = frozenset(),
+             extra_cost: float = _EXTRA_CONTENT) -> tuple[float, bool]:
     """How much of `phrase` the heard words hold (prepositions count a third), less a little for each heard word of its own, and whether the
     words of `name` were absent (they are then left out of the comparison)."""
     named = any(words.score(h, n) > 0 for h in heard for n in name) if name else True
@@ -242,7 +246,7 @@ def nearness(words: Words, heard: Sequence[str], phrase: Sequence[str], name: fr
             free.pop(taken)
             matched += weight * best
     extra = sum(1 for h in free if h not in _NOISE)
-    return matched / total - min(_MAX_EXTRA, extra * _EXTRA_CONTENT), not named
+    return matched / total - min(_MAX_EXTRA, extra * extra_cost), not named
 
 
 def accusative(name: str) -> str:
@@ -257,14 +261,14 @@ def accusative(name: str) -> str:
 
 
 def _verbs(entity: Entity) -> tuple[Verb, ...]:
-    """The services of this entity's domain that make sense in its state (a paused player continues, a playing one pauses)."""
+    """The services of this entity's domain that make sense in its state. Only what is safe to do on a guess that a spoken yes confirms: a
+    playing player pauses, a paused one continues, a lamp that is on switches off, one that is off switches on. Sockets (the kettle), the TV's
+    power, climate and locks are risky (correction.SAFE_EXECUTORS) and are never offered."""
     state, domain = entity.state, entity.domain
     if state in _DEAD:
         return ()
     if domain == "media_player":
-        if state in _PLAYING:
-            return (PAUSE, OFF)
-        return (CONTINUE, OFF) if state in ("paused", "idle") else (ON,)
+        return (PAUSE,) if state in _PLAYING else (CONTINUE,) if state in ("paused", "idle") else ()
     if domain in _ON_OFF_DOMAINS:
         return (OFF,) if state == "on" else (ON,) if state == "off" else ()
     return ()
@@ -289,6 +293,7 @@ class Clarifier:
         self.recent: dict[str, list[tuple[float, list[str]]]] = {}
         self._pinned: list[tuple[str, str, Decision]] | None = None
         self._entities: tuple[Entity, ...] = ()
+        self._read_at = 0.0
 
     def remember(self, station: str, text: str) -> None:
         """A phrase the speaker answered: a later doubtful one near it is a little more likely."""
@@ -317,8 +322,9 @@ class Clarifier:
         for phrase, intent_id, decision in self._pinned:
             if not self.executable(decision, station):
                 continue
-            score, _ = nearness(self.words, heard, tokens(phrase))
-            if score > options.get(intent_id, Option("", "", -1, "", "", ())).score:
+            score, _ = nearness(self.words, heard, tokens(phrase), extra_cost=GRAMMAR_EXTRA_COST)   # «который час в Токио» is a question for the brain, not «который час»
+            best = options.get(intent_id)
+            if best is None or score > best.score:
                 options[intent_id] = Option(phrase, ask_form(phrase), score, "grammar", intent_id, _says(phrase, ()))
         return list(options.values())
 
@@ -352,10 +358,10 @@ class Clarifier:
                 phrase = " ".join(verb.phrases[0].format(n=name).split())
                 call = HaCall(entity.domain, verb.service, entity.entity_id, entity.name, verb.expect, verb.done)
                 found.append(Option(phrase, " ".join(verb.ask.format(n=accusative(name)).split()), best, "home", entity.entity_id,
-                                    _says(phrase, tuple(name_words)), call))
+                                    _says(phrase, tuple(dict.fromkeys(tokens(name)))), call))
         return found
 
-    def _prior(self, option: Option, station: str, heard: list[str]) -> float:
+    def _prior(self, option: Option, station: str) -> float:
         """A tie-breaker of at most a few hundredths: a phrase near one of the station's recent commands, a light off at night."""
         bonus = 0.0
         phrase = tokens(option.phrase)
@@ -371,13 +377,14 @@ class Clarifier:
         return bonus
 
     async def options(self, station: str, heard_text: str, *, floor: float) -> list[Option]:
-        """The options at or above `floor`, best first: at most two, the second only when it scores close to the best."""
+        """The options at or above `floor`, best first: at most two, the second only when it scores close to the best. Before the brain
+        (`floor` ASK_AT) a long phrase is chit-chat or a question and gets none."""
         heard = tokens(heard_text)
-        entities = await self.refresh()
-        if not heard:
+        if not heard or (floor >= ASK_AT and len(heard) > ASK_MAX_WORDS):
             return []
+        entities = await self.refresh()
         pool = self._from_home(heard, entities) + self._from_grammar(station, heard)
-        scored = sorted(((option.score + self._prior(option, station, heard), option) for option in pool), key=lambda item: -item[0])
+        scored = sorted(((option.score + self._prior(option, station), option) for option in pool), key=lambda item: -item[0])
         ranked = [(score, option) for score, option in scored if score >= floor]
         picked: list[Option] = []
         for score, option in ranked:
@@ -397,11 +404,13 @@ class Clarifier:
             return f"{first[:1].upper()}{first[1:]}?"
         return f"{first[:1].upper()}{first[1:]} или {options[1].ask}?"
 
-    async def refresh(self) -> Sequence[Entity]:
-        """The catalog with the live states, read now; the last good copy when Home Assistant does not answer (it names the kinds of action)."""
-        if self.home is not None:
+    async def refresh(self, max_age: float = CATALOG_MAX_AGE_S) -> Sequence[Entity]:
+        """The catalog with the live states; a read younger than `max_age` is reused (a turn that reaches the brain must not wait for Home Assistant
+        twice), the last good copy when Home Assistant does not answer (it names the kinds of action)."""
+        if self.home is not None and (not self._entities or self.monotonic() - self._read_at > max_age):
             try:
                 self._entities = tuple(await self.home.entities())
+                self._read_at = self.monotonic()
             except Exception as err:   # Home Assistant unreachable: the grammar's phrases and the abilities still help
                 LOG.warning("clarify_home_unavailable class=%s", type(err).__name__)
         return self._entities

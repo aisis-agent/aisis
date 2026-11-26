@@ -165,7 +165,7 @@ class IntentRouter:
         self.capabilities = capabilities.Capabilities(ha=self.ha, timers=self.timers, skills=self.skills, now=self.now,
                                                       pick=self.pick, monotonic=self.monotonic)
         self.clarifier = clarify.Clarifier(self.grammar, lambda text: self.classify(text, fallback=False), self._runs_here, self.home,
-                                           now=self.now, monotonic=self.monotonic, abilities=self._abilities)
+                                           now=lambda: self.now(), monotonic=lambda: self.monotonic(), abilities=self._abilities)
         if self.correction_mode in ("shadow", "on"):
             try:
                 self.correction = correction.Correction(self.classify, self._decide_in, self.hypotheses, mode=self.correction_mode,
@@ -512,6 +512,9 @@ class IntentRouter:
         `always`, a line that says what was heard and which kinds of action exist. Never a request to repeat. None: nothing to say (not `always`,
         or `cooldown` and a line was already said to this station inside REPROMPT_COOLDOWN_S: the brain takes the phrase)."""
         clarifier = self.clarifier
+        listen = self.allow_reprompt(station) if always else True   # one open-microphone line a minute per station: noise cannot loop the speaker
+        if always and cooldown and not listen:
+            return None
         options = await clarifier.options(station, text, floor=floor) if self.clarify_mode == "on" else []
         if options:
             engine = self._engine()
@@ -522,11 +525,7 @@ class IntentRouter:
                 return Route("reply", offer.say, listen=True, intent="clarify.ask", source="correction")
         if not always:
             return None
-        if self.clarify_mode != "on":
-            await clarifier.refresh()
-        listen = self.allow_reprompt(station)
-        if cooldown and not listen:
-            return None
+        await clarifier.refresh()   # the kinds of action for the line (a read younger than a few seconds is reused)
         utterance_trace.note(asked="reprompt")
         return Route("reply", clarifier.describe(text), listen=listen, intent=intent, source="correction")
 

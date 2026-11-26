@@ -475,7 +475,6 @@ class Correction:
         dialog = Dialog(station=station, state=CONFIRM if len(options) == 1 else CHOICE, question=question, heard=heard, readings=readings,
                         heard_says=(), asked_at=now, opened_at=now, risky=True, origin=origin, canon=self._canon(heard), via_quasar=via_quasar)
         self.dialogs[station] = dialog
-        self.chains.pop(station, None)
         utterance_trace.note(correction={**origin, "dialog": self._dialog_trace(dialog, None, None)})
         return Offer(question, True)
 
@@ -517,7 +516,7 @@ class Correction:
             return self._retry(dialog, now, YES_OR_NO_TEXT if dialog.state == CONFIRM else dialog.question)
         if intent == "repair.again":
             return self._retry(dialog, now, dialog.question)
-        if intent == "repair.deny":
+        if intent == "repair.deny" or (intent == "repair.keep" and dialog.origin.get("trigger") == "clarify"):   # «я так и сказал» to a guess about garbled words: no
             return Step(outcome="denied", say=self.describe(dialog.heard, True), listen=True)
         chosen = self._selected(dialog, decision)
         outcome = {"repair.accept": "accepted", "repair.keep": "kept"}.get(intent, f"chose:{chosen}")
