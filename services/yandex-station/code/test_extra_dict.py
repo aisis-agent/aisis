@@ -303,7 +303,8 @@ class ConfusablesFile(unittest.TestCase):
 
     def test_only_command_and_phrase_entries_are_exported_as_phonetic_sets(self):
         document_ = extra_dict.confusables_document(self.dictionary)
-        self.assertEqual([s["id"] for s in document_["sets"]], ["extra-phrase-volume-five", "extra-phrase-pause-device"])
+        self.assertEqual([s["id"] for s in document_["sets"]], ["extra-" + item.id for item in self.dictionary.of_kind("command", "phrase")])
+        self.assertEqual(document_["sets"][0]["id"], "extra-phrase-volume-five")
         group_canonical, group_variants = document_["sets"][0]["groups"]
         self.assertEqual(document_["sets"][0]["kind"], "phonetic")
         self.assertEqual(group_canonical["forms"], ["громкость 5"])
@@ -367,6 +368,8 @@ class RealCore(unittest.TestCase):
         base = real_core.load()
         self.assertEqual([c.text for c in base.candidates("Алиса, урок из 5.")], [])
         self.assertEqual([c.text for c in extended.candidates("Алиса, урок из 5.")], ["Алиса, громкость 5."])
+        self.assertEqual([c.text for c in base.candidates("Ставьте их на паузу.")], [])
+        self.assertEqual([c.text for c in extended.candidates("Ставьте их на паузу.")], ["Поставь телик на паузу."])
         self.assertEqual([c.text for c in base.candidates("включи свет")], [c.text for c in extended.candidates("включи свет")])
 
     def test_the_core_rejects_nothing_the_loader_accepts(self):

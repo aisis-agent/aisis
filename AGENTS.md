@@ -15,7 +15,8 @@ the speaker is wired, which process answers which phrase, and the operations run
 Inside `services/yandex-station/`:
 
 - `code/` is the Python adapter, the speech-to-text gateway (`stt_wyoming.py`), the dashboard, the clip feed, the intent grammar
-  (`code/intent_grammar/`, authored in `grammar/ru.yaml`, compiled to the committed `grammar/ru.json`) and every unit test (`test_*.py`).
+  (`code/intent_grammar/`, authored in `grammar/ru.yaml`, compiled to the committed `grammar/ru.json`) and the unit tests of that code
+  (`test_*.py`; the overlays, `bluegreen/`, `corpus-runner/`, `scripts/` and `homeassistant/tests/` keep their own).
 - `overlays/` are patches applied to the quasar container image; `corpus-runner/` and `bluegreen/` hold the isolated corpus evidence
   protocol and the blue/green deploy tooling; `systemd/` holds the user units; `homeassistant/` is the Home Assistant custom
   integration of the speaker.
@@ -43,7 +44,7 @@ worktree and `services/yandex-station/bluegreen/deploy.sh`).
 
 ## When the owner restates a spoken command in chat
 
-A Telegram or chat message that restates a recent spoken command (for example «поставь телик на паузу» arriving right after a
+A Telegram or chat message from the owner's own account that restates a recent spoken command (for example «поставь телик на паузу» arriving right after a
 clip-feed message whose transcript is different) is a correction of speech recognition, not an instruction to act on. Do not
 perform the command. First find the dialog and the cause: the `stt_final` line in the syslog, the `utterance_trace` line, the trace in
 `dialogs.sqlite3` (tables `utterance_traces`, `voice_clips`, `clip_feed`, `asr_corrections`) and the clip-feed message itself.
