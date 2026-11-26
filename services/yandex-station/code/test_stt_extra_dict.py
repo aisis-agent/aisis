@@ -2,7 +2,8 @@
 `extra_dict_would_correct` and changes nothing, `on` corrects, `off` is silent; the engine's confusables take the dictionary's command and
 phrase entries only in `on`.
 
-Real inputs: «Олеса, включи свет.» (clip 20261120T235150-330d2a, tg#31621: the owner's «Олеса Алекса Олеся -> Алиса»).
+Real inputs: «Олеса, включи свет.» (clip 20261120T235150-330d2a, tg#31621: the owner's «Олеса Алекса Олеся -> Алиса») and «Ставьте их на паузу.»
+(clip 20261126T172557-b4bff8, ticket #306: the owner said «поставь телик на паузу»).
 """
 import json
 import os
@@ -86,6 +87,12 @@ class Judge(unittest.TestCase):
         with self.assertLogs("aisis.stt", level="INFO"):
             self.assertEqual(stt_wyoming.judge_transcript("Алиса, урок из 5.", Utt, DICTIONARY, "shadow")[1].clean, "Урок из 5.")
             self.assertEqual(stt_wyoming.judge_transcript("Алиса, урок из 5.", Utt, DICTIONARY, "on")[1].clean, "Громкость 5.")
+
+    def test_a_lost_device_word_in_a_pause_request_is_restored_only_in_on(self):
+        """The real transcript of clip 20261126T172557-b4bff8 (#306): shadow keeps it, on repairs it before the hook and the brain see it."""
+        with self.assertLogs("aisis.stt", level="INFO"):
+            self.assertEqual(stt_wyoming.judge_transcript("Ставьте их на паузу.", Utt, DICTIONARY, "shadow")[1].clean, "Ставьте их на паузу.")
+            self.assertEqual(stt_wyoming.judge_transcript("Ставьте их на паузу.", Utt, DICTIONARY, "on")[1].clean, "Поставь телик на паузу.")
 
     def test_a_rejected_transcript_is_never_corrected(self):
         rejected, named = stt_wyoming.judge_transcript("Продолжение следует...", Utt, DICTIONARY, "on")

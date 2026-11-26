@@ -2,7 +2,8 @@
 wake-word variants at the head, the mode spelling and the stt-cli confusables file.
 
 The real transcripts behind the tests: «Олеса, включи свет.» (clip 20261120T235150-330d2a, after a sentence), the owner's «Олеса Алекса Олеся -> Алиса»
-(tg#31621), «Алиса, урок из 5.» (clip 20261109T010646-564b98, the owner's verdict «Алиса, громкость 5»).
+(tg#31621), «Алиса, урок из 5.» (clip 20261109T010646-564b98, the owner's verdict «Алиса, громкость 5»), «Ставьте их на паузу.»
+(clip 20261126T172557-b4bff8, the owner's correction «поставь телик на паузу», ticket #306).
 """
 import json
 import os
@@ -274,6 +275,15 @@ class Phrases(unittest.TestCase):
         for text in ("Урок из 5 песен длится час", "Это урок из 5 пунктов", "Сколько стоит урок из 5 занятий"):
             self.assertEqual(self.dictionary.correct(text).text, text)
 
+    def test_a_lost_device_word_in_a_pause_request_is_restored(self):
+        """Whisper dropped «телик» and wrote «Ставьте их на паузу.»: the stored clip the owner corrected in Telegram (#306)."""
+        self.assertEqual(self.dictionary.correct("Ставьте их на паузу.").text, "Поставь телик на паузу.")
+        self.assertEqual(self.dictionary.correct("Алиса, ставьте их на паузу.").text, "Алиса, поставь телик на паузу.")
+
+    def test_the_restored_pause_phrase_is_not_taken_from_a_sentence(self):
+        for text in ("Ставьте их на паузу вместе с фильмом", "Скажи ставьте их на паузу"):
+            self.assertEqual(self.dictionary.correct(text).text, text)
+
     def test_overlapping_variants_resolve_to_the_longest(self):
         dictionary = extra_dict.parse(document(
             entry(id="phrase-short", kind="phrase", context="anywhere", canonical="свет", variants=[{"text": "свед"}], evidence={"source": "owner"}),
@@ -293,7 +303,8 @@ class ConfusablesFile(unittest.TestCase):
 
     def test_only_command_and_phrase_entries_are_exported_as_phonetic_sets(self):
         document_ = extra_dict.confusables_document(self.dictionary)
-        self.assertEqual([s["id"] for s in document_["sets"]], ["extra-phrase-volume-five"])
+        self.assertEqual([s["id"] for s in document_["sets"]], ["extra-" + item.id for item in self.dictionary.of_kind("command", "phrase")])
+        self.assertEqual(document_["sets"][0]["id"], "extra-phrase-volume-five")
         group_canonical, group_variants = document_["sets"][0]["groups"]
         self.assertEqual(document_["sets"][0]["kind"], "phonetic")
         self.assertEqual(group_canonical["forms"], ["громкость 5"])
@@ -357,6 +368,8 @@ class RealCore(unittest.TestCase):
         base = real_core.load()
         self.assertEqual([c.text for c in base.candidates("Алиса, урок из 5.")], [])
         self.assertEqual([c.text for c in extended.candidates("Алиса, урок из 5.")], ["Алиса, громкость 5."])
+        self.assertEqual([c.text for c in base.candidates("Ставьте их на паузу.")], [])
+        self.assertEqual([c.text for c in extended.candidates("Ставьте их на паузу.")], ["Поставь телик на паузу."])
         self.assertEqual([c.text for c in base.candidates("включи свет")], [c.text for c in extended.candidates("включи свет")])
 
     def test_the_core_rejects_nothing_the_loader_accepts(self):
