@@ -39,6 +39,22 @@
         "source": "verdict",
         "note": "the owner's verdict on clip 20261109T010646-564b98: heard «Алиса, урок из 5.», said «Алиса, громкость 5»."
       }
+    },
+    {
+      "id": "phrase-pause-device",
+      "kind": "phrase",
+      "canonical": "поставь телик на паузу",
+      "context": "standalone",
+      "variants": [
+        {
+          "text": "ставьте их на паузу",
+          "n": 1
+        }
+      ],
+      "evidence": {
+        "source": "owner",
+        "note": "the owner's correction in Telegram of clip 20261126T172557-b4bff8: heard «Ставьте их на паузу.», said «поставь телик на паузу» (the recogniser lost «телик» and the first syllable of «поставь»). The grammar had no reading, the hook answered `none` and the brain asked «Повтори?»."
+      }
     }
   ]
 }

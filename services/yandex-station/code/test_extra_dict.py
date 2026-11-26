@@ -293,7 +293,7 @@ class ConfusablesFile(unittest.TestCase):
 
     def test_only_command_and_phrase_entries_are_exported_as_phonetic_sets(self):
         document_ = extra_dict.confusables_document(self.dictionary)
-        self.assertEqual([s["id"] for s in document_["sets"]], ["extra-phrase-volume-five"])
+        self.assertEqual([s["id"] for s in document_["sets"]], ["extra-phrase-volume-five", "extra-phrase-pause-device"])
         group_canonical, group_variants = document_["sets"][0]["groups"]
         self.assertEqual(document_["sets"][0]["kind"], "phonetic")
         self.assertEqual(group_canonical["forms"], ["громкость 5"])
