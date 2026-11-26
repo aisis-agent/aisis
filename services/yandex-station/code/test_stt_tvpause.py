@@ -23,12 +23,20 @@ class RecordingTv:
         self.stations.append(station)
 
 
+class SilentVad:
+    """The real VAD (webrtcvad) is not installed in CI; this session carries no audio."""
+
+    def is_speech(self, frame, rate):
+        return False
+
+
 class ActivationReachesTheTvPause(unittest.TestCase):
     def open_turn(self, headers=None, query=""):
         tv = RecordingTv()
 
         async def play():
-            gateway = stt_wyoming.STTGateway(env={"AISIS_WYOMING_URI": "tcp://127.0.0.1:1", "AISIS_STT_DSP": "0", "AISIS_STT_WAKE_WINDOW": "0"}, tv=tv, archive=False, domain_catalog=None)
+            gateway = stt_wyoming.STTGateway(env={"AISIS_WYOMING_URI": "tcp://127.0.0.1:1", "AISIS_STT_DSP": "0", "AISIS_STT_WAKE_WINDOW": "0"},
+                                             vad_factory=SilentVad, tv=tv, archive=False, domain_catalog=None)
             async with TestClient(TestServer(gateway.app())) as client:
                 async with client.ws_connect("/" + query, headers=headers or {}) as ws:
                     await ws.send_json({"sample_rate": 16000})
