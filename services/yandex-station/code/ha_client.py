@@ -410,29 +410,29 @@ def discover(hint: str | None = None, uuid: str | None = None, window: float = 1
     With `uuid` (the instance the owner connected before) only that instance counts, so a neighbour's Home Assistant is never adopted when
     the address changed; a candidate whose identity cannot be read (host name, hint) is accepted only if it is the stored address itself.
     """
-    candidates: list[Found] = []
-    for service in browse(SERVICE_TYPE, window, group):
+    candidates: list[tuple[tuple[str, str] | None, Found]] = []      # (which announced server it belongs to, the candidate)
+    for index, service in enumerate(browse(SERVICE_TYPE, window, group)):
         txt = service.txt
+        who = ("uuid", txt["uuid"]) if txt.get("uuid") else ("announcement", str(index))      # not the display name: two servers may both be called «Home»
         # Every address the announcement carries, the local one first (`base_url` is the external, cloud one when remote access is set up);
         # the probe of each decides, so an unreachable preferred address does not hide a working one.
         urls = [txt.get("internal_url"), *(_hostport_url(address, service.port) for address in service.addresses), txt.get("base_url")]
         for base in urls:
             if base:
-                candidates.append(Found(base.rstrip("/"), txt.get("location_name") or service.name, txt.get("uuid"), txt.get("version"), "mdns"))
+                candidates.append((who, Found(base.rstrip("/"), txt.get("location_name") or service.name, txt.get("uuid"), txt.get("version"), "mdns")))
     for host in hostnames:
-        candidates.append(Found(_hostport_url(host, DEFAULT_PORT), None, None, None, "hostname"))
+        candidates.append((None, Found(_hostport_url(host, DEFAULT_PORT), None, None, None, "hostname")))
     if hint:
-        candidates.append(Found(hint.rstrip("/"), None, None, None, "hint"))
+        candidates.append((None, Found(hint.rstrip("/"), None, None, None, "hint")))
     seen: set[str] = set()
-    answered: set[str] = set()      # announced servers that already have a working address: the alternatives of one announcement are one server
+    answered: set[tuple[str, str]] = set()      # announced servers that already have a working address: the alternatives of one announcement are one server
     result: list[Found] = []
-    for candidate in candidates:
+    for who, candidate in candidates:
         if candidate.url in seen:
             continue
         seen.add(candidate.url)
         if uuid and candidate.uuid != uuid and not (candidate.uuid is None and candidate.url == (hint or "").rstrip("/")):
             continue
-        who = (candidate.uuid or candidate.name) if candidate.via == "mdns" else None
         if who and who in answered:
             continue
         if looks_like_home_assistant(candidate.url):

@@ -152,6 +152,24 @@ class DiscoveryTests(unittest.TestCase):
         self.addCleanup(mdns.close)
         self.assertEqual(len(ha_client.discover(window=0.4, group=mdns.group, hostnames=())), 1)
 
+    def test_two_servers_with_the_same_display_name_and_no_instance_id_are_both_offered(self):
+        other = ha_fakes.FakeHomeAssistant()
+        self.addCleanup(other.close)
+        services = [ha_client.Service(f"Instance {n}", f"h{n}.local", ha.port, ("127.0.0.1",), {"location_name": "Home"})
+                    for n, ha in enumerate((self.ha, other))]
+        with unittest.mock.patch.object(ha_client, "browse", return_value=services):
+            found = ha_client.discover(window=0.1, hostnames=())
+        self.assertEqual(sorted(f.url for f in found), sorted([self.ha.url, other.url]))
+
+    def test_an_instance_id_that_looks_like_an_announcement_label_does_not_hide_another_server(self):
+        other = ha_fakes.FakeHomeAssistant()
+        self.addCleanup(other.close)
+        services = [ha_client.Service("A", "a.local", self.ha.port, ("127.0.0.1",), {"uuid": "announcement-1"}),
+                    ha_client.Service("B", "b.local", other.port, ("127.0.0.1",), {})]
+        with unittest.mock.patch.object(ha_client, "browse", return_value=services):
+            found = ha_client.discover(window=0.1, hostnames=())
+        self.assertEqual(sorted(f.url for f in found), sorted([self.ha.url, other.url]))
+
     def test_the_public_address_is_still_offered_when_the_local_one_does_not_answer(self):
         response = ha_fakes.mdns_response("_home-assistant._tcp.local", "Home Assistant", "ha.local", 9, "127.0.0.1",
                                           {"uuid": UUID, "base_url": self.ha.url, "internal_url": "http://127.0.0.1:9"})
