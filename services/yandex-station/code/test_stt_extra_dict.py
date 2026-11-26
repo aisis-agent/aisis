@@ -87,6 +87,12 @@ class Judge(unittest.TestCase):
             self.assertEqual(stt_wyoming.judge_transcript("Алиса, урок из 5.", Utt, DICTIONARY, "shadow")[1].clean, "Урок из 5.")
             self.assertEqual(stt_wyoming.judge_transcript("Алиса, урок из 5.", Utt, DICTIONARY, "on")[1].clean, "Громкость 5.")
 
+    def test_a_lost_device_word_in_a_pause_request_is_restored_only_in_on(self):
+        """The real transcript of clip 20261126T172557-b4bff8 (#306): shadow keeps it, on repairs it before the hook and the brain see it."""
+        with self.assertLogs("aisis.stt", level="INFO"):
+            self.assertEqual(stt_wyoming.judge_transcript("Ставьте их на паузу.", Utt, DICTIONARY, "shadow")[1].clean, "Ставьте их на паузу.")
+            self.assertEqual(stt_wyoming.judge_transcript("Ставьте их на паузу.", Utt, DICTIONARY, "on")[1].clean, "Поставь телик на паузу.")
+
     def test_a_rejected_transcript_is_never_corrected(self):
         rejected, named = stt_wyoming.judge_transcript("Продолжение следует...", Utt, DICTIONARY, "on")
         self.assertEqual((rejected, named), ("hallucination", None))

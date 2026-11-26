@@ -355,11 +355,15 @@ that was not observed.
   head of a request the owner repeated within a minute as «Алиса, включи кондиционер …»), «Тариса» 1, «Малис» 1, «Лисы» 1 (the last three the whole
   segment), all four already in the lexicon, and «Лица» 1 (the start of a garbled request, covered by nobody and not adopted: one occurrence
   and no verdict). «Олеса» 1 (after another sentence, not at the head); «Алекса» and «Олеся» 0: they are in the file because the owner named them.
-  The one `phrase` entry is the owner's verdict on clip 20261109T010646-564b98 («урок из 5» → «громкость 5»; n = 1, source `verdict`; `standalone`, so
-  «Урок из 5 песен длится час» is not touched). No other
+  The first `phrase` entry is the owner's verdict on clip 20261109T010646-564b98 («урок из 5» → «громкость 5»; n = 1, source `verdict`; `standalone`, so
+  «Урок из 5 песен длится час» is not touched). The second is the owner's correction in Telegram of clip 20261126T172557-b4bff8 (ticket #306): the
+  recogniser wrote «Ставьте их на паузу.» for «поставь телик на паузу» (source `owner`, n = 1, `standalone`). The repaired phrase takes the normal route: replayed
+  offline against the active quasar image (`intent_grammar/tools/replay_quasar.mts`, no network, nothing executed) it is answered by the container's fast layer
+  with the confirmation «Поставить на паузу?» (`media.pause` 0.75, entity «телевизор» 0.73; confirmed, it is handed on as «поставь на паузу»), where the heard
+  text got no answer at all. The grammar has no pause intent of its own for a device and none is added here. The correction applies only with `AISIS_EXTRA_DICT=on`. No other
   command-word confusion has a verdict or a second clip yet, so none is in the file; `ключи свет` (the lost start of «включи» and «выключи») is
-  deliberately not an entry: either reading is possible and the repair policy asks instead. Replay of the 107 sent clips (`bench_extra_dict.py
-  replay`): 1 clip corrected (the phrase's own source clip, which confirms nothing), 0 changed wrongly by an owner verdict; these are counts of one
+  deliberately not an entry: either reading is possible and the repair policy asks instead. Replay of the 107 sent clips on 2026-11-22 (`bench_extra_dict.py
+  replay`, before the second phrase was added): 1 clip corrected (the first phrase's own source clip, which confirms nothing), 0 changed wrongly by an owner verdict; these are counts of one
   household's clips, not an accuracy figure. «Лисы» and «Алисы» are real words as well as names of `lexicon.wake` (`wake_word.REAL_WORDS`): at the head of a request they are cut
   only when addressed (a comma, stop or colon right behind, or an imperative of the grammar), so «Лисы живут в лесу» keeps its first word and
   «Лисы, включи свет» loses it; as the whole utterance they stay an activation.
