@@ -19,7 +19,7 @@ import secrets
 import time
 import urllib.parse
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Mapping
 
 import ha_client
 
@@ -27,6 +27,17 @@ PENDING_TTL_S = 600.0
 SCAN_TTL_S = 300.0
 
 Response = tuple[int, dict[str, str], str]
+
+
+def adopt_environment(store: ha_client.Store, env: Mapping[str, str]) -> bool:
+    """The long-lived token an installation was configured with before the connection store existed (`HA_URL`, `HA_TOKEN` of the dashboard's
+    environment file) becomes the stored connection once, so a deploy does not leave Home Assistant disconnected until somebody signs in. A
+    stored connection is never replaced. True when it adopted."""
+    url, token = (env.get("HA_URL") or "").strip().rstrip("/"), (env.get("HA_TOKEN") or "").strip()
+    if not url or not token or store.load() is not None:
+        return False
+    store.save(ha_client.Connection(url, "long_lived", token, None, None, None, time.time()))
+    return True
 
 
 @dataclass(frozen=True)
@@ -105,10 +116,20 @@ class Onboarding:
 
     def page(self, query: dict[str, list[str]]) -> Response:
         status = self.client.status()
+        stored = self.client.store.load()
         notes = []
         if "connected" in query:
             notes.append("<p class=msg>Готово: Home Assistant подключён.</p>")
-        if "disconnected" in query:
+        if "unrevoked" in query:
+            notes.append("<p class=err>Прежний доступ отозвать не удалось (сервер по старому адресу не ответил). Удалите его вручную: профиль "
+                         "в Home Assistant → Безопасность → Токены обновления.</p>")
+        disconnected = (query.get("disconnected") or [""])[0]
+        if disconnected == "unrevoked":
+            notes.append("<p class=err>Подключение удалено, но отозвать доступ в Home Assistant не удалось (сервер не ответил). Удалите его вручную: "
+                         "профиль в Home Assistant → Безопасность → Токены обновления.</p>")
+        elif disconnected == "token":
+            notes.append("<p class=note>Подключение удалено. Долгоживущий токен остаётся действительным, пока его не удалят в профиле Home Assistant.</p>")
+        elif disconnected:
             notes.append("<p class=msg>Подключение удалено, доступ отозван в Home Assistant.</p>")
         body = ["<h1>Home Assistant</h1>", *notes]
         steps = "".join(f"<li class={'ok' if s.ok else 'bad'}>{'✓' if s.ok else '✗'} {html.escape(s.detail)}</li>" for s in status.steps)
@@ -126,6 +147,8 @@ class Onboarding:
                 body.append("<h2>Найден в сети</h2>")
                 for item in found:
                     label = f"Подключить «{item.name}»" if item.name else "Подключить"
+                    if stored is not None and stored.uuid and item.uuid == stored.uuid and item.url != stored.url:
+                        label += " — тот же Home Assistant, что был подключён, теперь по другому адресу"
                     body.append("<form method=post action=\"/ha/connect\">"
                                 f"<input type=hidden name=url value=\"{html.escape(item.url, quote=True)}\">"
                                 f"<button>{html.escape(label)} — {html.escape(item.url)}</button></form>")
@@ -180,9 +203,11 @@ class Onboarding:
         previous = self.client.store.load()
         name = pending.name or self._location_name(pending.url, tokens.access_token)
         self.client.store.save(ha_client.Connection(pending.url, "oauth", tokens.refresh_token, pending.client_id, pending.uuid, name, self._clock()))
+        location = "/ha?connected=1"
         if previous is not None and previous.kind == "oauth" and previous.secret != tokens.refresh_token:
-            ha_client.revoke(previous.url, previous.secret)     # a reconnect replaces the old grant: it must not stay valid
-        return 303, {"Location": "/ha?connected=1", "Content-Type": "text/plain; charset=utf-8"}, ""
+            if not ha_client.revoke(previous.url, previous.secret):     # a reconnect replaces the old grant: it must not stay valid
+                location += "&unrevoked=1"
+        return 303, {"Location": location, "Content-Type": "text/plain; charset=utf-8"}, ""
 
     @staticmethod
     def _location_name(url: str, access_token: str) -> str | None:
@@ -197,10 +222,13 @@ class Onboarding:
 
     def disconnect(self) -> Response:
         conn = self.client.store.load()
+        outcome = "1"
         if conn is not None and conn.kind == "oauth":
-            ha_client.revoke(conn.url, conn.secret)
+            outcome = "1" if ha_client.revoke(conn.url, conn.secret) else "unrevoked"
+        elif conn is not None:
+            outcome = "token"      # a long-lived token is deleted in the Home Assistant profile; nothing here can end it
         self.client.store.clear()
-        return 303, {"Location": "/ha?disconnected=1", "Content-Type": "text/plain; charset=utf-8"}, ""
+        return 303, {"Location": f"/ha?disconnected={outcome}", "Content-Type": "text/plain; charset=utf-8"}, ""
 
     def manual(self, url: str, token: str) -> Response:
         url, token = url.strip().rstrip("/"), token.strip()
@@ -209,8 +237,15 @@ class Onboarding:
         reply = ha_client.http("GET", url + "/api/config", headers={"Authorization": "Bearer " + token}, timeout=4.0)
         if reply.status != 200:
             return self._message(400, f"Home Assistant не принял токен ({reply.status or reply.error}).")
-        name = reply.json().get("location_name") if isinstance(reply.json(), dict) else None
+        try:
+            config = reply.json()
+        except ValueError:
+            return self._message(400, f"{url} ответил, но не как Home Assistant: это не ответ его API.")
+        name = config.get("location_name") if isinstance(config, dict) else None
         known = next((f for f in self._found() if f.url == url), None)     # the instance id, when the network announces this very server
+        previous = self.client.store.load()
         self.client.store.save(ha_client.Connection(url, "long_lived", token, None, known.uuid if known else None,
                                                     name if isinstance(name, str) else None, self._clock()))
+        if previous is not None and previous.kind == "oauth":
+            ha_client.revoke(previous.url, previous.secret)     # the login grant it replaces must not stay valid
         return 303, {"Location": "/ha?connected=1", "Content-Type": "text/plain; charset=utf-8"}, ""

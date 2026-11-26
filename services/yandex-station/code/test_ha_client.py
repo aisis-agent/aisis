@@ -1,6 +1,7 @@
 """ha_client against a fake Home Assistant: the connection store, mDNS discovery and re-discovery, the standard sign-in, token refresh and the status
 steps the dashboard shows. Nothing here talks to a real Home Assistant or to the real network (mDNS goes to a responder on loopback)."""
 import functools
+import http.client
 import json
 import os
 import stat
@@ -9,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -129,6 +131,19 @@ class DiscoveryTests(unittest.TestCase):
         self.addCleanup(mdns.close)
         found = ha_client.discover(hint="http://127.0.0.1:9", uuid=UUID, window=0.4, group=mdns.group, hostnames=())
         self.assertEqual([f.url for f in found], [self.ha.url])
+
+    def test_the_local_address_is_offered_before_the_public_one(self):
+        response = ha_fakes.mdns_response("_home-assistant._tcp.local", "Home Assistant", "ha.local", self.ha.port, "127.0.0.1",
+                                          {"uuid": UUID, "base_url": "http://127.0.0.1:9", "internal_url": self.ha.url})
+        mdns = ha_fakes.FakeMdns(response)
+        self.addCleanup(mdns.close)
+        self.assertEqual([f.url for f in ha_client.discover(window=0.4, group=mdns.group, hostnames=())], [self.ha.url])
+
+    def test_a_transport_failure_the_http_library_raises_is_a_failed_reply_not_an_exception(self):
+        for failure in (http.client.IncompleteRead(b"x"), http.client.BadStatusLine("x"), http.client.LineTooLong("header line")):
+            with self.subTest(failure=type(failure).__name__), unittest.mock.patch.object(ha_client._OPENER, "open", side_effect=failure):
+                self.assertEqual(ha_client.http("GET", "http://127.0.0.1:9/x").status, 0)
+                self.assertFalse(ha_client.looks_like_home_assistant("http://127.0.0.1:9"))
 
 
 class SignInTests(unittest.TestCase):
@@ -251,45 +266,24 @@ class RediscoveryTests(unittest.TestCase):
         self.addCleanup(self.mdns.close)
         self.discover = functools.partial(ha_client.discover, group=self.mdns.group, hostnames=())
 
-    def test_a_request_to_a_dead_address_answers_at_once_and_the_address_is_found_in_the_background(self):
+    def test_a_dead_address_is_never_replaced_by_one_the_network_announces(self):
+        """Anyone on the network can copy the public instance id into an announcement; the credential must not follow it."""
         client = ha_client.HaClient(self.store, discover_fn=self.discover)
         client.get("/api/states")                         # a token is held
         self.old.stop_listening()
         started = time.monotonic()
         reply = client.get("/api/states/light.kitchen")
         self.assertEqual((reply.status, reply.error), (0, "refused"))
-        self.assertLess(time.monotonic() - started, 0.5)  # the look for the new address is not waited for
-        deadline = time.monotonic() + 3
-        while self.store.load().url != self.new.url and time.monotonic() < deadline:
-            time.sleep(0.02)
-        self.assertEqual(self.store.load().url, self.new.url)
-        self.assertEqual(client.get("/api/states/light.kitchen").json()["state"], "on")
+        self.assertLess(time.monotonic() - started, 0.5)
+        time.sleep(2.5)                                   # longer than a look takes (the mDNS window is 1.5 s)
+        self.assertEqual(self.store.load().url, self.old.url)
+        self.assertEqual(self.new.requests, [])           # not a single request, so no token, reached the announced address
 
-    def test_looking_is_rate_limited(self):
-        looks = []
-        client = ha_client.HaClient(self.store, discover_fn=lambda **kw: looks.append(kw) or [])
-        self.old.stop_listening()
-        for _ in range(5):
-            client.get("/api/states")
-        deadline = time.monotonic() + 1
-        while not looks and time.monotonic() < deadline:
-            time.sleep(0.02)
-        time.sleep(0.1)
-        self.assertEqual(len(looks), 1)
-        self.assertEqual((looks[0]["hint"], looks[0]["uuid"]), (self.old.url, UUID))
-
-    def test_an_answer_from_home_assistant_never_starts_a_look(self):
-        looks = []
-        client = ha_client.HaClient(self.store, discover_fn=lambda **kw: looks.append(kw) or [])
-        client.get("/api/states/none")                    # a 404 from a server that is there
-        time.sleep(0.1)
-        self.assertEqual(looks, [])
-
-    def test_rediscover_stores_the_new_address(self):
+    def test_rediscover_reports_the_new_address_and_stores_nothing(self):
         client = ha_client.HaClient(self.store, discover_fn=self.discover)
         self.old.stop_listening()
         self.assertEqual(client.rediscover(window=0.4), self.new.url)
-        self.assertEqual(self.store.load().url, self.new.url)
+        self.assertEqual(self.store.load().url, self.old.url)
 
 
 class StatusTests(unittest.TestCase):
@@ -336,6 +330,12 @@ class StatusTests(unittest.TestCase):
         status = self.client.status()
         self.assertEqual(status.failing.id, "api")
         self.assertIn("401", status.failing.detail)
+
+    def test_a_grant_revoked_between_the_token_check_and_the_read_is_a_failed_step_not_an_exception(self):
+        self.connect()
+        with unittest.mock.patch.object(self.client, "get", side_effect=ha_client.AuthRevoked("revoked")):
+            status = self.client.status()
+        self.assertEqual((status.connected, status.failing.id), (False, "api"))
 
 
 if __name__ == "__main__":

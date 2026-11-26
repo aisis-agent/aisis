@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 import urllib.parse
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -134,6 +135,57 @@ class DashboardHaPageTests(unittest.TestCase):
         self.assertNotIn(refresh, self.ha.refresh_tokens)
         with self.assertRaises(ha_client.AuthRevoked):
             ha_client.refresh_access(self.ha.url, self.origin + "/", refresh)
+
+    def test_disconnect_says_so_when_home_assistant_could_not_be_reached_to_revoke(self):
+        self.sign_in()
+        self.ha.stop_listening()
+        status, headers, _ = self.call("POST", "/ha/disconnect", {})
+        self.assertEqual((status, headers["Location"]), (303, "/ha?disconnected=unrevoked"))
+        self.assertIsNone(self.store.load())
+        _, _, page = self.call("GET", "/ha?disconnected=unrevoked")
+        self.assertIn("отозвать доступ в Home Assistant не удалось", page)
+        self.assertNotIn("доступ отозван в Home Assistant", page)
+
+    def test_a_long_lived_token_cannot_be_revoked_from_here_and_the_page_says_where_to_delete_it(self):
+        self.ha.long_lived.add("llat")
+        self.call("POST", "/ha/manual", {"url": self.ha.url, "token": "llat"})
+        status, headers, _ = self.call("POST", "/ha/disconnect", {})
+        self.assertEqual(headers["Location"], "/ha?disconnected=token")
+        _, _, page = self.call("GET", "/ha?disconnected=token")
+        self.assertIn("профиле Home Assistant", page)
+
+    def test_replacing_a_login_grant_with_a_pasted_token_ends_the_grant(self):
+        self.sign_in()
+        grant = self.store.load().secret
+        self.ha.long_lived.add("llat")
+        self.call("POST", "/ha/manual", {"url": self.ha.url, "token": "llat"})
+        self.assertNotIn(grant, self.ha.refresh_tokens)
+
+    def test_a_pasted_address_that_answers_with_a_page_instead_of_json_is_refused_not_a_crash(self):
+        with unittest.mock.patch.object(ha_client, "http", return_value=ha_client.Reply(200, b"<html>router</html>")):
+            status, _, _ = self.call("POST", "/ha/manual", {"url": "http://192.168.0.1", "token": "x"})
+        self.assertEqual(status, 400)
+        self.assertIsNone(self.store.load())
+
+    def test_the_same_home_assistant_at_a_new_address_is_offered_as_such_and_the_stored_address_is_not_touched(self):
+        self.store.save(ha_client.Connection("http://127.0.0.1:9", "oauth", "r" * 32, self.origin + "/", UUID))
+        _, _, page = self.call("GET", "/ha")
+        self.assertIn("тот же Home Assistant", page)
+        self.assertIn(self.ha.url, page)
+        self.assertEqual(self.store.load().url, "http://127.0.0.1:9")
+
+    def test_a_token_that_the_dashboard_was_configured_with_becomes_the_connection_once(self):
+        env = {"HA_URL": self.ha.url, "HA_TOKEN": "llat"}
+        self.assertTrue(ha_connect.adopt_environment(self.store, env))
+        conn = self.store.load()
+        self.assertEqual((conn.kind, conn.secret, conn.url), ("long_lived", "llat", self.ha.url))
+        self.assertFalse(ha_connect.adopt_environment(self.store, {"HA_URL": "http://other:8123", "HA_TOKEN": "x"}))   # a connection is never replaced
+        self.assertEqual(self.store.load().secret, "llat")
+
+    def test_no_token_in_the_environment_adopts_nothing(self):
+        self.assertFalse(ha_connect.adopt_environment(self.store, {"HA_URL": self.ha.url}))
+        self.assertFalse(ha_connect.adopt_environment(self.store, {"HA_TOKEN": "llat"}))
+        self.assertIsNone(self.store.load())
 
     def test_reconnecting_replaces_the_old_grant(self):
         self.sign_in()

@@ -187,10 +187,12 @@ Everything that talks to Home Assistant takes its address and credential from on
 directory the quasar containers mount read-only), through one client, `code/ha_client.py` (stdlib). There is no hand-typed URL or token.
 
 - **Finding the server.** mDNS `_home-assistant._tcp.local` (the announcement Home Assistant's zeroconf integration makes; its `uuid` identifies the
-  instance), then `homeassistant.local`, then the address that answered last. A candidate counts only if `/auth/providers` answers like Home
-  Assistant. When the stored address stops answering (a DHCP change) the client looks again in the background, accepts only the instance with the
-  stored `uuid` (a neighbour's Home Assistant is never adopted) and rewrites the store atomically; the request that found the address dead is not
-  delayed by the look.
+  instance; the local `internal_url` is preferred over the external `base_url`), then `homeassistant.local`, then the address that answered last.
+  A candidate counts only if `/auth/providers` answers like Home Assistant. The stored address is changed only by the owner: the `uuid` is public
+  (anybody on the network can copy it into an announcement), so when the stored address stops answering the client never moves the credential to an
+  address the network merely claims. `/ha` shows the server found at another address, marked as the same Home Assistant when the `uuid` matches, and
+  the owner signs in there. A token configured before the store existed (`HA_URL`, `HA_TOKEN` in `ha-dashboard.env`) becomes the stored connection
+  once when the dashboard starts and nothing is stored yet.
 - **Signing in.** Open the dashboard `/ha` page (`:8781/ha`), press **Подключить**. The browser goes to Home Assistant's own login page
   (`/auth/authorize`, the OAuth authorization-code flow of Home Assistant's mobile and third-party clients; client id = the dashboard's own origin),
   the owner logs in and approves, Home Assistant sends the browser back to `/ha/callback` with a code, and the code becomes a refresh token. Access

@@ -1247,6 +1247,7 @@ class H(BaseHTTPRequestHandler):
         pass
 
 if __name__ == "__main__":
+    ha_connect.adopt_environment(HA_CLIENT.store, os.environ)    # a token configured before the connection store existed is kept as the connection
     tv = tvpause.default()
     tv.recover()
     INGESTER = dialogstore.Ingester(on_log=tv.observe)

@@ -3,15 +3,16 @@
 Everything that talks to Home Assistant (adapter, dashboard, the vocabulary builders, weather, the quasar layer) takes the address and the credential
 from ONE place, the connection store (`~/.config/aisis/ha/connection.json`, 0600 in a 0700 directory that containers mount read-only):
 
-  url        where Home Assistant answered last; a hint, never trusted blindly: when it stops answering the client looks again
-  uuid       the instance id from the mDNS announcement, so a re-discovery never lands on somebody else's Home Assistant
+  url        where Home Assistant answered last; changed only by the owner (the Connect page)
+  uuid       the instance id from the mDNS announcement: the Connect page uses it to say that a server found at another address is the same one
   client_id  the OAuth client id the refresh token was issued to (the dashboard's own origin)
   auth       {"kind": "oauth", "refresh_token"}  the standard flow (/auth/authorize + /auth/token), nothing typed by hand
              {"kind": "long_lived", "token"}     advanced: a long-lived access token pasted on the /ha page
 
 Finding the server: mDNS `_home-assistant._tcp.local` (what Home Assistant's zeroconf integration announces), then the `homeassistant.local`
-host name, then the previous address. A candidate counts only when `/auth/providers` answers like Home Assistant. `HaClient` re-discovers in
-the background when the stored address stops answering (DHCP change); the answer to the request that found it dead is not delayed.
+host name, then the previous address. A candidate counts only when `/auth/providers` answers like Home Assistant. When the stored address
+stops answering, `rediscover` can tell where the same instance announces itself, but the stored address is changed only by the owner
+signing in at the new one: the instance id is public, so the credential never follows an address the network claims by itself.
 
 Signing in: `authorize_url` -> the owner logs in on Home Assistant's own page and approves -> `exchange_code` -> a refresh token. Access tokens
 (30 minutes) are fetched from it on demand and refreshed before they expire; refresh tokens do not rotate, so every process may refresh on its
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+from http.client import HTTPException
 import json
 import os
 import socket
@@ -45,9 +47,7 @@ MDNS_GROUP = ("224.0.0.251", 5353)
 HOSTNAME_CANDIDATES = ("homeassistant.local", "homeassistant")
 DEFAULT_PORT = 8123
 ACCESS_MARGIN_S = 60.0        # an access token is renewed this long before Home Assistant expires it
-REDISCOVER_COOLDOWN_S = 30.0  # at most one background look per this long
 # Errors that say nobody listens at the stored address (versus a refusal of the request by Home Assistant itself).
-GONE_KINDS = frozenset({"refused", "reset", "dns", "unreachable", "timeout"})
 
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # the smart home is local: no HTTP(S)_PROXY of the environment
 
@@ -131,7 +131,7 @@ class Store:
         self._write(body)
 
     def set_url(self, url: str) -> None:
-        """The address changed (re-discovery); everything else stays. A no-op when nothing is stored."""
+        """The owner confirmed another address; everything else stays. A no-op when nothing is stored."""
         with self._locked():
             current = self._read_raw()
             if current is None or current.get("url") == url:
@@ -244,7 +244,7 @@ def http(method: str, url: str, *, body: bytes | None = None, headers: dict[str,
             return Reply(err.code, err.read())
         finally:
             err.close()
-    except (urllib.error.URLError, OSError, ValueError) as err:     # ValueError: a malformed URL
+    except (urllib.error.URLError, OSError, ValueError, HTTPException) as err:     # ValueError: a malformed URL
         return Reply(0, b"", classify(err))
 
 
@@ -413,9 +413,10 @@ def discover(hint: str | None = None, uuid: str | None = None, window: float = 1
     candidates: list[Found] = []
     for service in browse(SERVICE_TYPE, window, group):
         txt = service.txt
-        base = txt.get("base_url") or txt.get("internal_url")
+        base = txt.get("internal_url")      # the local address first: `base_url` is the external (cloud) one when remote access is set up
         if not base and service.addresses:
             base = _hostport_url(service.addresses[0], service.port)
+        base = base or txt.get("base_url")
         if base:
             candidates.append(Found(base.rstrip("/"), txt.get("location_name") or service.name, txt.get("uuid"), txt.get("version"), "mdns"))
     for host in hostnames:
@@ -514,8 +515,6 @@ class HaClient:
         self._clock = clock
         self._lock = threading.Lock()
         self._access: tuple[str, str, float] | None = None       # (secret it came from, token, valid until)
-        self._looking = False
-        self._last_look = float("-inf")
 
     # -- credentials
 
@@ -556,8 +555,6 @@ class HaClient:
                 reply = self._send(conn, method, path, body, left, headers, token)
         except Unreachable as err:      # the token endpoint did not answer either: Home Assistant is not there
             reply = Reply(0, b"", err.kind)
-        if reply.status == 0 and reply.error in GONE_KINDS:
-            self.rediscover_later()
         return reply
 
     def _send(self, conn: Connection, method: str, path: str, body: Any, timeout: float, headers: dict[str, str] | None,
@@ -587,38 +584,16 @@ class HaClient:
     # -- the address
 
     def rediscover(self, window: float = 1.5) -> str | None:
-        """Look for the connected instance on the network now; stores and returns its new address, None when it was not found
-        (or the address is unchanged). A connection that never learned its instance id (a hand-typed address nobody announced)
-        is not moved: another Home Assistant on the network could not be told from it."""
+        """Look for the connected instance on the network now and return the address it announces, None when it was not found or the
+        address is unchanged. Nothing is stored: an announcement is public and anybody on the network can copy the instance id into one,
+        so the credential never follows an address the network merely claims. The dashboard shows the address and the owner confirms it
+        by signing in there (ha_connect). A connection that never learned its instance id is not looked for at all."""
         conn = self.store.load()
         if conn is None or conn.uuid is None:
             return None
-        found = self._discover(hint=conn.url, uuid=conn.uuid, window=window)
-        for candidate in found:
-            if candidate.url != conn.url:
-                self.store.set_url(candidate.url)
-                return candidate.url
-            return None
+        for candidate in self._discover(hint=conn.url, uuid=conn.uuid, window=window):
+            return candidate.url if candidate.url != conn.url else None
         return None
-
-    def rediscover_later(self) -> bool:
-        """Start a background look unless one ran lately or runs now; the caller does not wait for it."""
-        with self._lock:
-            now = self._clock()
-            if self._looking or now - self._last_look < REDISCOVER_COOLDOWN_S:
-                return False
-            self._looking, self._last_look = True, now
-        threading.Thread(target=self._look, name="ha-rediscover", daemon=True).start()
-        return True
-
-    def _look(self) -> None:
-        try:
-            self.rediscover()
-        except Exception:   # a failed look is retried after the cooldown; it must never take a caller down
-            pass
-        finally:
-            with self._lock:
-                self._looking = False
 
     # -- what the dashboard shows
 
@@ -642,7 +617,11 @@ class HaClient:
             steps.append(Step("auth", False, str(err)))
             return Status(False, tuple(steps), conn.url, conn.name, conn.kind)
         steps.append(Step("auth", True, "токен доступа получен"))
-        reply = self.get("/api/config", timeout)
+        try:
+            reply = self.get("/api/config", timeout)
+        except AuthRevoked as err:     # revoked after the token check: the page must still be reachable to connect again
+            steps.append(Step("api", False, f"Home Assistant отозвал доступ ({err}): подключите заново"))
+            return Status(False, tuple(steps), conn.url, conn.name, conn.kind)
         if reply.status == 200:
             steps.append(Step("api", True, "API отвечает"))
             return Status(True, tuple(steps), conn.url, conn.name, conn.kind)
