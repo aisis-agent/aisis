@@ -182,6 +182,33 @@ class DashboardHaPageTests(unittest.TestCase):
         self.assertFalse(ha_connect.adopt_environment(self.store, {"HA_URL": "http://other:8123", "HA_TOKEN": "x"}))   # a connection is never replaced
         self.assertEqual(self.store.load().secret, "llat")
 
+    def test_a_disconnect_is_not_undone_by_the_next_start(self):
+        env = {"HA_URL": self.ha.url, "HA_TOKEN": "llat"}
+        self.assertTrue(ha_connect.adopt_environment(self.store, env))
+        self.store.clear()                                # the owner pressed Disconnect
+        self.assertFalse(ha_connect.adopt_environment(self.store, env))
+        self.assertIsNone(self.store.load())
+
+    def test_an_existing_connection_gets_the_marker_so_its_disconnect_is_not_undone_either(self):
+        env = {"HA_URL": self.ha.url, "HA_TOKEN": "llat"}
+        self.store.save(ha_client.Connection(self.ha.url, "long_lived", "llat"))      # adopted by an earlier version, no marker yet
+        self.assertFalse(ha_connect.adopt_environment(self.store, env))
+        self.store.clear()
+        self.assertFalse(ha_connect.adopt_environment(self.store, env))
+        self.assertIsNone(self.store.load())
+
+    def test_the_marker_belongs_to_its_own_store_file(self):
+        other = ha_client.Store(self.store.path.with_name("other.json"))
+        env = {"HA_URL": self.ha.url, "HA_TOKEN": "llat"}
+        self.assertTrue(ha_connect.adopt_environment(self.store, env))
+        self.assertTrue(ha_connect.adopt_environment(other, env))
+
+    def test_replacing_a_login_grant_when_its_server_is_gone_warns_that_it_stays_valid(self):
+        self.store.save(ha_client.Connection("http://127.0.0.1:9", "oauth", "r" * 32, self.origin + "/", None))
+        self.ha.long_lived.add("llat")
+        status, headers, _ = self.call("POST", "/ha/manual", {"url": self.ha.url, "token": "llat"})
+        self.assertEqual((status, headers["Location"]), (303, "/ha?connected=1&unrevoked=1"))
+
     def test_no_token_in_the_environment_adopts_nothing(self):
         self.assertFalse(ha_connect.adopt_environment(self.store, {"HA_URL": self.ha.url}))
         self.assertFalse(ha_connect.adopt_environment(self.store, {"HA_TOKEN": "llat"}))
