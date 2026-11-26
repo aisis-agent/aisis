@@ -13,6 +13,7 @@ import jev
 from adapter import Adapter
 
 GARBLED_PHRASE = "ляля тополя ляля ляля ляля"
+GARBLED_LINE = f"Прозвучало «{GARBLED_PHRASE}», но что сделать, не ясно."   # what Jev's reprompt says now: what was heard (this fixture's home has no catalog to name kinds of action from)
 COMMAND_PHRASE = "закажи мне пиццу на вечер с доставкой"
 EMERGENCIES = ("Мне плохо, вызови скорую", "Позвони в полицию")
 
@@ -80,7 +81,7 @@ class AdapterJevTests(unittest.IsolatedAsyncioTestCase):
         scripted = Scripted(decision("jev_garbled", "garbled"))
         adapter = await self.adapter(scripted=scripted)
         first = await self.sent(adapter, GARBLED_PHRASE)
-        self.assertEqual((first["text"], first["shouldListen"]), (intent_route.REPROMPT_TEXT, True))
+        self.assertEqual((first["text"], first["shouldListen"]), (GARBLED_LINE, True))
         adapter.turn.assert_not_awaited()
         second = await self.sent(adapter, GARBLED_PHRASE)
         self.assertEqual((second["text"], second["shouldListen"]), ("ответ мозга", False))   # the cooldown: the brain this time
@@ -109,7 +110,7 @@ class AdapterJevTests(unittest.IsolatedAsyncioTestCase):
     async def test_refusal_and_reprompt_are_separate_switches(self):
         cases = (("on", "off", "jev_command_unsupported", "command", COMMAND_PHRASE, intent_route.UNSUPPORTED_TEXT),
                  ("on", "off", "jev_garbled", "garbled", GARBLED_PHRASE, "ответ мозга"),
-                 ("off", "on", "jev_garbled", "garbled", GARBLED_PHRASE, intent_route.REPROMPT_TEXT),
+                 ("off", "on", "jev_garbled", "garbled", GARBLED_PHRASE, GARBLED_LINE),
                  ("off", "on", "jev_command_unsupported", "command", COMMAND_PHRASE, "ответ мозга"))
         for refuse, reprompt, reason, utterance, phrase, want in cases:
             with self.subTest(refuse=refuse, reprompt=reprompt, utterance=utterance):
@@ -154,7 +155,7 @@ class AdapterJevTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertLogs("aisis.yandex", level="INFO") as logs:
                         reply = await self.spoken(adapter, phrase)
                     self.assertEqual(reply, "ответ мозга")
-                    self.assertNotIn(reply, (intent_route.UNSUPPORTED_TEXT, intent_route.REPROMPT_TEXT))
+                    self.assertNotIn(reply, (intent_route.UNSUPPORTED_TEXT, GARBLED_LINE))
                     self.assertEqual(scripted.calls, [])
                     self.assertTrue(any("guard=emergency" in line for line in logs.output))
 

@@ -196,7 +196,7 @@ The core policy (`stt_cli.hypotheses.repair.Policy`, defaults) is the one source
 
 | Top reading | `w >= HIGH` (0.70) | `ask_floor <= w < HIGH` | `w < ask_floor` |
 |---|---|---|---|
-| **inform** | answer it | answer it, when the answer is coherent (below); otherwise ask the short clarification | the core's relisten («Не расслышал. Повторите, пожалуйста.») |
+| **inform** | answer it | answer it, when the answer is coherent (below); otherwise ask the short clarification | the core's relisten, said as what was heard and what can be asked for («Прозвучало «…», но что сделать, не ясно: свет, кондиционер или телевизор?»; `correction.describe`, never a request to repeat) |
 | **act** | run it through the normal route (a top that is NOT the primary still goes through the engine's confirmation: nothing runs from an alternative without a spoken yes) | **ask**: the engine's `ask` / `ask-choice` question; when no rival action exists (the rest of the mass is noise) a new single-reading **confirmation**: «Включить кондиционер?», answered by the repair dialog's `да`/`нет`; never run, never guessed | relisten |
 | **other** | the brain, as now | the brain | the brain |
 

@@ -248,7 +248,7 @@ class JevSettings:
     """What `AISIS_JEV=on` may act on. Both switches default to off: `on` with neither is advisory (logs, never acts)."""
     threshold: float = CONFIDENT
     refuse: bool = False       # AISIS_JEV_REFUSE=on: a confident «command» nobody implements gets «Этого я пока не умею.»
-    reprompt: bool = False     # AISIS_JEV_REPROMPT=on: a confident «garbled» gets «Не расслышал. Повтори, пожалуйста.»
+    reprompt: bool = False     # AISIS_JEV_REPROMPT=on: a confident «garbled» gets the clarifier's answer (the likeliest action as a question, else what was heard), never a request to repeat
 
     @property
     def acts(self) -> bool:

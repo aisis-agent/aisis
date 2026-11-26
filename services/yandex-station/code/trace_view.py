@@ -24,10 +24,10 @@ NO_QUESTION = {"agree": "оба распознавания согласны", "v
                "no-evidence": "второго мнения нет", "below-floor": "альтернатива слишком слаба",
                "same-action": "варианты значат одно и то же", "no-action": "команды в варианте нет",
                "no-wording": "для этого сомнения нет формулировки вопроса"}
-DIALOG_STATES = {"awaiting_confirm": "ждём «да» или «нет»", "awaiting_choice": "ждём выбор", "awaiting_repeat": "ждём повтор фразы",
+DIALOG_STATES = {"awaiting_confirm": "ждём «да» или «нет»", "awaiting_choice": "ждём выбор", "awaiting_repeat": "ждём, что сделать",
                  "closed": "диалог закрыт"}
 OUTCOMES = {"accepted": "принято", "denied": "отклонено", "kept": "оставлено как услышано", "cancelled": "отменено",
-            "timeout": "ответа не было", "fallthrough": "ответ ушёл обычным путём", "gave_up": "сдались после повтора", "repeat": "вопрос повторён"}
+            "timeout": "ответа не было", "fallthrough": "ответ ушёл обычным путём", "gave_up": "сдались после повторного вопроса", "repeat": "вопрос повторён"}
 CUES = {"noop": "команда ничего не меняет", "contradiction": "противоречит состоянию устройства", "state": "состояние устройства"}
 ENGINES = {"gigaam-v3-ctc": "GigaAM", "faster-whisper": "Whisper", "yandex-spotter": "споттер команд"}
 EVIDENCE_SOURCES = {"spotter": "споттер команд", "primary": "основное распознавание"}

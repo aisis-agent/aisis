@@ -317,7 +317,7 @@ class OfferTests(Setup):
         self.core.verdict = lambda e, p: Decision("relisten", "garbled", "", e.primary)
         self.light()
         route = await self.hook("включи свет")
-        self.assertEqual((route.text, route.listen, self.state()), ("Не расслышал. Повторите, пожалуйста.", True, "awaiting_repeat"))
+        self.assertEqual((route.text, route.listen, self.state()), ("Прозвучало «включи свет», но что сделать, не ясно.", True, "awaiting_repeat"))
 
     async def test_three_readings_ask_between_the_two_likely_alternatives(self):
         self.core.verdict = lambda e, p: Decision("ask-choice", "confusable-disagreement", "", e.primary,
@@ -542,7 +542,7 @@ class ConfirmFlowTests(Setup):
     async def test_no_asks_to_repeat_and_the_next_phrase_takes_the_normal_route(self):
         await self.open_confirm()
         route = await self.hook("нет")
-        self.assertEqual((route.text, route.listen, self.state()), ("Повторите, пожалуйста.", True, "awaiting_repeat"))
+        self.assertEqual((route.text, route.listen, self.state()), ("Тогда что сделать?", True, "awaiting_repeat"))
         self.assertTrue(route.context)
         fresh = await self.hook("Алиса, привет")
         self.assertEqual((fresh.kind, fresh.intent), ("reply", "smalltalk.greeting"))
@@ -759,7 +759,7 @@ class ChoiceFlowTests(Setup):
     async def test_no_asks_to_repeat_again_and_cancel_work(self):
         first = await self.open_choice()
         route = await self.hook("не то")
-        self.assertEqual((route.text, self.state()), ("Повторите, пожалуйста.", "awaiting_repeat"))
+        self.assertEqual((route.text, self.state()), ("Тогда что сделать?", "awaiting_repeat"))   # no repeat request: the next step is asked for
         self.setUp()
         first = await self.open_choice()
         route = await self.hook("повтори")
@@ -888,7 +888,7 @@ class RepeatFlowTests(Setup):
         self.clock.t += correction.WINDOW_S + 1
         self.store.put("st1", "бла бла бла", ("бла", 0.5))
         route = await self.hook("бла бла бла")
-        self.assertEqual(route.text, "Не расслышал. Повторите, пожалуйста.")       # a new dialog, not the give-up of the old one
+        self.assertEqual(route.text, "Прозвучало «бла бла бла», но что сделать, не ясно.")       # a new dialog, not the give-up of the old one
 
 
 class TraceTests(Setup):

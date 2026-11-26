@@ -132,6 +132,7 @@ class Grammar:
     sha256: str
     lexicon_forms: dict[str, list[str]] = field(default_factory=dict)
     sets: dict[str, Alt] = field(default_factory=dict)
+    groups: dict[str, dict[str, tuple[str, ...]]] = field(default_factory=dict)   # the keyed lexicons (key -> forms): words that name one thing («телик», «телевизор»)
     contexts: dict[str, Context] = field(default_factory=dict)
 
     # ── decision ───────────────────────────────────────────────────────────
@@ -512,7 +513,9 @@ def from_data(data: Any, sha256: str) -> Grammar:
         raise GrammarError("the grammar has no intents")
     return Grammar(version=1, locale=str(data.get("locale", "ru")), intents=tuple(intents), canon=canon,
                    connectors=connectors, backtest=dict(data.get("backtest") or {}), gate=dict(data.get("gate") or {}),
-                   sha256=sha256, lexicon_forms=forms, sets=resolver.sets, contexts=contexts)
+                   sha256=sha256, lexicon_forms=forms, sets=resolver.sets, contexts=contexts,
+                   groups={name: {str(key): tuple(str(f) for f in (entry[key] or [])) for key in entry}
+                           for name, entry in lexicon.items() if isinstance(entry, dict)})
 
 
 def _contexts(raw: Any) -> dict[str, Context]:

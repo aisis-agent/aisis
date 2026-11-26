@@ -17,6 +17,7 @@ from adapter import Adapter
 from test_correction import Clock, FakeCore, Store
 
 HEADERS = {"Authorization": "Bearer test-only-token"}
+NOTHING_READ_YES = "Прозвучало «да», но что сделать, не ясно: музыка?"   # the catch-all's line (clarify.py); the only kind of action this fixture has is the music skill
 
 
 class AdapterCase(unittest.IsolatedAsyncioTestCase):
@@ -86,7 +87,7 @@ class SwitchTests(AdapterCase):
         with mock.patch("adapter.dialogstore.add_trace", side_effect=lambda db, record: stored.append(record)):
             self.store.put("st1", "включи свет", ("выключи свет", 0.7), ("включи свет", 0.3))
             self.assertEqual(await self.spoken(adapter, "включи свет"), ("ответ мозга", False))     # the old path, untouched
-            self.assertEqual(await self.spoken(adapter, "да"), ("Не расслышал. Повтори, пожалуйста.", True))   # no context was opened
+            self.assertEqual(await self.spoken(adapter, "да"), (NOTHING_READ_YES, True))   # no context was opened
             await adapter.flush_traces()
         by_text = {record["text"]: record for record in stored}   # the traces are written by independent threads: no order
         record = by_text["включи свет"]["correction"]
@@ -267,14 +268,14 @@ class TurnPathTests(AdapterCase):
         adapter = await self.adapter(AISIS_CORRECTION="on")
         self.store.put("st1", "включи свет", ("выключи свет", 0.7), ("включи свет", 0.3))
         await self.spoken(adapter, "включи свет")
-        self.assertEqual(await self.spoken(adapter, "нет"), ("Повторите, пожалуйста.", True))
+        self.assertEqual(await self.spoken(adapter, "нет"), ("Тогда что сделать: музыка?", True))
         self.assertEqual(await self.spoken(adapter, "отмена"), ("", False))
         adapter.turn.assert_not_awaited()
 
     async def test_a_context_less_yes_goes_the_old_way(self):
         for mode in ("off", "on"):
             adapter = await self.adapter(AISIS_CORRECTION=mode)
-            self.assertEqual(await self.spoken(adapter, "да"), ("Не расслышал. Повтори, пожалуйста.", True), mode)   # the catch-all, as before
+            self.assertEqual(await self.spoken(adapter, "да"), (NOTHING_READ_YES, True), mode)   # the catch-all, as before: what was heard, what can be asked for
             adapter.turn.assert_not_awaited()
 
     async def test_an_emergency_inside_the_dialog_gets_the_number(self):
@@ -290,7 +291,7 @@ class TurnPathTests(AdapterCase):
         self.store.put("st1", "включи свет", ("выключи свет", 0.7), ("включи свет", 0.3))
         await self.spoken(adapter, "включи свет")
         self.clock.t += 31
-        self.assertEqual(await self.spoken(adapter, "да"), ("Не расслышал. Повтори, пожалуйста.", True))   # no dialog any more: the old path
+        self.assertEqual(await self.spoken(adapter, "да"), (NOTHING_READ_YES, True))   # no dialog any more: the old path
 
 
 class BrainQuestionTests(AdapterCase):
