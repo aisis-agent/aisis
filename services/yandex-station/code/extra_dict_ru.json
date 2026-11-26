@@ -41,7 +41,7 @@
       }
     },
     {
-      "id": "phrase-pause-device",
+      "id": "phrase-pause-tv",
       "kind": "phrase",
       "canonical": "поставь телик на паузу",
       "context": "standalone",

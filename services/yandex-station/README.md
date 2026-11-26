@@ -360,10 +360,10 @@ that was not observed.
   recogniser wrote «Ставьте их на паузу.» for «поставь телик на паузу» (source `owner`, n = 1, `standalone`). The repaired phrase takes the normal route: replayed
   offline against the active quasar image (`intent_grammar/tools/replay_quasar.mts`, no network, nothing executed) it is answered by the container's fast layer
   with the confirmation «Поставить на паузу?» (`media.pause` 0.75, entity «телевизор» 0.73; confirmed, it is handed on as «поставь на паузу»), where the heard
-  text got no answer at all. The grammar has no pause intent of its own for a device and none is added here. The correction applies only with `AISIS_EXTRA_DICT=on`. No other
+  text got no answer at all. The grammar has no pause intent of its own for a device and none is added here. No other
   command-word confusion has a verdict or a second clip yet, so none is in the file; `ключи свет` (the lost start of «включи» and «выключи») is
   deliberately not an entry: either reading is possible and the repair policy asks instead. Replay of the 107 sent clips on 2026-11-22 (`bench_extra_dict.py
-  replay`, before the second phrase was added): 1 clip corrected (the first phrase's own source clip, which confirms nothing), 0 changed wrongly by an owner verdict; these are counts of one
+  replay`, before the second phrase was added): 1 clip corrected (the first phrase's own source clip, which confirms nothing), 0 changed wrongly by an owner verdict. The same replay on 2026-11-26 over 166 clips with both phrases: 2 corrected, each the source clip of its own entry, 0 changed wrongly, 0 wake corrections away from the head, and no other stored transcript holds «ставьте их»; the gateway's shadow log since the deploy of 2026-11-22 holds no `extra_dict_would_correct` line in about 316 finals. These are counts of one
   household's clips, not an accuracy figure. «Лисы» and «Алисы» are real words as well as names of `lexicon.wake` (`wake_word.REAL_WORDS`): at the head of a request they are cut
   only when addressed (a comma, stop or colon right behind, or an imperative of the grammar), so «Лисы живут в лесу» keeps its first word and
   «Лисы, включи свет» loses it; as the whole utterance they stay an activation.

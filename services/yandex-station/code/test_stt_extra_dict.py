@@ -2,7 +2,8 @@
 `extra_dict_would_correct` and changes nothing, `on` corrects, `off` is silent; the engine's confusables take the dictionary's command and
 phrase entries only in `on`.
 
-Real inputs: «Олеса, включи свет.» (clip 20261120T235150-330d2a, tg#31621: the owner's «Олеса Алекса Олеся -> Алиса»).
+Real inputs: «Олеса, включи свет.» (clip 20261120T235150-330d2a, tg#31621: the owner's «Олеса Алекса Олеся -> Алиса») and «Ставьте их на паузу.»
+(clip 20261126T172557-b4bff8, ticket #306: the owner said «поставь телик на паузу»).
 """
 import json
 import os
