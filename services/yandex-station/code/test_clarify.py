@@ -133,6 +133,13 @@ class OptionTests(unittest.TestCase):
         self.assertEqual(clarify.HaHome._said(found[0].call), "Воспроизведение на паузе.")
         self.assertEqual(options(clar, "выключи"), [])      # a device nobody can name is never switched off by a guess
 
+    def test_a_players_device_class_names_it_when_its_own_name_is_technical(self):
+        states = [{"entity_id": "media_player.televizor", "state": "playing",
+                   "attributes": {"friendly_name": "Chromecast — пульт", "device_class": "tv"}}]
+        found = options(clarifier(*clarify.entities_from(states)), "Ставьте их на паузу.")
+        self.assertEqual(clarify.Clarifier.question(found), "Поставить телевизор на паузу?")
+        self.assertEqual(clarify.HaHome._said(found[0].call), "Телевизор на паузе.")
+
 
 class WordingTests(unittest.TestCase):
     def test_a_feminine_name_is_a_direct_object(self):

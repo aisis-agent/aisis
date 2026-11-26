@@ -78,6 +78,7 @@ _ON_OFF_DOMAINS = frozenset(("light", "switch", "fan", "humidifier"))
 _PLAYING = frozenset(("playing", "buffering"))
 _DEAD = frozenset(("unavailable", "unknown"))
 _PLAYER_OWN = "media_player.aisis_speaker_"
+_DEVICE_CLASS_NAMES = {"tv": "телевизор", "speaker": "колонка", "receiver": "ресивер"}   # Home Assistant's media_player device classes, as said aloud
 
 
 @dataclass(frozen=True)
@@ -132,7 +133,9 @@ def entities_from(states: object) -> tuple[Entity, ...]:
         if state["entity_id"].startswith(_PLAYER_OWN) or ha_actions.JUNK_LIGHT.search(state["entity_id"]):
             continue
         names = voice_vocab.spoken_entity_names([state])
-        name = names[0] if names else ""
+        attributes = state.get("attributes") if isinstance(state.get("attributes"), Mapping) else {}
+        # a name nobody says aloud («Chromecast — пульт») falls back to what Home Assistant itself says the device is (its device_class)
+        name = names[0] if names else _DEVICE_CLASS_NAMES.get(attributes.get("device_class"), "") if state["entity_id"].startswith("media_player.") else ""
         if name or state["entity_id"].startswith("media_player."):   # a player with a technical name is still «the one that plays»
             found.append(Entity(state["entity_id"], name, state["state"]))
     return tuple(found)
@@ -411,7 +414,7 @@ class Clarifier:
             found.append("свет")
         if any(entity.entity_id.startswith("climate.") for entity in self._entities):
             found.append("кондиционер")
-        found += [fold(entity.name) for entity in self._entities if entity.domain == "media_player"][:2]
+        found += [fold(entity.name) for entity in self._entities if entity.domain == "media_player" and entity.name][:2]
         found += list(self.abilities())
         return tuple(dict.fromkeys(found))[:5]
 
