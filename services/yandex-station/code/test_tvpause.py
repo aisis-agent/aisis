@@ -42,14 +42,18 @@ class FakeHa:
 
     def __init__(self):
         self.up = True
-        self.rows: dict[str, list] = {}       # entity -> [state, area, device]
+        self.rows: dict[str, list] = {}       # entity -> [state, area, device, queue, device area]
         self.calls: list[str] = []            # services called, in order
         self.targets: list[tuple[str, str]] = []
         self.add(SPEAKER, "idle", LIVING, "dev-speaker")
         self.add(ENTITY, "playing", LIVING, "dev-tv")
 
-    def add(self, entity, state, area, device=None, queue=None):
-        self.rows[entity] = [state, area, device, queue]
+    def add(self, entity, state, area, device=None, queue=None, device_area=None):
+        self.rows[entity] = [state, area, device, queue, area if device_area is None else device_area]
+
+    def move(self, entity, area):
+        """The entity and its device are in another area."""
+        self.rows[entity][1] = self.rows[entity][4] = area
 
     def set(self, entity, state):
         self.rows[entity][0] = state
@@ -64,7 +68,7 @@ class FakeHa:
     def players(self):
         if not self.up:
             return None
-        return [Player(entity, state, area, device, queue) for entity, (state, area, device, queue) in self.rows.items()]
+        return [Player(entity, state, area, device, queue, device_area) for entity, (state, area, device, queue, device_area) in self.rows.items()]
 
     def state(self, entity):
         if not self.up or entity not in self.rows:
@@ -94,14 +98,17 @@ class TvCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self.runs = 0
+        self.fresh()
+
+    def fresh(self):
+        """A new pause on a new fake Home Assistant and a new state file (a test that needs several)."""
+        self.runs += 1
         self.ha, self.clock = FakeHa(), Clock()
         self.cfg = settings()
-        self.tv = TvPause(ha=self.ha, settings=lambda: self.cfg, state_file=Path(self.tmp.name) / "state.json", dry_run=False, clock=self.clock)
-        self.addCleanup(self.cancel_timers)
-
-    def cancel_timers(self):
-        for timer in self.tv.timers.values():
-            timer.cancel()
+        tv = TvPause(ha=self.ha, settings=lambda: self.cfg, state_file=Path(self.tmp.name) / f"state{self.runs}.json", dry_run=False, clock=self.clock)
+        self.tv = tv
+        self.addCleanup(lambda: [timer.cancel() for timer in tv.timers.values()])
 
     def kinds(self):
         return [event["kind"] for event in self.tv.status()["events"]]
@@ -170,7 +177,7 @@ class HoldTests(TvCase):
     def test_resume_callbacks_check_and_release_under_one_lock(self):
         for callback in ("hold", "idle"):
             with self.subTest(callback=callback):
-                self.setUp()
+                self.fresh()
                 self.tv.activation()
                 checked = []
                 original = self.tv.resume
@@ -262,14 +269,14 @@ class RoomTests(TvCase):
 
     def test_a_projector_and_a_tv_of_the_room_are_both_paused(self):
         self.home()
-        self.ha.rows[SPEAKER][1] = LIVING
+        self.ha.move(SPEAKER, LIVING)
         self.tv.activation(STATION)
         self.assertCountEqual(self.ha.targets, [("media_pause", ENTITY), ("media_pause", PROJECTOR)])
         self.assertEqual(self.ha.state_of(STUDIO_TV), "playing")
         self.assertEqual(self.ha.state_of(BEDROOM_TV), "playing")
 
     def test_a_player_of_another_room_is_never_touched(self):
-        self.ha.rows[SPEAKER][1] = BEDROOM        # the speaker is in the bedroom, the only playing player is the living-room TV
+        self.ha.move(SPEAKER, BEDROOM)        # the speaker is in the bedroom, the only playing player is the living-room TV
         self.tv.activation(STATION)
         self.assertEqual(self.ha.calls, [])
         self.assertEqual(self.tv.status()["paused"], {})
@@ -288,7 +295,7 @@ class RoomTests(TvCase):
     def test_only_a_playing_player_is_paused(self):
         for state in ("idle", "paused", "off", "standby", "unavailable", "unknown", "buffering", "on"):
             with self.subTest(state=state):
-                self.setUp()
+                self.fresh()
                 self.ha.set(ENTITY, state)
                 self.tv.activation()
                 self.assertEqual(self.ha.calls, [])
@@ -316,6 +323,24 @@ class RoomTests(TvCase):
         self.tv.activation(STATION.upper())
         self.assertEqual(self.ha.targets, [("media_pause", STUDIO_TV)])
 
+    def test_an_id_that_only_ends_an_ordinary_player_is_no_station(self):
+        self.home()
+        self.tv.activation("tv")                          # media_player.studio_tv ends in _tv
+        self.assertEqual(self.ha.calls, [])
+        self.assertIn("not in Home Assistant", self.last_detail())
+
+    def test_a_station_that_has_only_the_yandex_integrations_player_is_a_station(self):
+        self.home()
+        self.ha.add(f"media_player.yandex_station_{OTHER_STATION}", "paused", BEDROOM, "dev-yandex-2")
+        self.tv.activation(OTHER_STATION)
+        self.assertEqual(self.ha.targets, [("media_pause", BEDROOM_TV)])
+
+    def test_the_speakers_room_is_the_area_of_its_device_not_of_its_player_entity(self):
+        self.home()
+        self.ha.rows[SPEAKER][1] = LIVING                 # only the player entity is set to another area; its device stays in the studio
+        self.tv.activation(STATION)
+        self.assertEqual(self.ha.targets, [("media_pause", STUDIO_TV)])
+
     def test_two_speakers_and_no_station_means_no_room(self):
         self.home()
         self.ha.add(OTHER_SPEAKER, "idle", BEDROOM, "dev-speaker-2")
@@ -332,7 +357,7 @@ class RoomTests(TvCase):
 
     def test_a_speaker_without_an_area_means_no_room(self):
         self.home()
-        self.ha.rows[SPEAKER][1] = None
+        self.ha.move(SPEAKER, None)
         self.tv.activation(STATION)
         self.assertEqual(self.ha.calls, [])
         self.assertIn("no area", self.last_detail())
@@ -496,10 +521,12 @@ class HomeAssistantTransportTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.ha = ha_fakes.FakeHomeAssistant([ha_fakes.entity(entity, state) for entity, state in (
             (SPEAKER, "idle"), (STUDIO_TV, "playing"), (ENTITY, "playing"), (PROJECTOR, "playing"), (BEDROOM_TV, "paused"))]
-            + [ha_fakes.entity("media_player.ma_face", "idle", active_queue=SPEAKER)])
+            + [ha_fakes.entity("media_player.ma_face", "idle", active_queue=SPEAKER),
+               ha_fakes.entity("media_player.weird", "idle", active_queue={"not": "a name"})])
         self.addCleanup(self.ha.close)
-        self.ha.areas.update({SPEAKER: STUDIO, STUDIO_TV: STUDIO, ENTITY: LIVING, PROJECTOR: LIVING, BEDROOM_TV: BEDROOM})
+        self.ha.areas.update({SPEAKER: LIVING, STUDIO_TV: STUDIO, ENTITY: LIVING, PROJECTOR: LIVING, BEDROOM_TV: BEDROOM, "media_player.weird": STUDIO})
         self.ha.devices.update({SPEAKER: "dev-speaker", STUDIO_TV: "dev-studio-tv"})
+        self.ha.device_areas.update({SPEAKER: STUDIO})       # the speaker's player entity says living room, its device says studio
         self.ha.long_lived.add("test-token")
         self.store = ha_client.Store(Path(self.tmp.name) / "connection.json")
         self.store.save(ha_client.Connection(self.ha.url, "long_lived", "test-token"))
@@ -508,12 +535,20 @@ class HomeAssistantTransportTests(unittest.TestCase):
 
     def test_players_are_read_with_state_area_and_device_in_one_call(self):
         players = {player.entity: player for player in self.transport.players()}
-        self.assertEqual(players[STUDIO_TV], Player(STUDIO_TV, "playing", STUDIO, "dev-studio-tv"))
+        self.assertEqual(players[STUDIO_TV], Player(STUDIO_TV, "playing", STUDIO, "dev-studio-tv", None, STUDIO))
         self.assertEqual(players[ENTITY], Player(ENTITY, "playing", LIVING, None))
         self.assertEqual(players["media_player.ma_face"], Player("media_player.ma_face", "idle", None, None, SPEAKER))
-        self.assertEqual(len(players), 6)
+        self.assertEqual((players[SPEAKER].area, players[SPEAKER].device_area), (LIVING, STUDIO))
+        self.assertEqual(len(players), 7)
         templates = [path for method, path, _ in self.ha.requests if method == "POST"]
         self.assertEqual(templates, ["/api/template"])
+
+    def test_an_attribute_that_is_not_a_name_is_nothing_and_never_breaks_the_room(self):
+        players = self.transport.players()
+        self.assertIsNone({player.entity: player for player in players}["media_player.weird"].queue)
+        room = tvpause.discover(players, STATION, [])
+        self.assertEqual(room.area, STUDIO)
+        self.assertIn("media_player.weird", [player.entity for player in room.players])
 
     def test_a_state_and_a_service_call_use_the_standard_api(self):
         self.assertEqual(self.transport.state(ENTITY), "playing")

@@ -169,6 +169,7 @@ class FakeHomeAssistant:
         self.hang_reads = False         # state reads and templates never answer (a Home Assistant that is busy or wedged)
         self.areas: dict[str, str] = {}  # entity id -> HA area name, for the adapter's registry and area_entities templates
         self.devices: dict[str, str] = {}  # entity id -> HA device id, for the media player rows of tvpause
+        self.device_areas: dict[str, str] = {}  # entity id -> area of its device (an entity's own area in `areas` may differ), same rows
         self.name = "Test Home"
         self.require_auth = False       # True: /api/ answers 401 without a bearer this fake issued
         self.access_ttl = 1800.0
@@ -288,6 +289,7 @@ class FakeHomeAssistant:
             return json.dumps(left)
         if "namespace(rows=[])" in template and "states.media_player" in template:
             return json.dumps([{"entity_id": e, "state": s["state"], "area": self.areas.get(e), "device": self.devices.get(e),
+                                "device_area": self.device_areas.get(e, self.areas.get(e) if e in self.devices else None),
                                 "queue": s["attributes"].get("active_queue")} for e, s in self.states.items() if e.startswith("media_player.")])
         area = re.search(r"area_entities\((\".*\")\)", template, re.DOTALL)
         if area:

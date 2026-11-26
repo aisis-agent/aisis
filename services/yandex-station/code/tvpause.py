@@ -15,11 +15,14 @@ service calls. Which players count is a rule, not a list (#276):
     Assistant AREA of the speaker that was activated; a player of another room is never touched;
   * never the speaker itself: the entities that end in `_<station id>` (media_player.aisis_speaker_<id>, the Yandex integration's
     player), the entities of the same Home Assistant device, the Music Assistant player that fronts one of them (its
-    `active_queue` is that entity), and the optional `exclude` list of the settings;
-  * the room of the speaker is the area of its own player (ha_actions.speaker_area); the station is the one the websocket names,
-    else the only media_player.aisis_speaker_* Home Assistant has. No room known (no or several speakers, a speaker without an
-    area, an unknown station) pauses nothing and the reason is the event «skip»; so does an unreachable or unreadable Home Assistant
-    (a state that cannot be read is not «playing»).
+    `active_queue` is that entity; a Music Assistant queue id names no entity: such a player, e.g. the speaker's AirPlay endpoint,
+    goes in the `exclude` list), and the optional `exclude` list of the settings;
+  * the room of the speaker is the area of its DEVICE, as for the voice commands (ha_actions.speaker_area); the station is one a
+    speaker has in Home Assistant, named by the websocket, else the only media_player.aisis_speaker_* Home Assistant has. No room
+    known (no or several speakers, a speaker without an area, an unknown station) pauses nothing and the reason is the event «skip»;
+    so does an unreachable or unreadable Home Assistant (a state that cannot be read is not «playing»).
+    Known limit (UB-277): the dialog log carries no station, so with two speakers talking at once the resume of one room is not told
+    from the other's: a dialog end releases every pause we hold.
 
 Rules of the hold (all deliberate):
   * resume only what *we* paused, only if it is still `paused` (someone pressed play: leave it) and only if the dialog did not
@@ -57,12 +60,16 @@ START_TOLERANCE_S = 3.0
 EVENT_LIMIT = 30
 DIALOG_RE = re.compile(r"Dialog ([0-9a-f-]{36}) (started|ended)")
 EXECUTED_RE = re.compile(r"Fast intent executed: .*\[([^\]]*)\]")
-# Every media player with its live state, the area (its own, else its device's), the device and the queue it fronts: one call, always fresh.
+# Every media player with its live state, its area (its own, else its device's), its device and the device's area, and the queue it
+# fronts: one call, always fresh. The speaker's room is its DEVICE's area (README, «Which room»), the other players' room is their area.
 ROOM_TEMPLATE = (
-    "{% set ns = namespace(rows=[]) %}{% for e in states.media_player %}"
+    "{% set ns = namespace(rows=[]) %}{% for e in states.media_player %}{% set d = device_id(e.entity_id) %}"
     "{% set ns.rows = ns.rows + [{'entity_id': e.entity_id, 'state': e.state, 'area': area_name(e.entity_id), "
-    "'device': device_id(e.entity_id), 'queue': e.attributes.get('active_queue')}] %}{% endfor %}{{ ns.rows | tojson }}"
+    "'device': d, 'device_area': area_name(d) if d else None, 'queue': e.attributes.get('active_queue')}] %}"
+    "{% endfor %}{{ ns.rows | tojson }}"
 )
+# The entities a speaker has in Home Assistant: the AISIS integration's player, else the Yandex integration's one (README, «Which room»).
+SPEAKER_PREFIXES = (ha_actions.OWN_PLAYER_PREFIX, "media_player.yandex_station_")
 CALL_TIMEOUT_S = 5.0
 
 
@@ -73,6 +80,7 @@ class Player:
     area: str | None
     device: str | None
     queue: str | None = None      # Music Assistant: the entity whose queue this player plays (a speaker's own player for its wrapper)
+    device_area: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,18 +92,31 @@ class Room:
     why: str = ""
 
 
+def _text(value) -> str | None:
+    """An optional attribute as Home Assistant's template gave it: a string, else nothing (a list or object there is not a name)."""
+    return value if isinstance(value, str) and value else None
+
+
 def discover(players: list[Player], station: str | None, exclude=()) -> Room:
-    """The room of the activated speaker and its players. Pure: `players` is one read of Home Assistant."""
+    """The room of the activated speaker and its players. Pure: `players` is one read of Home Assistant.
+
+    The station is one a speaker has in Home Assistant (media_player.aisis_speaker_<id> or media_player.yandex_station_<id>): an id that
+    only ends an ordinary player («tv» for media_player.studio_tv) is no station. A turn that names none is the one AISIS speaker Home
+    Assistant has (the integration registers exactly the stations connected to this server; a station that has only the Yandex
+    integration's player talks to Yandex's own cloud, not to the gateway); with none or several the speaker is not known."""
     if not station:
         ids = {p.entity[len(ha_actions.OWN_PLAYER_PREFIX):] for p in players if p.entity.startswith(ha_actions.OWN_PLAYER_PREFIX)}
         if len(ids) != 1:
             return Room(None, why=f"speaker unknown: no station named and Home Assistant has {len(ids)} speakers")
         station = ids.pop()
-    area = ha_actions.speaker_area({p.entity: p.area for p in players if p.area}, station)
+    ident = station.strip().lower()
+    speakers = [p for p in players if any(p.entity == prefix + ident for prefix in SPEAKER_PREFIXES)]
+    if not speakers:
+        return Room(None, why=f"speaker {station} is not in Home Assistant")
+    area = ha_actions.speaker_area({p.entity: p.device_area for p in speakers if p.device_area}, ident)
     if area is None:
-        known = any(p.entity.endswith("_" + station.lower()) for p in players)
-        return Room(None, why=f"speaker {station} has no area in Home Assistant" if known else f"speaker {station} is not in Home Assistant")
-    suffix = "_" + station.lower()
+        return Room(None, why=f"speaker {station} has no area in Home Assistant")
+    suffix = "_" + ident
     own = {p.entity for p in players if p.entity.endswith(suffix)}
     own_devices = {p.device for p in players if p.entity in own and p.device}
     skipped = set(exclude)
@@ -193,7 +214,8 @@ class HaPlayers:
             if not reply.ok:
                 return self._failed("template", reply)
             rows = json.loads(reply.text())
-            return [Player(row["entity_id"], row["state"], row.get("area"), row.get("device"), row.get("queue")) for row in rows]
+            return [Player(row["entity_id"], row["state"], _text(row.get("area")), _text(row.get("device")), _text(row.get("queue")),
+                           _text(row.get("device_area"))) for row in rows]
         except (ha_client.HaError, ValueError, KeyError, TypeError) as err:
             LOG.warning("tv_pause_ha_unreadable what=players class=%s", type(err).__name__)
             return None
