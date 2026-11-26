@@ -19,7 +19,9 @@ Supported transport profiles are:
 - `tailnet`: a private HTTP/HTTPS endpoint reachable from the paired ORC device or trusted server;
 - `https`: a public HTTPS reverse proxy protected by Home Assistant bearer authentication.
 
-Configuration uses SecretRefs/environment settings such as `HA_BASE_URL` and `HA_TOKEN`. Public documentation uses non-live examples only.
+On the local network AISIS finds Home Assistant itself (mDNS `_home-assistant._tcp`, and again when its address changes) and signs in through Home Assistant's own login and approval page, the standard OAuth authorization-code flow (`/auth/authorize`, `/auth/token`): the owner presses Connect and approves, and types no address and creates no token. The refresh token is stored privately (`0600`) and access tokens are refreshed from it automatically. Every component reaches Home Assistant through one client with the real Home Assistant REST/WebSocket API; there is no private proxy, cache or queue of service calls between them.
+
+`HA_BASE_URL` and a long-lived `HA_TOKEN` (SecretRefs/environment settings) remain only for the `https` profile and for a network where discovery or the login flow cannot run; the connection page labels the pasted token as an advanced option. Public documentation uses non-live examples only.
 
 The same typed HA adapter must work over both profiles. Tailnet/local access is preferred for private/high-trust operations when available.
 
