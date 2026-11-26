@@ -2,7 +2,8 @@
 wake-word variants at the head, the mode spelling and the stt-cli confusables file.
 
 The real transcripts behind the tests: «Олеса, включи свет.» (clip 20261120T235150-330d2a, after a sentence), the owner's «Олеса Алекса Олеся -> Алиса»
-(tg#31621), «Алиса, урок из 5.» (clip 20261109T010646-564b98, the owner's verdict «Алиса, громкость 5»).
+(tg#31621), «Алиса, урок из 5.» (clip 20261109T010646-564b98, the owner's verdict «Алиса, громкость 5»), «Ставьте их на паузу.»
+(clip 20261126T172557-b4bff8, the owner's correction «поставь телик на паузу», ticket #306).
 """
 import json
 import os
@@ -272,6 +273,15 @@ class Phrases(unittest.TestCase):
 
     def test_the_shipped_phrase_is_not_a_sentence_about_lessons(self):
         for text in ("Урок из 5 песен длится час", "Это урок из 5 пунктов", "Сколько стоит урок из 5 занятий"):
+            self.assertEqual(self.dictionary.correct(text).text, text)
+
+    def test_a_lost_device_word_in_a_pause_request_is_restored(self):
+        """Whisper dropped «телик» and wrote «Ставьте их на паузу.»: the stored clip the owner corrected in Telegram (#306)."""
+        self.assertEqual(self.dictionary.correct("Ставьте их на паузу.").text, "Поставь телик на паузу.")
+        self.assertEqual(self.dictionary.correct("Алиса, ставьте их на паузу.").text, "Алиса, поставь телик на паузу.")
+
+    def test_the_restored_pause_phrase_is_not_taken_from_a_sentence(self):
+        for text in ("Ставьте их на паузу вместе с фильмом", "Скажи ставьте их на паузу"):
             self.assertEqual(self.dictionary.correct(text).text, text)
 
     def test_overlapping_variants_resolve_to_the_longest(self):
