@@ -363,8 +363,12 @@ that was not observed.
   text got no answer at all. The grammar has no pause intent of its own for a device and none is added here. No other
   command-word confusion has a verdict or a second clip yet, so none is in the file; `ключи свет` (the lost start of «включи» and «выключи») is
   deliberately not an entry: either reading is possible and the repair policy asks instead. Replay of the 107 sent clips on 2026-11-22 (`bench_extra_dict.py
-  replay`, before the second phrase was added): 1 clip corrected (the first phrase's own source clip, which confirms nothing), 0 changed wrongly by an owner verdict. The same replay on 2026-11-26 over 166 clips with both phrases: 2 corrected, each the source clip of its own entry, 0 changed wrongly, 0 wake corrections away from the head, and no other stored transcript holds «ставьте их»; the gateway's shadow log since the deploy of 2026-11-22 holds no `extra_dict_would_correct` line in about 316 finals. These are counts of one
-  household's clips, not an accuracy figure. «Лисы» and «Алисы» are real words as well as names of `lexicon.wake` (`wake_word.REAL_WORDS`): at the head of a request they are cut
+  replay`, before the second phrase was added): 1 clip corrected (the first phrase's own source clip, which confirms nothing), 0 changed wrongly by
+  an owner verdict. The same replay on 2026-11-26 covers a larger set, the 166 stored clips with a transcript (`sent` and `activation`), with both
+  phrases: 2 corrected, each the source clip of its own entry, 0 changed wrongly, 0 wake corrections away from the head, and no other stored
+  transcript holds «ставьте их». Separately, the gateway's shadow log since the deploy of 2026-11-22, which ran the dictionary without the second phrase,
+  holds no `extra_dict_would_correct` line in about 316 finals: it says nothing about the second phrase, only that the first one and the wake entries
+  did not fire on the household's speech. These are counts of one household's clips, not an accuracy figure. «Лисы» and «Алисы» are real words as well as names of `lexicon.wake` (`wake_word.REAL_WORDS`): at the head of a request they are cut
   only when addressed (a comma, stop or colon right behind, or an imperative of the grammar), so «Лисы живут в лесу» keeps its first word and
   «Лисы, включи свет» loses it; as the whole utterance they stay an activation.
   **Dynamic layer** (`code/extra_dict_dynamic.py`, ticket #269): a second layer, in the same format, built at runtime from the home itself and never
