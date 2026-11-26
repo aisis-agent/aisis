@@ -5,6 +5,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 import dialogstore
 import ha_action_log
+import ha_client
+import ha_connect
 import session_pages
 import trace_view
 import voiceclips
@@ -27,8 +29,8 @@ PORT = int(os.environ.get("AISIS_DASHBOARD_PORT") or 8781)
 QUASAR_API = "http://127.0.0.1:31116"
 DUID = "M00ZRW3008RAJG"
 ADB = "192.168.0.148:5555"
-HA_URL = os.environ.get("HA_URL", "http://192.168.0.39:8123")
-HA_TOKEN = os.environ.get("HA_TOKEN", "")
+HA_CLIENT = ha_client.HaClient()
+HA_CONNECT = ha_connect.Onboarding(HA_CLIENT)
 HA_ENTITY = "media_player.aisis_speaker_m00zrw3008rajg"
 CORPUS_DIR = os.path.expanduser("~/xp/aisis/.worktrees/claude-primary-api/backend/yandex/corpus")
 BLUEGREEN_STATE = os.environ.get("AISIS_BLUEGREEN_STATE") or os.path.expanduser(
@@ -77,10 +79,6 @@ def http_json(url, method="GET", payload=None, headers=None, timeout=8):
         req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode() or "null")
-
-def ha(path, payload=None):
-    return http_json(f"{HA_URL}{path}", "POST" if payload is not None else "GET", payload,
-                     {"Authorization": f"Bearer {HA_TOKEN}"})
 
 # ---------- dialogs (persistent SQLite, filled by dialogstore.Ingester) ----------
 INGESTER = None
@@ -302,10 +300,12 @@ def speaker_state():
     info["adbOnline"] = speaker_settings.adb_online(ADB)
     info["firmware"] = adb_firmware()
     info["ha"] = None
-    if HA_TOKEN:
+    if HA_CLIENT.store.load() is not None:
         try:
-            s = http_json(f"{HA_URL}/api/states/{HA_ENTITY}",
-                          headers={"Authorization": f"Bearer {HA_TOKEN}"})
+            reply = HA_CLIENT.get(f"/api/states/{HA_ENTITY}", timeout=8)
+            if not reply.ok:
+                raise RuntimeError(f"HA {reply.status or reply.error}")
+            s = reply.json()
             info["ha"] = {"state": s.get("state"), "volume": s.get("attributes", {}).get("volume_level")}
         except Exception as e:
             info["haErr"] = str(e)[:120]
@@ -325,11 +325,13 @@ def push_volume(v, max_level):
         http_json(f"{QUASAR_API}/devices/{DUID}/push", "POST", body)
         return "quasar"
     except Exception as e:
-        if not HA_TOKEN:
+        if HA_CLIENT.store.load() is None:
             raise
         try:
-            ha("/api/services/media_player/volume_set",
-               {"entity_id": HA_ENTITY, "volume_level": round(min(max(v, 0), max_level) / max_level, 2)})
+            reply = HA_CLIENT.service("media_player", "volume_set",
+                                      {"entity_id": HA_ENTITY, "volume_level": round(min(max(v, 0), max_level) / max_level, 2)}, timeout=8)
+            if not reply.ok:
+                raise RuntimeError(f"HA {reply.status or reply.error}")
             return "ha"
         except Exception as e2:
             raise RuntimeError(f"{str(e)[:80]} / {str(e2)[:80]}") from e2
@@ -1041,6 +1043,21 @@ class H(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"ok": False, "err": f"внутренняя ошибка: {str(e)[:160]}"}, 500)
 
+    def _ha(self, method):
+        """/ha, /ha.json, /ha/*: the Home Assistant connection page (ha_connect.py); form bodies, no JSON."""
+        u = urlparse(self.path)
+        n = int(self.headers.get("Content-Length") or 0)
+        form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "replace")).items()} if n else {}
+        status, headers, body = HA_CONNECT.handle(method, u.path, parse_qs(u.query), form, dict(self.headers.items()))
+        self.send_response(status)
+        for key, value in headers.items():
+            self.send_header(key, value)
+        data = body.encode()
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _route_get(self):
         u = urlparse(self.path)
         p, qs = u.path, parse_qs(u.query)
@@ -1123,6 +1140,8 @@ class H(BaseHTTPRequestHandler):
             clip = rest.startswith("clip/")
             status, body = session_html(clip_id=rest[5:]) if clip else session_html(dialog_id=rest)
             self._send(status, "text/html; charset=utf-8", body)
+        elif p == "/ha" or p == "/ha.json" or p.startswith("/ha/"):
+            self._ha("GET")
         elif is_spa_route(p):
             self._serve_static(p)
         else:
@@ -1161,6 +1180,8 @@ class H(BaseHTTPRequestHandler):
     def _route_post(self):
         if self.path == "/yse" or self.path.startswith("/yse/"):
             return self._proxy_yse("POST")
+        if self.path.split("?")[0].startswith("/ha/"):
+            return self._ha("POST")
         if self.path.split("?")[0].startswith("/api/dicts/"):
             return self._dicts("POST")
         n = int(self.headers.get("Content-Length") or 0)

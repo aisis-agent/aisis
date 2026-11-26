@@ -181,6 +181,26 @@ that was not observed.
   ha-cli observed (`X-Aisis-Verify`, `X-Aisis-Down`) instead is the open follow-up. `deploy.sh unit ha-cli hacli.py` installs `ha_verify.py` and
   `ha_action_log.py` with it.
 
+## Home Assistant connection (found by itself, signed in with two clicks)
+
+Everything that talks to Home Assistant takes its address and credential from one place, `~/.config/aisis/ha/connection.json` (`0600`, in a `0700`
+directory the quasar containers mount read-only), through one client, `code/ha_client.py` (stdlib). There is no hand-typed URL or token.
+
+- **Finding the server.** mDNS `_home-assistant._tcp.local` (the announcement Home Assistant's zeroconf integration makes; its `uuid` identifies the
+  instance), then `homeassistant.local`, then the address that answered last. A candidate counts only if `/auth/providers` answers like Home
+  Assistant. When the stored address stops answering (a DHCP change) the client looks again in the background, accepts only the instance with the
+  stored `uuid` (a neighbour's Home Assistant is never adopted) and rewrites the store atomically; the request that found the address dead is not
+  delayed by the look.
+- **Signing in.** Open the dashboard `/ha` page (`:8781/ha`), press **Подключить**. The browser goes to Home Assistant's own login page
+  (`/auth/authorize`, the OAuth authorization-code flow of Home Assistant's mobile and third-party clients; client id = the dashboard's own origin),
+  the owner logs in and approves, Home Assistant sends the browser back to `/ha/callback` with a code, and the code becomes a refresh token. Access
+  tokens (30 min) are fetched from it on demand and renewed before they expire; refresh tokens do not rotate, so each process refreshes on its own.
+  The only thing that cannot be automated is the login on Home Assistant's page: that is the owner's credential.
+- **Status.** `/ha` and `/ha.json` show the steps (store, address, reach, auth, api) and name the first one that fails, with a **Подключить** button
+  when the grant is gone. **Отключить** revokes the grant on Home Assistant and removes the store; Connect again reconnects (the old grant is revoked).
+- **Advanced (folded on the page).** An address typed by hand (the login still happens on Home Assistant's page) and a pasted long-lived access
+  token, for a network where mDNS or the login flow cannot run. The token is checked against `/api/config` before it is kept and is never refreshed.
+
 ## Ops runbook
 
 - **Deploy units**: `scripts/install-systemd-units.sh` (repo root) copies every
