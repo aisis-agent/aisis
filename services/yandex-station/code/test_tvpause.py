@@ -484,6 +484,18 @@ class RoomTests(TvCase):
         self.tv.activation(STATION)
         self.assertCountEqual(self.ha.targets, [("media_pause", STUDIO_TV), ("media_pause", "media_player.group_in_room")])
 
+    def test_a_group_holding_a_wrapper_of_the_speaker_or_of_an_excluded_player_or_a_nested_group_is_not_paused(self):
+        self.home()
+        self.cfg = settings(exclude=[PROJECTOR])
+        self.ha.add("media_player.ma_of_speaker", "idle", STUDIO, "dev-ma1", queue=SPEAKER)
+        self.ha.add("media_player.ma_of_projector", "idle", STUDIO, "dev-ma2", queue=PROJECTOR)
+        self.ha.add("media_player.group_with_wrapper", "playing", STUDIO, "dev-g1", members=[STUDIO_TV, "media_player.ma_of_speaker"])
+        self.ha.add("media_player.group_with_excluded_wrapper", "playing", STUDIO, "dev-g2", members=["media_player.ma_of_projector"])
+        self.ha.add("media_player.inner_group", "idle", STUDIO, "dev-g3", members=[BEDROOM_TV])
+        self.ha.add("media_player.outer_group", "playing", STUDIO, "dev-g4", members=["media_player.inner_group"])
+        self.tv.activation(STATION)
+        self.assertEqual(self.ha.targets, [("media_pause", STUDIO_TV)])
+
     def test_a_state_published_late_is_waited_for_then_resumed_normally(self):
         self.ha.lag[ENTITY] = 3                            # Home Assistant answers 200, the player says `playing` three more reads
         self.tv.activation()

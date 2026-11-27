@@ -23,9 +23,10 @@ service calls. Which players count is a rule, not a list (#276):
     so does an unreachable or unreadable Home Assistant (a state that cannot be read is not «playing»).
     Known limits (UB-277): the quasar STT client names no station today, so every live turn takes the fallback. It is right while this
     quasar server serves one station (the only station in its connection log over 72 h is the one whose aisis_speaker player Home
-    Assistant has); a second station would be taken for it until the client names the station. The dialog log carries no station
-    either, so with two speakers talking at once the resume of one room is not told from the other's: a dialog end releases every
-    pause we hold.
+    Assistant has). With a second available aisis_speaker player and no station named, nothing is paused (event «skip», the dashboard
+    card's `why`) until the client names the station. The dialog log carries no station either, so with two speakers talking at once
+    the resume of one room is not told from the other's: a dialog end releases every pause we hold. A pause polls the player for up to
+    SETTLE_S (2 s) under the state lock.
 
 Rules of the hold (all deliberate):
   * resume only what *we* paused, only if it is still in the state our pause left it in (`paused`; `idle` for the players that say so,
@@ -140,14 +141,16 @@ def discover(players: list[Player], station: str | None, exclude=()) -> Room:
     own_devices = {p.device for p in players if p.entity in own and p.device}
     own |= {p.entity for p in players if p.device in own_devices}          # every alias of the speaker, whatever its name
     skipped = set(exclude)
-    areas = {p.entity: p.area for p in players}
-
-    def spills(p: Player) -> bool:
-        """A group whose pause would reach the speaker, a player of another room or an excluded player."""
-        return any(m in own or m in skipped or (areas.get(m) is not None and areas[m] != area) for m in p.members)
-
-    return Room(area, tuple(p for p in players if p.area == area and p.entity not in own and p.queue not in own
-                            and p.entity not in skipped and p.queue not in skipped and not spills(p)))
+    # What a pause must never reach: the speaker (every alias), what is excluded, a player of another room, and every Music Assistant
+    # wrapper whose queue is one of those; then every group that holds a forbidden member, groups of groups included.
+    forbidden = own | skipped | {p.entity for p in players if p.area is not None and p.area != area}
+    forbidden |= {p.entity for p in players if p.queue in forbidden}
+    while True:
+        reaching = {p.entity for p in players if p.entity not in forbidden and any(m in forbidden for m in p.members)}
+        if not reaching:
+            break
+        forbidden |= reaching
+    return Room(area, tuple(p for p in players if p.area == area and p.entity not in forbidden))
 
 
 def config_dir() -> Path:
@@ -463,7 +466,7 @@ class TvPause:
         m = EXECUTED_RE.search(message)
         if m:
             targets = {t.strip() for t in m.group(1).split(",")}
-            if targets:
+            if any(t.startswith("media_player.") for t in targets):      # a light or a climate command never takes the state lock
                 with _Locked(self.state_file):
                     st = self._load()
                     if st["paused"] and targets & {*st["paused"], *st["watch"]}:
