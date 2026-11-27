@@ -25,8 +25,12 @@ service calls. Which players count is a rule, not a list (#276):
     from the other's: a dialog end releases every pause we hold.
 
 Rules of the hold (all deliberate):
-  * resume only what *we* paused, only if it is still `paused` (someone pressed play: leave it) and only if the dialog did not
-    itself act on a media player (`Fast intent executed: ... [media_player.x]`: the owner said pause/stop/play, never undo it);
+  * resume only what *we* paused, only if it is still in the state our pause left it in (`paused`; `idle` for the players that say so,
+    read once the pause took) - someone pressed play or switched it off: leave it - and only if the dialog did not itself act on a
+    player of that room (`Fast intent executed: ... [media_player.x]` for a held player or another player of a room we paused in: the
+    owner said pause/stop/play, never undo it; a command for a player of another room does not count);
+  * a held player that Home Assistant cannot tell for a moment (`unavailable`, `unknown`, gone) stays ours; one in any other state
+    than the pause left it in is no longer ours;
   * a new activation inside the resume grace cancels the resume (next turn/dialog owns it);
   * if no end signal ever arrives, a timer resumes after `max_hold_s` since the last activation;
   * `AISIS_TVPAUSE_DRY_RUN=1` reads states but never calls a service (events say "dry-run").
@@ -71,6 +75,8 @@ ROOM_TEMPLATE = (
 # The entities a speaker has in Home Assistant: the AISIS integration's player, else the Yandex integration's one (README, «Which room»).
 SPEAKER_PREFIXES = (ha_actions.OWN_PLAYER_PREFIX, "media_player.yandex_station_")
 CALL_TIMEOUT_S = 5.0
+SETTLE_S = 2.0          # how long after our pause a player may still say `playing` before its answer is taken as `paused`
+SETTLE_STEP_S = 0.25
 
 
 @dataclass(frozen=True)
@@ -103,9 +109,11 @@ def discover(players: list[Player], station: str | None, exclude=()) -> Room:
     The station is one a speaker has in Home Assistant (media_player.aisis_speaker_<id> or media_player.yandex_station_<id>): an id that
     only ends an ordinary player («tv» for media_player.studio_tv) is no station. A turn that names none is the one AISIS speaker Home
     Assistant has (the integration registers exactly the stations connected to this server; a station that has only the Yandex
-    integration's player talks to Yandex's own cloud, not to the gateway); with none or several the speaker is not known."""
+    integration's player talks to Yandex's own cloud, not to the gateway; one that is `unavailable` or `unknown` is unplugged and does
+    not count); with none or several the speaker is not known."""
     if not station:
-        ids = {p.entity[len(ha_actions.OWN_PLAYER_PREFIX):] for p in players if p.entity.startswith(ha_actions.OWN_PLAYER_PREFIX)}
+        ids = {p.entity[len(ha_actions.OWN_PLAYER_PREFIX):] for p in players
+               if p.entity.startswith(ha_actions.OWN_PLAYER_PREFIX) and p.state not in ("unavailable", "unknown")}
         if len(ids) != 1:
             return Room(None, why=f"speaker unknown: no station named and Home Assistant has {len(ids)} speakers")
         station = ids.pop()
@@ -197,11 +205,12 @@ def update_settings(changes: dict) -> dict:
 
 class HaPlayers:
     """The media players of Home Assistant through the shared client. Nothing here raises: a Home Assistant that is not connected,
-    does not answer, refuses or answers something unreadable is None / False, and the caller does nothing."""
+    does not answer, refuses or answers something unreadable is None / False, and the caller does nothing; `why` then says which."""
 
     def __init__(self, client: ha_client.HaClient | None = None, timeout: float = CALL_TIMEOUT_S):
         self._client = client
         self.timeout = timeout
+        self.why = ""
 
     @property
     def client(self) -> ha_client.HaClient:
@@ -212,40 +221,50 @@ class HaPlayers:
         try:
             reply = self.client.template(ROOM_TEMPLATE, self.timeout)
             if not reply.ok:
-                return self._failed("template", reply)
+                return self._failed("players", reply=reply)
             rows = json.loads(reply.text())
             return [Player(row["entity_id"], row["state"], _text(row.get("area")), _text(row.get("device")), _text(row.get("queue")),
                            _text(row.get("device_area"))) for row in rows]
         except (ha_client.HaError, ValueError, KeyError, TypeError) as err:
-            LOG.warning("tv_pause_ha_unreadable what=players class=%s", type(err).__name__)
-            return None
+            return self._failed("players", err=err)
 
     def state(self, entity: str) -> str | None:
         """The state of one entity now, None if unreadable."""
         try:
             reply = self.client.get(f"/api/states/{entity}", self.timeout)
             if not reply.ok:
-                return self._failed("state", reply)
+                return self._failed("state", reply=reply)
             state = reply.json().get("state")
             return state if isinstance(state, str) else None
         except (ha_client.HaError, ValueError, AttributeError) as err:
-            LOG.warning("tv_pause_ha_unreadable what=state class=%s", type(err).__name__)
-            return None
+            return self._failed("state", err=err)
 
     def call(self, service: str, entity: str) -> bool:
         """True only for a service call Home Assistant executed (HTTP 200)."""
         try:
             reply = self.client.service("media_player", service, {"entity_id": entity}, timeout=self.timeout)
         except ha_client.HaError as err:
-            LOG.warning("tv_pause_ha_unreadable what=%s class=%s", service, type(err).__name__)
+            self._failed(service, err=err)
             return False
         if reply.status != 200:
-            LOG.warning("tv_pause_ha_refused what=%s status=%s error=%s", service, reply.status, reply.error)
+            self._failed(service, reply=reply)
         return reply.status == 200
 
-    @staticmethod
-    def _failed(what: str, reply: ha_client.Reply):
-        LOG.warning("tv_pause_ha_unreadable what=%s status=%s error=%s", what, reply.status, reply.error)
+    def _failed(self, what: str, reply: ha_client.Reply | None = None, err: Exception | None = None):
+        """Remember and log why Home Assistant gave nothing (never a token or an answer body): a lost connection is not told from a down server."""
+        if isinstance(err, ha_client.NotConnected):
+            self.why = "Home Assistant is not connected (press Connect on the dashboard /ha page)"
+        elif isinstance(err, ha_client.AuthRevoked):
+            self.why = "Home Assistant revoked the access (connect again on the dashboard /ha page)"
+        elif reply is not None and reply.status == 0:
+            self.why = f"Home Assistant unreachable ({reply.error})"
+        elif reply is not None:
+            self.why = f"Home Assistant answered HTTP {reply.status}"
+        elif isinstance(err, ha_client.HaError):
+            self.why = f"Home Assistant unreachable ({type(err).__name__})"
+        else:
+            self.why = "Home Assistant answered something unreadable"
+        LOG.warning("tv_pause_ha what=%s why=%r", what, self.why)
         return None
 
 
@@ -271,12 +290,13 @@ class _Locked:
 
 
 class TvPause:
-    def __init__(self, ha=None, settings=load_settings, state_file=None, dry_run=None, clock=time.time):
+    def __init__(self, ha=None, settings=load_settings, state_file=None, dry_run=None, clock=time.time, sleep=time.sleep):
         self.ha = ha or HaPlayers()
         self.settings = settings
         self.state_file = Path(state_file) if state_file else state_path()
         self.dry_run = os.environ.get("AISIS_TVPAUSE_DRY_RUN") == "1" if dry_run is None else dry_run
         self.clock = clock
+        self.sleep = sleep
         self.timers: dict[str, threading.Timer] = {}
         self._started: dict[str, float] = {}      # dialog id -> start time seen in this process
 
@@ -289,6 +309,8 @@ class TvPause:
         data.setdefault("paused", {})
         data.setdefault("last_activation", 0.0)
         data.setdefault("user_touched", False)
+        data.setdefault("rest", {})          # entity -> the state it showed once our pause took (normally paused; some players say idle)
+        data.setdefault("watch", [])         # the players of the rooms we paused in: a dialog acting on one of them is the owner's own action
         data.setdefault("events", [])
         return data
 
@@ -322,7 +344,7 @@ class TvPause:
                 st["user_touched"] = False
             players = self.ha.players()
             if players is None:
-                self._event(st, "skip", detail="Home Assistant unreachable or unreadable")
+                self._event(st, "skip", detail=getattr(self.ha, "why", "") or "Home Assistant unreachable or unreadable")
                 self._save(st)
                 # A pause held from an earlier activation must follow this newer last_activation,
                 # or its hold timer (keyed to the older one) expires as a no-op and never resumes.
@@ -351,17 +373,37 @@ class TvPause:
                 self._event(st, "dry-run", entity, f"would pause ({room.area})")
             elif self.ha.call("media_pause", entity):
                 st["paused"][entity] = now
+                st["rest"][entity] = self._settled(entity)
+                st["watch"] = sorted({*st["watch"], *(p.entity for p in room.players)})
                 paused_now.add(entity)
                 self._event(st, "pause", entity, room.area)
             else:
                 self._event(st, "error", entity, "media_pause failed")
         for entity in list(st["paused"]):
             state = states.get(entity)
-            if entity not in paused_now and state != "paused":
-                del st["paused"][entity]          # someone else changed it; no longer ours
+            # Someone else changed it: no longer ours. A player Home Assistant cannot tell for now (unloaded, unavailable) stays ours.
+            if entity not in paused_now and state not in (None, st["rest"].get(entity, "paused"), "unavailable", "unknown"):
+                del st["paused"][entity]
+                st["rest"].pop(entity, None)
                 self._event(st, "forget", entity, f"state {state}")
+        if not st["paused"]:
+            st["watch"] = []
         self._save(st)
         return bool(st["paused"])
+
+    def _settled(self, entity: str) -> str:
+        """The state the player shows once our pause took: HTTP 200 only says Home Assistant handed the call on, the player may publish
+        its state a moment later. Most say `paused`, some `idle` (ha_verify); one that still says `playing` after SETTLE_S is taken as
+        `paused`, the state a pause normally ends in."""
+        waited = 0.0
+        while True:
+            state = self.ha.state(entity)
+            if state is not None and state != "playing":
+                return state
+            if waited >= SETTLE_S:
+                return "paused"
+            self.sleep(SETTLE_STEP_S)
+            waited += SETTLE_STEP_S
 
     def _arm(self, name, delay, fn, *args):
         old = self.timers.pop(name, None)
@@ -392,12 +434,12 @@ class TvPause:
         m = EXECUTED_RE.search(message)
         if m:
             targets = {t.strip() for t in m.group(1).split(",")}
-            if any(t.startswith("media_player.") for t in targets):
+            if targets:
                 with _Locked(self.state_file):
                     st = self._load()
-                    if st["paused"]:
+                    if st["paused"] and targets & {*st["paused"], *st["watch"]}:
                         st["user_touched"] = True
-                        self._event(st, "user-action", ",".join(sorted(targets)), "dialog acted on a media player; will not resume")
+                        self._event(st, "user-action", ",".join(sorted(targets)), "dialog acted on a player of the room; will not resume")
                         self._save(st)
 
     def dialog_ended(self, did: str, ended_ts: float):
@@ -426,17 +468,17 @@ class TvPause:
             st = self._load()
             if unless is not None and unless(st):
                 return
-            ours, touched = dict(st["paused"]), st["user_touched"]
-            st["paused"], st["user_touched"] = {}, False
+            ours, rest, touched = dict(st["paused"]), dict(st["rest"]), st["user_touched"]
+            st["paused"], st["rest"], st["watch"], st["user_touched"] = {}, {}, [], False
             for entity in ours:
                 if not cfg["resume"]:
                     self._event(st, "skip-resume", entity, "resume disabled")
                     continue
                 if touched:
-                    self._event(st, "skip-resume", entity, "dialog acted on a media player")
+                    self._event(st, "skip-resume", entity, "dialog acted on a player of the room")
                     continue
                 state = self.ha.state(entity)
-                if state != "paused":
+                if state != rest.get(entity, "paused"):
                     self._event(st, "skip-resume", entity, f"state {state}")
                 elif self.dry_run:
                     self._event(st, "dry-run", entity, f"would resume ({reason})")

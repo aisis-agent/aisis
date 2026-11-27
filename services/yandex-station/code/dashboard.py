@@ -548,7 +548,8 @@ def tv_state():
     cfg = tvpause.load_settings()
     tv = tvpause.default()
     players = tv.ha.players()
-    room = tvpause.discover(players, None, cfg["exclude"]) if players is not None else tvpause.Room(None, why="Home Assistant unreachable or unreadable")
+    room = (tvpause.discover(players, None, cfg["exclude"]) if players is not None
+            else tvpause.Room(None, why=getattr(tv.ha, "why", "") or "Home Assistant unreachable or unreadable"))
     st = tv.status()
     return {**cfg, "entities": [p.entity for p in room.players], "live": {p.entity: p.state for p in room.players},
             "room": room.area, "why": room.why, "paused": sorted(st["paused"]), "events": st["events"][-8:],

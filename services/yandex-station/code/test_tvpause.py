@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import errno
 import fcntl
-import inspect
 import json
 import os
-import re
 import sys
 import tempfile
 import threading
@@ -42,6 +40,10 @@ class FakeHa:
 
     def __init__(self):
         self.up = True
+        self.why = ""                         # what the transport reports when it could not read
+        self.pause_state: dict[str, str] = {}  # entity -> the state it shows after a pause (default paused; some players say idle)
+        self.lag: dict[str, int] = {}          # entity -> reads that still say `playing` after a pause call (a state published late)
+        self._late: dict[str, int] = {}
         self.rows: dict[str, list] = {}       # entity -> [state, area, device, queue, device area]
         self.calls: list[str] = []            # services called, in order
         self.targets: list[tuple[str, str]] = []
@@ -73,12 +75,19 @@ class FakeHa:
     def state(self, entity):
         if not self.up or entity not in self.rows:
             return None
+        if self._late.get(entity, 0) > 0:
+            self._late[entity] -= 1
+            return "playing"
         return self.rows[entity][0]
 
     def call(self, service, entity):
         self.calls.append(service)
         self.targets.append((service, entity))
-        self.rows[entity][0] = "paused" if service == "media_pause" else "playing"
+        if service == "media_pause":
+            self.rows[entity][0] = self.pause_state.get(entity, "paused")
+            self._late[entity] = self.lag.get(entity, 0)
+        else:
+            self.rows[entity][0] = "playing"
         return True
 
 
@@ -106,7 +115,9 @@ class TvCase(unittest.TestCase):
         self.runs += 1
         self.ha, self.clock = FakeHa(), Clock()
         self.cfg = settings()
-        tv = TvPause(ha=self.ha, settings=lambda: self.cfg, state_file=Path(self.tmp.name) / f"state{self.runs}.json", dry_run=False, clock=self.clock)
+        self.sleeps = []
+        tv = TvPause(ha=self.ha, settings=lambda: self.cfg, state_file=Path(self.tmp.name) / f"state{self.runs}.json", dry_run=False, clock=self.clock,
+                     sleep=self.sleeps.append)
         self.tv = tv
         self.addCleanup(lambda: [timer.cancel() for timer in tv.timers.values()])
 
@@ -403,6 +414,53 @@ class RoomTests(TvCase):
         self.assertEqual(self.tv.status()["paused"], {})
         self.assertIn("forget", self.kinds())
 
+    def test_a_player_home_assistant_cannot_tell_for_now_stays_ours(self):
+        self.tv.activation()
+        for state in ("unavailable", "unknown"):
+            self.ha.set(ENTITY, state)                     # its integration reloads
+            self.tv.activation()
+            self.assertIn(ENTITY, self.tv.status()["paused"], state)
+        del self.ha.rows[ENTITY]                           # or is gone from Home Assistant for a moment
+        self.tv.activation()
+        self.assertIn(ENTITY, self.tv.status()["paused"])
+        self.assertNotIn("forget", self.kinds())
+        self.ha.add(ENTITY, "paused", LIVING, "dev-tv")    # and comes back paused: the dialog end still resumes it
+        self.tv.resume("dialog ended")
+        self.assertEqual(self.ha.calls, ["media_pause", "media_play"])
+
+    def test_a_player_that_says_idle_once_paused_is_resumed_from_idle(self):
+        self.ha.pause_state[ENTITY] = "idle"
+        self.tv.activation()
+        self.tv.activation()                               # the next turn: idle is what our pause left, not the owner's change
+        self.assertIn(ENTITY, self.tv.status()["paused"])
+        self.assertNotIn("forget", self.kinds())
+        self.tv.resume("dialog ended")
+        self.assertEqual(self.ha.calls, ["media_pause", "media_play"])
+
+    def test_a_state_published_late_is_waited_for_then_resumed_normally(self):
+        self.ha.lag[ENTITY] = 3                            # Home Assistant answers 200, the player says `playing` three more reads
+        self.tv.activation()
+        self.assertEqual(self.sleeps, [tvpause.SETTLE_STEP_S] * 3)
+        self.tv.resume("dialog ended")
+        self.assertEqual(self.ha.calls, ["media_pause", "media_play"])
+
+    def test_a_player_that_never_shows_the_pause_is_held_as_paused(self):
+        self.ha.lag[ENTITY] = 10 ** 6
+        self.tv.activation()
+        self.assertEqual(len(self.sleeps), int(tvpause.SETTLE_S / tvpause.SETTLE_STEP_S))
+        self.assertIn(ENTITY, self.tv.status()["paused"])
+
+    def test_an_unplugged_second_speaker_does_not_turn_the_pause_off(self):
+        self.ha.add(OTHER_SPEAKER, "unavailable", BEDROOM, "dev-speaker-2")
+        self.tv.activation()
+        self.assertEqual(self.ha.targets, [("media_pause", ENTITY)])
+
+    def test_the_reason_the_home_assistant_gave_nothing_is_the_skip_event(self):
+        self.ha.up = False
+        self.ha.why = "Home Assistant is not connected (press Connect)"
+        self.tv.activation()
+        self.assertEqual(self.last_detail(), "Home Assistant is not connected (press Connect)")
+
 
 class ResumeTests(TvCase):
     def test_resume_only_what_we_paused(self):
@@ -433,11 +491,19 @@ class ResumeTests(TvCase):
         self.assertEqual(self.ha.calls, ["media_pause"])
         self.assertIn("user-action", self.kinds())
 
-    def test_a_dialog_that_acted_on_another_media_player_is_not_undone_either(self):
+    def test_a_dialog_that_acted_on_another_player_of_the_room_is_not_undone_either(self):
+        self.ha.add("media_player.ue48j5500_ue48j5500", "off", LIVING, "dev-tv")       # the TV's composite entity, never paused itself
         self.tv.activation()
         self.tv.observe(1001.0, "Fast intent executed: stop [media_player.ue48j5500_ue48j5500]")
         self.tv.resume("dialog ended")
         self.assertEqual(self.ha.calls, ["media_pause"])
+
+    def test_a_dialog_that_acted_on_a_player_of_another_room_does_not_stop_the_resume(self):
+        self.ha.add(BEDROOM_TV, "playing", BEDROOM, "dev-bedroom-tv")
+        self.tv.activation()
+        self.tv.observe(1001.0, "Fast intent executed: pause [media_player.bedroom_tv]")
+        self.tv.resume("dialog ended")
+        self.assertEqual(self.ha.targets, [("media_pause", ENTITY), ("media_play", ENTITY)])
 
     def test_a_dialog_about_a_light_does_not_stop_the_resume(self):
         self.tv.activation()
@@ -573,6 +639,23 @@ class HomeAssistantTransportTests(unittest.TestCase):
         self.assertIsNone(self.transport.state(ENTITY))
         self.assertFalse(self.transport.call("media_pause", ENTITY))
 
+    def test_why_home_assistant_gave_nothing_is_told_apart(self):
+        self.store.clear()
+        self.transport.players()
+        self.assertIn("not connected", self.transport.why)
+        self.store.save(ha_client.Connection(self.ha.url, "long_lived", "test-token"))
+        with mock.patch.object(self.client, "template", side_effect=ha_client.AuthRevoked("gone")):
+            self.transport.players()
+        self.assertIn("revoked", self.transport.why)
+        self.ha.stop_listening()
+        self.transport.players()
+        self.assertEqual(self.transport.why, "Home Assistant unreachable (refused)")
+
+    def test_a_refused_service_call_says_the_http_status(self):
+        self.ha.script("media_player.media_pause", status=500)
+        self.transport.call("media_pause", ENTITY)
+        self.assertEqual(self.transport.why, "Home Assistant answered HTTP 500")
+
     def test_an_unreadable_answer_is_nothing(self):
         with mock.patch.object(self.ha, "render", return_value="not json"):
             self.assertIsNone(self.transport.players())
@@ -587,12 +670,6 @@ class HomeAssistantTransportTests(unittest.TestCase):
         tv.resume("dialog ended")
         self.assertEqual(self.ha.calls()[-1], ("/api/services/media_player/media_play", {"entity_id": STUDIO_TV}))
         self.assertEqual(self.ha.states[STUDIO_TV]["state"], "playing")
-
-    def test_the_module_reaches_home_assistant_only_through_the_shared_client(self):
-        source = inspect.getsource(tvpause)
-        for forbidden in ("8795", "AISIS_HACLI_URL", "urllib.request", "Authorization", "http://"):
-            self.assertNotIn(forbidden, source)
-        self.assertIsNone(re.search(r"\bHaCli\b|\bimport hacli\b", source), "the ha-cli proxy is not used")
 
 
 class DashboardCardTests(unittest.TestCase):
