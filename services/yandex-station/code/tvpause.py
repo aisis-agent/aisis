@@ -69,7 +69,8 @@ EXECUTED_RE = re.compile(r"Fast intent executed: .*\[([^\]]*)\]")
 ROOM_TEMPLATE = (
     "{% set ns = namespace(rows=[]) %}{% for e in states.media_player %}{% set d = device_id(e.entity_id) %}"
     "{% set ns.rows = ns.rows + [{'entity_id': e.entity_id, 'state': e.state, 'area': area_name(e.entity_id), "
-    "'device': d, 'device_area': area_name(d) if d else None, 'queue': e.attributes.get('active_queue')}] %}"
+    "'device': d, 'device_area': area_name(d) if d else None, 'queue': e.attributes.get('active_queue'), "
+    "'members': e.attributes.get('group_members')}] %}"
     "{% endfor %}{{ ns.rows | tojson }}"
 )
 # The entities a speaker has in Home Assistant: the AISIS integration's player, else the Yandex integration's one (README, «Which room»).
@@ -87,6 +88,7 @@ class Player:
     device: str | None
     queue: str | None = None      # Music Assistant: the entity whose queue this player plays (a speaker's own player for its wrapper)
     device_area: str | None = None
+    members: tuple[str, ...] = ()   # a group player's members: pausing the group pauses them too
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,12 @@ class Room:
 def _text(value) -> str | None:
     """An optional attribute as Home Assistant's template gave it: a string, else nothing (a list or object there is not a name)."""
     return value if isinstance(value, str) and value else None
+
+
+def _members(value) -> tuple[str, ...]:
+    """A group player's member entity ids; anything else is no members."""
+    return tuple(m for m in value if isinstance(m, str)) if isinstance(value, list) else ()
+
 
 
 def discover(players: list[Player], station: str | None, exclude=()) -> Room:
@@ -127,9 +135,16 @@ def discover(players: list[Player], station: str | None, exclude=()) -> Room:
     suffix = "_" + ident
     own = {p.entity for p in players if p.entity.endswith(suffix)}
     own_devices = {p.device for p in players if p.entity in own and p.device}
+    own |= {p.entity for p in players if p.device in own_devices}          # every alias of the speaker, whatever its name
     skipped = set(exclude)
+    areas = {p.entity: p.area for p in players}
+
+    def spills(p: Player) -> bool:
+        """A group whose pause would reach the speaker or a player of another room."""
+        return any(m in own or (areas.get(m) is not None and areas[m] != area) for m in p.members)
+
     return Room(area, tuple(p for p in players if p.area == area and p.entity not in own and p.queue not in own
-                            and p.device not in own_devices and p.entity not in skipped))
+                            and p.entity not in skipped and not spills(p)))
 
 
 def config_dir() -> Path:
@@ -224,7 +239,7 @@ class HaPlayers:
                 return self._failed("players", reply=reply)
             rows = json.loads(reply.text())
             return [Player(row["entity_id"], row["state"], _text(row.get("area")), _text(row.get("device")), _text(row.get("queue")),
-                           _text(row.get("device_area"))) for row in rows]
+                           _text(row.get("device_area")), _members(row.get("members"))) for row in rows]
         except (ha_client.HaError, ValueError, KeyError, TypeError) as err:
             return self._failed("players", err=err)
 
@@ -364,21 +379,22 @@ class TvPause:
             self._save(st)
             return bool(st["paused"])
         states = {p.entity: p.state for p in players}
-        paused_now = set()
+        paused_now = []
         for player in room.players:
             if player.state != "playing":
                 continue
             entity = player.entity
             if self.dry_run:
                 self._event(st, "dry-run", entity, f"would pause ({room.area})")
-            elif self.ha.call("media_pause", entity):
+            elif self.ha.call("media_pause", entity):       # every pause first: the second player is not kept waiting for the first
                 st["paused"][entity] = now
-                st["rest"][entity] = self._settled(entity)
                 st["watch"] = sorted({*st["watch"], *(p.entity for p in room.players)})
-                paused_now.add(entity)
+                paused_now.append(entity)
                 self._event(st, "pause", entity, room.area)
             else:
                 self._event(st, "error", entity, "media_pause failed")
+        for entity, state in self._settled(paused_now).items():
+            st["rest"][entity] = state
         for entity in list(st["paused"]):
             state = states.get(entity)
             # Someone else changed it: no longer ours. A player Home Assistant cannot tell for now (unloaded, unavailable) stays ours.
@@ -391,19 +407,28 @@ class TvPause:
         self._save(st)
         return bool(st["paused"])
 
-    def _settled(self, entity: str) -> str:
-        """The state the player shows once our pause took: HTTP 200 only says Home Assistant handed the call on, the player may publish
-        its state a moment later. Most say `paused`, some `idle` (ha_verify); one that still says `playing` after SETTLE_S is taken as
-        `paused`, the state a pause normally ends in."""
-        waited = 0.0
-        while True:
-            state = self.ha.state(entity)
-            if state is not None and state != "playing":
-                return state
-            if waited >= SETTLE_S:
-                return "paused"
+    def _settled(self, entities: list[str]) -> dict[str, str]:
+        """The state each player shows once our pause took, polled together within one SETTLE_S: HTTP 200 only says Home Assistant handed
+        the call on, the player may publish its state a moment later. Only `paused` (most players) and `idle` (some say so, ha_verify) are a
+        pause that took; `playing`, `unavailable`, `unknown`, an unreadable state, or `off` (the owner switched it off meanwhile) are
+        waited out, and a player that never shows one is held as `paused`: if it is `off` then, the resume finds another state and leaves it."""
+        settled: dict[str, str] = {}
+        left = list(entities)
+        waited, deadline = 0.0, time.monotonic() + SETTLE_S
+        while left:
+            for entity in list(left):
+                state = self.ha.state(entity)
+                if state in ("paused", "idle"):
+                    settled[entity] = state
+                    left.remove(entity)
+            if not left:
+                break
+            if waited >= SETTLE_S or time.monotonic() >= deadline:
+                settled.update({entity: "paused" for entity in left})
+                break
             self.sleep(SETTLE_STEP_S)
             waited += SETTLE_STEP_S
+        return settled
 
     def _arm(self, name, delay, fn, *args):
         old = self.timers.pop(name, None)

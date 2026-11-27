@@ -50,8 +50,9 @@ class FakeHa:
         self.add(SPEAKER, "idle", LIVING, "dev-speaker")
         self.add(ENTITY, "playing", LIVING, "dev-tv")
 
-    def add(self, entity, state, area, device=None, queue=None, device_area=None):
-        self.rows[entity] = [state, area, device, queue, area if device_area is None else device_area]
+    def add(self, entity, state, area, device=None, queue=None, device_area=None, members=()):
+        """A player; its device (if any) stands in the same area unless `device_area` says otherwise, a device-less entity has no device area."""
+        self.rows[entity] = [state, area, device, queue, (area if device_area is None else device_area) if device else None, tuple(members)]
 
     def move(self, entity, area):
         """The entity and its device are in another area."""
@@ -70,7 +71,8 @@ class FakeHa:
     def players(self):
         if not self.up:
             return None
-        return [Player(entity, state, area, device, queue, device_area) for entity, (state, area, device, queue, device_area) in self.rows.items()]
+        return [Player(entity, state, area, device, queue, device_area, members)
+                for entity, (state, area, device, queue, device_area, members) in self.rows.items()]
 
     def state(self, entity):
         if not self.up or entity not in self.rows:
@@ -436,6 +438,43 @@ class RoomTests(TvCase):
         self.assertNotIn("forget", self.kinds())
         self.tv.resume("dialog ended")
         self.assertEqual(self.ha.calls, ["media_pause", "media_play"])
+
+    def test_a_player_the_owner_switched_off_while_the_pause_took_is_not_resumed(self):
+        self.ha.pause_state[ENTITY] = "off"                # between our pause and the read the owner switched it off
+        self.tv.activation()
+        self.tv.resume("dialog ended")
+        self.assertEqual(self.ha.calls, ["media_pause"])
+        self.assertIn("skip-resume", self.kinds())
+
+    def test_every_pause_is_sent_before_any_player_is_waited_for(self):
+        self.ha.add(PROJECTOR, "playing", LIVING, "dev-projector")
+        self.ha.lag[ENTITY] = 3
+        self.tv.activation()
+        self.assertEqual(self.ha.calls, ["media_pause", "media_pause"])
+        self.assertEqual(len(self.sleeps), 3)              # one shared wait, not one per player
+
+    def test_an_unavailable_blip_after_the_pause_is_waited_out(self):
+        blip = iter(["unavailable"])
+        read = self.ha.state
+        self.ha.state = lambda entity: next(blip, None) or read(entity) if self.ha.calls else read(entity)
+        self.tv.activation()
+        self.tv.resume("dialog ended")
+        self.assertEqual(self.ha.calls, ["media_pause", "media_play"])
+
+    def test_an_alias_of_the_speaker_and_the_wrapper_that_fronts_it_are_never_paused(self):
+        self.home()
+        self.ha.add("media_player.studio_alias", "playing", STUDIO, "dev-speaker")
+        self.ha.add("media_player.wrapper_of_alias", "playing", STUDIO, "dev-ma", queue="media_player.studio_alias")
+        self.tv.activation(STATION)
+        self.assertEqual(self.ha.targets, [("media_pause", STUDIO_TV)])
+
+    def test_a_group_that_would_reach_the_speaker_or_another_room_is_not_paused(self):
+        self.home()
+        self.ha.add("media_player.group_with_speaker", "playing", STUDIO, "dev-g1", members=[STUDIO_TV, SPEAKER])
+        self.ha.add("media_player.group_with_bedroom", "playing", STUDIO, "dev-g2", members=[STUDIO_TV, BEDROOM_TV])
+        self.ha.add("media_player.group_in_room", "playing", STUDIO, "dev-g3", members=[STUDIO_TV])
+        self.tv.activation(STATION)
+        self.assertCountEqual(self.ha.targets, [("media_pause", STUDIO_TV), ("media_pause", "media_player.group_in_room")])
 
     def test_a_state_published_late_is_waited_for_then_resumed_normally(self):
         self.ha.lag[ENTITY] = 3                            # Home Assistant answers 200, the player says `playing` three more reads

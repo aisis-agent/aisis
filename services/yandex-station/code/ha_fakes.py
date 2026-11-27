@@ -290,7 +290,8 @@ class FakeHomeAssistant:
         if "namespace(rows=[])" in template and "states.media_player" in template:
             return json.dumps([{"entity_id": e, "state": s["state"], "area": self.areas.get(e), "device": self.devices.get(e),
                                 "device_area": self.device_areas.get(e, self.areas.get(e) if e in self.devices else None),
-                                "queue": s["attributes"].get("active_queue")} for e, s in self.states.items() if e.startswith("media_player.")])
+                                "queue": s["attributes"].get("active_queue"), "members": s["attributes"].get("group_members")}
+                               for e, s in self.states.items() if e.startswith("media_player.")])
         area = re.search(r"area_entities\((\".*\")\)", template, re.DOTALL)
         if area:
             name = json.loads(area.group(1))
