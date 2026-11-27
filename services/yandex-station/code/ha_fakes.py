@@ -63,6 +63,8 @@ def default_effect(domain: str, service: str, body: dict, states: dict[str, dict
             attrs["volume_level"] = body["volume_level"]
         elif service == "media_pause":
             state["state"] = "paused"
+        elif service == "media_play":
+            state["state"] = "playing"
         state["last_changed"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
 
 
@@ -166,6 +168,8 @@ class FakeHomeAssistant:
         self.starting = False
         self.hang_reads = False         # state reads and templates never answer (a Home Assistant that is busy or wedged)
         self.areas: dict[str, str] = {}  # entity id -> HA area name, for the adapter's registry and area_entities templates
+        self.devices: dict[str, str] = {}  # entity id -> HA device id, for the media player rows of tvpause
+        self.device_areas: dict[str, str] = {}  # entity id -> area of its device (an entity's own area in `areas` may differ), same rows
         self.name = "Test Home"
         self.require_auth = False       # True: /api/ answers 401 without a bearer this fake issued
         self.access_ttl = 1800.0
@@ -275,13 +279,20 @@ class FakeHomeAssistant:
 
     def render(self, template: str) -> str:
         """Just the templates ha-cli and the adapter send: the entities of a domain that are not in a state
-        (ha_verify.whole_domain_template), the entities of an area, the registry (entity, name, area per line)."""
+        (ha_verify.whole_domain_template), the entities of an area, the registry (entity, name, area per line), the media players
+        with state, area and device (tvpause.ROOM_TEMPLATE)."""
         match = re.search(r"states\.(\w+) .*rejectattr\('state', 'eq', \"(\w+)\"\)", template)
         if match:
             domain, wanted = match.groups()
             left = [e for e, s in self.states.items() if e.startswith(domain + ".")
                     and s["state"] not in ("unavailable", "unknown") and s["state"] != wanted]
             return json.dumps(left)
+        if "namespace(rows=[])" in template and "states.media_player" in template:
+            return json.dumps([{"entity_id": e, "state": s["state"], "area": self.areas.get(e), "device": self.devices.get(e),
+                                "device_area": self.device_areas.get(e, self.areas.get(e) if e in self.devices else None),
+                                "queue": s["attributes"].get("active_queue"), "members": s["attributes"].get("group_members"),
+                                "helper_members": s["attributes"].get("entity_id")}
+                               for e, s in self.states.items() if e.startswith("media_player.")])
         area = re.search(r"area_entities\((\".*\")\)", template, re.DOTALL)
         if area:
             name = json.loads(area.group(1))
