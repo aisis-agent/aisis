@@ -140,8 +140,8 @@ class HoldTests(TvCase):
         self.clock.now += 50
         self.ha.up = False
         self.tv.activation()
-        self.assertNotEqual(self.tv.timers["hold"].args, (first,))
-        self.assertEqual(self.tv.timers["hold"].args, (self.clock.now,))
+        self.assertNotEqual(self.tv.timers[f"hold:{STATION}"].args, (first, STATION))
+        self.assertEqual(self.tv.timers[f"hold:{STATION}"].args, (self.clock.now, STATION))
         # the rearmed timer must actually resume the pause we still hold
         self.ha.up = True
         self.tv._hold_expired(self.clock.now)
@@ -195,12 +195,12 @@ class HoldTests(TvCase):
                 checked = []
                 original = self.tv.resume
 
-                def spy(reason, unless=None, original=original):
+                def spy(reason, unless=None, station=None, original=original):
                     def guard(st):
                         self.assert_state_lock_held()
                         checked.append(True)
                         return unless(st)
-                    original(reason, unless=guard)
+                    original(reason, unless=guard, station=station)
 
                 self.tv.resume = spy
                 ha_state = self.ha.state
@@ -257,7 +257,7 @@ class HoldTests(TvCase):
         newer_thread.join(5)
         self.assertFalse(older.is_alive() or newer_thread.is_alive())
         self.assertEqual(errors, [])
-        self.assertEqual(self.tv.timers["hold"].args, (self.tv.status()["last_activation"],))
+        self.assertEqual(self.tv.timers[f"hold:{STATION}"].args, (self.tv.status()["last_activation"], STATION))
 
 
 class RoomTests(TvCase):
@@ -581,12 +581,122 @@ class ResumeTests(TvCase):
         with mock.patch.object(self.tv, "_arm") as arm:
             self.tv.observe(self.clock.now + 2, f"Dialog {did} ended: serverFinished")
         arm.assert_called_once()
-        self.assertEqual(arm.call_args.args[0:2], ("resume", 1.5))
+        self.assertEqual(arm.call_args.args[0:2], (f"resume:{STATION}", 1.5))
         later = "22222222-2222-2222-2222-222222222222"
         self.tv.observe(self.clock.now + 60, f"Dialog {later} started")          # a text command long after the activation
         with mock.patch.object(self.tv, "_arm") as arm:
             self.tv.observe(self.clock.now + 61, f"Dialog {later} ended: serverFinished")
         arm.assert_not_called()
+
+
+class StationDialogTests(TvCase):
+    """UB-277: the container's dialog lines name their station, so a dialog end releases only the pauses of that station's room."""
+
+    D1 = "11111111-1111-1111-1111-111111111111"
+    D2 = "22222222-2222-2222-2222-222222222222"
+    D3 = "33333333-3333-3333-3333-333333333333"
+    THIRD_STATION = "m0011hm00z86hg"
+
+    def setUp(self):
+        super().setUp()
+        self.ha.rows.clear()
+        self.ha.add(SPEAKER, "idle", STUDIO, "dev-speaker")
+        self.ha.add(OTHER_SPEAKER, "idle", BEDROOM, "dev-speaker-2")
+        self.ha.add(STUDIO_TV, "playing", STUDIO, "dev-studio-tv")
+        self.ha.add(BEDROOM_TV, "playing", BEDROOM, "dev-bedroom-tv")
+
+    def started(self, did, station=None, at=0.2):
+        suffix = f" station={station.upper()}" if station else ""
+        self.tv.observe(self.clock.now + at, f"Dialog {did} started{suffix}")
+
+    def ended(self, did, station=None, at=5.0):
+        """The dialog end line, the grace timer it arms run at once."""
+        suffix = f" station={station.upper()}" if station else ""
+        with mock.patch.object(self.tv, "_arm") as arm:
+            self.tv.observe(self.clock.now + at, f"Dialog {did} ended: serverFinished{suffix}")
+        for call in arm.call_args_list:
+            _, _, fn, *args = call.args
+            fn(*args)
+
+    def talking_in_two_rooms(self):
+        self.tv.activation(STATION)
+        self.tv.activation(OTHER_STATION)
+        self.started(self.D1, STATION)
+        self.started(self.D2, OTHER_STATION)
+
+    def test_a_dialog_end_resumes_only_the_room_of_its_station(self):
+        self.talking_in_two_rooms()
+        self.ended(self.D1, STATION)
+        self.assertEqual(self.ha.targets[-1], ("media_play", STUDIO_TV))
+        self.assertEqual(list(self.tv.status()["paused"]), [BEDROOM_TV])
+        self.assertEqual(self.ha.state_of(BEDROOM_TV), "paused")
+        self.ended(self.D2, OTHER_STATION)
+        self.assertEqual(self.tv.status()["paused"], {})
+        self.assertEqual(sorted(t for s, t in self.ha.targets if s == "media_play"), [BEDROOM_TV, STUDIO_TV])
+
+    def test_the_station_of_the_start_line_serves_an_end_line_that_names_none(self):
+        self.talking_in_two_rooms()
+        self.ended(self.D1)
+        self.assertEqual(list(self.tv.status()["paused"]), [BEDROOM_TV])
+
+    def test_a_dialog_of_an_image_that_names_no_station_releases_every_room(self):
+        self.talking_in_two_rooms()
+        self.started(self.D3)
+        self.ended(self.D3)
+        self.assertEqual(self.tv.status()["paused"], {})
+
+    def test_a_dialog_acting_on_one_room_does_not_block_the_resume_of_another(self):
+        self.talking_in_two_rooms()
+        self.tv.observe(self.clock.now + 1, "Fast intent executed: pause [media_player.bedroom_tv]")
+        self.ended(self.D1, STATION)
+        self.assertEqual(self.ha.targets[-1], ("media_play", STUDIO_TV))
+        self.ended(self.D2, OTHER_STATION)
+        self.assertEqual([t for s, t in self.ha.targets if s == "media_play"], [STUDIO_TV])
+        self.assertIn("user-action", self.kinds())
+
+    def test_an_activation_of_another_room_during_the_dialog_does_not_cancel_its_resume(self):
+        self.tv.activation(STATION)
+        self.started(self.D1, STATION)
+        ended_at = self.clock.now + 5
+        self.clock.now += 10
+        self.tv.activation(OTHER_STATION)                   # the bedroom speaker wakes after the studio dialog ended, before its grace is over
+        with mock.patch.object(self.tv, "_arm") as arm:
+            self.tv.observe(ended_at, f"Dialog {self.D1} ended: serverFinished station={STATION.upper()}")
+        _, _, fn, *args = arm.call_args.args
+        fn(*args)
+        self.assertEqual(self.ha.targets[-1], ("media_play", STUDIO_TV))
+        self.assertEqual(list(self.tv.status()["paused"]), [BEDROOM_TV])
+
+    def test_a_station_named_by_the_activation_resumes_after_its_dialog_even_if_the_activation_named_none(self):
+        self.ha.rows.clear()
+        self.ha.add(SPEAKER, "idle", LIVING, "dev-speaker")
+        self.ha.add(ENTITY, "playing", LIVING, "dev-tv")
+        self.tv.activation()                                # the only speaker Home Assistant has
+        self.started(self.D1, STATION)
+        self.ended(self.D1, STATION)
+        self.assertEqual(self.ha.targets, [("media_pause", ENTITY), ("media_play", ENTITY)])
+
+    def test_two_speakers_of_one_room_keep_a_player_paused_until_both_dialogs_ended(self):
+        self.ha.add(f"media_player.aisis_speaker_{self.THIRD_STATION}", "idle", STUDIO, "dev-speaker-3")
+        self.tv.activation(STATION)
+        self.tv.activation(self.THIRD_STATION)               # the studio TV is already paused by the first one
+        self.started(self.D1, STATION)
+        self.started(self.D3, self.THIRD_STATION)
+        self.ended(self.D1, STATION)
+        self.assertEqual(self.ha.calls, ["media_pause"])
+        self.assertEqual(self.ha.state_of(STUDIO_TV), "paused")
+        self.ended(self.D3, self.THIRD_STATION)
+        self.assertEqual(self.ha.calls, ["media_pause", "media_play"])
+
+    def test_a_state_file_of_the_previous_format_is_still_released(self):
+        self.ha.rows.clear()
+        self.ha.add(SPEAKER, "idle", LIVING, "dev-speaker")
+        self.ha.add(ENTITY, "paused", LIVING, "dev-tv")
+        self.tv.state_file.write_text(json.dumps({"paused": {ENTITY: 1000.0}, "rest": {}, "watch": [ENTITY], "last_activation": 1000.0,
+                                                  "user_touched": False, "events": []}))
+        self.assertEqual(list(self.tv.status()["paused"]), [ENTITY])
+        self.tv.resume("max hold elapsed")
+        self.assertEqual(self.ha.targets, [("media_play", ENTITY)])
 
 
 class SettingsTests(unittest.TestCase):
