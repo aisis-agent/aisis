@@ -255,6 +255,27 @@ directory the quasar containers mount read-only), through one client, `code/ha_c
   probing adapter/stt/pm/ha-cli/kit/lan-proxy/embed units and the postgres,
   tls-voice, dns-relay containers. A `maintenance` file in
   `~/.local/share/aisis/bluegreen-state/` suspends it during deploys.
+- **The `pm` component** is `aisis-station-pm`, this repository's bridge to the ChatGPT browser that the pm product (the
+  owner's `agent-tools` repository, Guardian) owns: the brain's last resort behind Claude
+  (`docs/architecture/voice-stack-layers.md`). The bridge exits when that browser goes away and refuses to start without
+  it, so a restart cannot help while the browser is gone. The watchdog therefore restarts the bridge, with an alert that names
+  it in full, only while something listens on the browser's debugging port: 9226, or the `AISIS_PM_CDP` of
+  `~/.config/aisis/runtime.env`, else of the watchdog's own environment as it was when the watchdog started (the user
+  manager's `environment.d`; the bridge reads it from there too), so restart the watchdog after changing it. With the browser stopped (the operator stopping the Guardian stack, a browser restart) the
+  probe has no verdict: no incident, no alert, no restart, one `probe_no_verdict` line in the journal. systemd's own
+  `Restart=on-failure` keeps trying. A browser that comes back gives the bridge twenty seconds to start by itself (no alert if
+  it does); if the bridge is still down after that and six more ticks, the watchdog restarts it, with the usual alert.
+  Before this rule (2026-11-27) the stopped browser produced «pm не отвечает, перезапускаю» and a restart every 30 s, which
+  also put the unit's restart counter back to 0.
+  Only a refused connection proves the browser is gone; a browser that accepts nothing is hung, and the bridge is restarted
+  as usual. A setting that is there but is not an exact `http://127.0.0.1:<port>` endpoint (an empty one, a leading zero), or
+  a file the watchdog cannot read exactly (unreadable, bytes that are not UTF-8, a carriage return, a quoted value that
+  spans lines, holds a quote or a backslash, or is followed by text), claims no prerequisite: the bridge cannot start on it
+  either, or the watchdog cannot tell, so it is reported and restarted as before, and the alert says so («http 0; browser port
+  not checked (AISIS_PM_CDP unusable or runtime.env not readable exactly)»). Failures that precede a browser's absence do not
+  count toward the next run of failures, and an incident that was open when the browser went away is closed (one
+  `incident_suspended` journal line and one closing alert), so the next failure after its return is a new incident with its own alert. Any probe without a verdict (also `asr`) is journaled once per change of its
+  detail, not once per probe.
 - **Recognizer health**: a port or Describe answer proves nothing about Wyoming (2026-11-17: temp WAV writes hit the `/tmp`
   tmpfs user quota, every transcription returned an invalid header, Describe stayed green). The STT gateway's
   `/healthz/asr` transcribes half a second of silence for real with the live language and profile. 503 + error class means the

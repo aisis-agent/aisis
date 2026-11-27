@@ -16,6 +16,9 @@ Then:
   * standby failed                        -> restart it (keeps rollback warm);
   * switch failed while the active color is healthy -> restart the switch container;
   * any other component                   -> restart its systemd user unit / container.
+    A component that cannot run without a prerequisite port (pm: the browser of the ChatGPT reserve bridge) fails its probe
+    only while that port listens; with nothing there the probe has no verdict (no incident, no alert, no restart, one journal
+    line), because no restart can start it.
 nginx fails over connects to a dead color by itself in milliseconds; this loop
 covers the cases nginx cannot see (a hung process that still accepts connections)
 and repairs whatever died.
@@ -31,6 +34,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
+import re
 import socket
 import subprocess
 import sys
@@ -49,6 +55,64 @@ CLOCK_CHECK_EVERY_S = 300.0
 
 MAINTENANCE_MAX_AGE_S = 900.0
 RESTART_COOLDOWN_S = 30.0
+PREREQUISITE_GRACE_S = 20.0  # a returning prerequisite (the pm browser) gets this long for the unit to start by itself: its RestartSec=5 plus a start of a few seconds
+PREREQUISITE_TIMEOUT_S = 0.3  # loopback connects take microseconds; a probe must not hold up the tick
+
+# The env file that aisis-station-pm.service loads (EnvironmentFile=): the watchdog reads the bridge's own settings from it.
+RUNTIME_ENV = Path.home() / ".config/aisis/runtime.env"
+
+
+def _env_logical_lines(text: str) -> list[str] | None:
+    """The logical lines of a systemd env file. A carriage return and a newline each end a line, as in systemd (Python's own line
+    splitting would also cut at U+2028 and others). A comment line (# or ;) ends at its own line end. A line with an assignment
+    that ends in an odd number of backslashes continues on the next one (the backslash is dropped). None when a value that was
+    continued opens a quote: after an escaped newline systemd keeps quotes as text, and inside single quotes it keeps the
+    backslash and the newline, which this reader does not follow."""
+    lines, pending = [], ""
+    for raw in re.split(r"[\r\n]", text):
+        if not pending and raw.lstrip(" \t")[:1] in ("#", ";"):
+            continue
+        joined = pending + raw
+        continues = (len(raw) - len(raw.rstrip("\\"))) % 2 == 1 and bool(joined.partition("=")[0].strip(" \t")) and "=" in joined
+        if (continues or pending) and joined.partition("=")[2].lstrip(" \t")[:1] in ("'", '"'):
+            return None
+        if continues:
+            pending = joined[:-1]
+            continue
+        lines.append(joined)
+        pending = ""
+    return lines + [pending] if pending else lines
+
+
+def runtime_setting(name: str) -> str | None:
+    """The value of `name` in RUNTIME_ENV as systemd reads it (NAME=value lines, spaces and tabs around the name and the value
+    ignored, matching quotes removed, the last assignment wins); None when unset or the file is missing. An empty value is a
+    value: systemd passes it on. A file this line-by-line reader cannot read exactly (unreadable, bytes that are not UTF-8, a NUL,
+    a quoted value that spans lines, continues, holds its own quote or a backslash, or has text after the closing quote) yields
+    "": no usable endpoint, so the component claims no prerequisite and is restarted as before."""
+    try:
+        text = RUNTIME_ENV.read_bytes().decode("utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError):
+        return ""
+    logical = _env_logical_lines(text)
+    if "\0" in text or logical is None:
+        return ""
+    value = None
+    for line in logical:
+        key, sep, rest = line.strip(" \t").partition("=")
+        if not sep:
+            continue
+        assigned = rest.strip(" \t")
+        if assigned.startswith(("'", '"')):
+            inner = assigned[1:-1]
+            if len(assigned) < 2 or assigned[-1] != assigned[0] or assigned[0] in inner or "\\" in inner:
+                return ""
+            assigned = inner
+        if key.strip(" \t") == name:
+            value = assigned
+    return value
 
 
 @dataclass(frozen=True)
@@ -64,6 +128,9 @@ class Component:
     fails_on: int | None = None  # http: 200 = healthy, this status = failed, any other answer (gateway down, 202 busy, 501, route missing) = no verdict
     background: bool = False  # probe off the tick (a slow probe must not delay the quasar failover decision), result read once done
     restart_cooldown_s: float | None = None  # minimum gap between two restarts of this component (None = RESTART_COOLDOWN_S)
+    needs_port: int | None = None  # http: TCP port on 127.0.0.1 the unit cannot run without; while nothing listens there a failed probe is no verdict (a restart cannot help)
+    needs_port_env: str | None = None  # http: runtime.env setting (an exact http://127.0.0.1:<port> endpoint) that overrides needs_port, so a moved browser is followed
+    label: str | None = None  # how alerts name the component (None = its name)
 
 
 COMPONENTS = (
@@ -77,7 +144,14 @@ COMPONENTS = (
     # language setting either, and then the incident alert is what matters, not a model reload every minute.
     Component("asr", "http", "http://127.0.0.1:31121/healthz/asr", unit="wyoming-whisper.service", every=40, timeout=8.0,
               fails_on=503, background=True, restart_cooldown_s=600.0),
-    Component("pm", "http", "http://127.0.0.1:31118/health", unit="aisis-station-pm.service"),
+    # The ChatGPT reserve bridge, the brain's last resort behind Claude. It attaches to the browser the pm product owns on its
+    # debugging port, exits when that browser disconnects and refuses to start without it. While nothing listens on that port a
+    # restart cannot help, so the failed probe is no verdict. 2026-11-27: the Guardian stack, browser included, was stopped on
+    # purpose; the watchdog alerted «pm не отвечает» and restarted the unit every 30 s for 399 s, then again, and every restart
+    # put the unit's restart counter back to 0.
+    Component("pm", "http", "http://127.0.0.1:31118/health", unit="aisis-station-pm.service", needs_port=9226,
+              needs_port_env="AISIS_PM_CDP",
+              label="pm (aisis-station-pm: мост к браузеру ChatGPT, резервный мозг ответов)"),
     Component("ha-cli", "http", "http://127.0.0.1:8795/health", unit="aisis-ha-cli.service"),
     Component("postgres", "container", "aisis-yandex-postgres-1", container="aisis-yandex-postgres-1", every=3),
     Component("tls-voice", "container", "aisis-yandex-network-tls-voice-1",
@@ -99,6 +173,7 @@ class Tracker:
     incident_start: float = 0.0
     last_action: float = 0.0
     detail: str = ""
+    no_verdict: str = ""  # detail of the last probe without a verdict, so a long run of the same one is journaled once
 
 
 @dataclass
@@ -146,8 +221,12 @@ class Watchdog:
             status = smoke.http_status(comp.target, comp.timeout or self.http_timeout)
             if comp.fails_on is not None:
                 verdict = True if status == 200 else False if status == comp.fails_on else None
-                return verdict, f"http {status}"
-            return status == 200, f"http {status}"
+            else:
+                verdict = status == 200
+            port, unchecked = self._needed_port(comp) if verdict is False else (None, "")
+            if port is not None and self._refused(port):
+                return None, f"http {status}; nothing listens on 127.0.0.1:{port}, a restart cannot help"
+            return verdict, f"http {status}{unchecked}"
         if comp.kind == "unit":
             result = subprocess.run(["systemctl", "--user", "is-active", comp.target], capture_output=True, text=True)
             state = result.stdout.strip()
@@ -165,6 +244,38 @@ class Watchdog:
             except OSError as exc:
                 return False, f"tcp {host}:{comp.tcp_port} {type(exc).__name__}"
         return True, "running"
+
+    @staticmethod
+    def _needed_port(comp: Component) -> tuple[int | None, str]:
+        """(port, note): the port the component cannot run without, the bridge's own setting when it names one, else the declared
+        default. The bridge gets the setting from the env file, else from the user manager's environment (environment.d), which
+        the watchdog inherits too. A setting that is there but no usable endpoint, in the bridge's own canonical form (an empty
+        one, or one this watchdog cannot read exactly, too), claims no prerequisite: the bridge cannot start on it either, or the
+        watchdog cannot tell, and that is a fault to report and restart, not a browser to wait for. The note says so, for the
+        alert; it is empty otherwise."""
+        setting = None
+        if comp.needs_port_env:
+            setting = runtime_setting(comp.needs_port_env)
+            if setting is None:
+                setting = os.environ.get(comp.needs_port_env)
+        if setting is None:
+            return comp.needs_port, ""
+        match = re.fullmatch(r"http://127\.0\.0\.1:([0-9]{1,5})", setting)
+        if match and 1 <= int(match[1]) <= 65535 and str(int(match[1])) == match[1]:
+            return int(match[1]), ""
+        return None, f"; browser port not checked ({comp.needs_port_env} unusable or {RUNTIME_ENV.name} not readable exactly)"
+
+    @staticmethod
+    def _refused(port: int) -> bool:
+        """True only when a connection to 127.0.0.1:port is refused, i.e. nothing listens. A hung browser whose accept queue is
+        full times out instead, and that is no proof it is gone."""
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=PREREQUISITE_TIMEOUT_S):
+                return False
+        except ConnectionRefusedError:
+            return True
+        except OSError:
+            return False
 
     @staticmethod
     def _published_host(comp: Component) -> str | None:
@@ -213,15 +324,20 @@ class Watchdog:
 
         threading.Thread(target=work, daemon=True).start()
 
+    @staticmethod
+    def label(key: str) -> str:
+        """How an alert names a target: the component's label when it has one, else the key itself."""
+        return next((comp.label for comp in COMPONENTS if comp.name == key and comp.label), key)
+
     # ── state machine ────────────────────────────────────────────────────
     def observe(self, key: str, ok: bool, detail: str) -> Tracker:
         tracker = self.trackers.setdefault(key, Tracker())
-        tracker.detail = detail
+        tracker.detail, tracker.no_verdict = detail, ""
         if ok:
             if tracker.incident:
                 took = time.time() - tracker.incident_start
                 self.event("recovered", target=key, outage_s=round(took, 1))
-                self.notify(f"aisis-failover [{self.env}]: {key} восстановлен (инцидент {took:.0f} с)")
+                self.notify(f"aisis-failover [{self.env}]: {self.label(key)} восстановлен (инцидент {took:.0f} с)")
             tracker.fails, tracker.incident = 0, False
         else:
             if tracker.fails == 0:
@@ -292,14 +408,26 @@ class Watchdog:
                 continue  # not probed this tick: only fresh probes count toward the threshold
             ok, detail = results[comp.name]
             if ok is None:
-                self.event("probe_no_verdict", target=comp.name, detail=detail)
+                tracker = self.trackers.setdefault(comp.name, Tracker())
+                if comp.needs_port is not None or comp.needs_port_env is not None:
+                    # A gone prerequisite ends the failure run (what failed before it is another episode) and holds the count below
+                    # zero, so that a returning one gives the unit PREREQUISITE_GRACE_S to start by itself before failures count.
+                    tracker.fails = -math.ceil(PREREQUISITE_GRACE_S / self.interval)
+                    if tracker.incident:  # the failure the alert announced is over with the prerequisite: the next one is a new incident
+                        tracker.incident = False
+                        self.event("incident_suspended", target=comp.name, outage_s=round(time.time() - tracker.incident_start, 1))
+                        self.notify(f"aisis-failover [{self.env}]: {self.label(comp.name)}: браузер остановлен, мост не перезапускаю, "
+                                    "инцидент закрыт; при возвращении браузера и неисправном мосте будет новый")
+                if tracker.no_verdict != detail:  # once per change: a long absence must not write a line per tick
+                    tracker.no_verdict = detail
+                    self.event("probe_no_verdict", target=comp.name, detail=detail)
                 continue
             tracker = self.observe(comp.name, ok, detail)
             # Threshold is in time (component_threshold ticks); slower probes need fewer failures.
             needed = max(1 if comp.every == 1 else 2, -(-self.component_threshold // comp.every))
             if tracker.fails < needed or quiet:
                 continue
-            self.open_incident(comp.name, tracker, f"{comp.name} не отвечает ({detail}), перезапускаю")
+            self.open_incident(comp.name, tracker, f"{self.label(comp.name)} не отвечает ({detail}), перезапускаю")
             if comp.unit:
                 self.restart_unit(comp.unit, comp.name, comp.restart_cooldown_s or RESTART_COOLDOWN_S)
             elif comp.container:
