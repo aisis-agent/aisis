@@ -272,7 +272,7 @@ directory the quasar containers mount read-only), through one client, `code/ha_c
   a file the watchdog cannot read exactly (unreadable, bytes that are not UTF-8, a carriage return, a quoted value that
   spans lines, holds a quote or a backslash, or is followed by text), claims no prerequisite: the bridge cannot start on it
   either, or the watchdog cannot tell, so it is reported and restarted as before, and the alert says so («http 0; browser port
-  not checked (AISIS_PM_CDP unusable)»). Failures that precede a browser's absence do not
+  not checked (AISIS_PM_CDP unusable or runtime.env not readable exactly)»). Failures that precede a browser's absence do not
   count toward the next run of failures, and an incident that was open when the browser went away is closed (one
   `incident_suspended` journal line and one closing alert), so the next failure after its return is a new incident with its own alert. Any probe without a verdict (also `asr`) is journaled once per change of its
   detail, not once per probe.
