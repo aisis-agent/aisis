@@ -325,6 +325,14 @@ class RoomTests(TvCase):
         self.tv.activation()
         self.assertEqual(self.ha.targets, [("media_pause", ENTITY)])
 
+    def test_a_wrapper_or_group_of_an_excluded_player_is_kept_out_too(self):
+        self.cfg = settings(exclude=[PROJECTOR])
+        self.ha.add(PROJECTOR, "playing", LIVING, "dev-projector")
+        self.ha.add("media_player.wrapper_of_projector", "playing", LIVING, "dev-ma", queue=PROJECTOR)
+        self.ha.add("media_player.group_of_projector", "playing", LIVING, "dev-g", members=[ENTITY, PROJECTOR])
+        self.tv.activation()
+        self.assertEqual(self.ha.targets, [("media_pause", ENTITY)])
+
     def test_the_station_the_websocket_names_decides_the_room(self):
         self.home()
         self.ha.add(OTHER_SPEAKER, "idle", BEDROOM, "dev-speaker-2")
@@ -627,7 +635,8 @@ class HomeAssistantTransportTests(unittest.TestCase):
         self.ha = ha_fakes.FakeHomeAssistant([ha_fakes.entity(entity, state) for entity, state in (
             (SPEAKER, "idle"), (STUDIO_TV, "playing"), (ENTITY, "playing"), (PROJECTOR, "playing"), (BEDROOM_TV, "paused"))]
             + [ha_fakes.entity("media_player.ma_face", "idle", active_queue=SPEAKER),
-               ha_fakes.entity("media_player.weird", "idle", active_queue={"not": "a name"})])
+               ha_fakes.entity("media_player.weird", "idle", active_queue={"not": "a name"}),
+               {**ha_fakes.entity("media_player.helper_group", "idle"), "attributes": {"entity_id": [STUDIO_TV, BEDROOM_TV]}}])
         self.addCleanup(self.ha.close)
         self.ha.areas.update({SPEAKER: LIVING, STUDIO_TV: STUDIO, ENTITY: LIVING, PROJECTOR: LIVING, BEDROOM_TV: BEDROOM, "media_player.weird": STUDIO})
         self.ha.devices.update({SPEAKER: "dev-speaker", STUDIO_TV: "dev-studio-tv"})
@@ -644,7 +653,7 @@ class HomeAssistantTransportTests(unittest.TestCase):
         self.assertEqual(players[ENTITY], Player(ENTITY, "playing", LIVING, None))
         self.assertEqual(players["media_player.ma_face"], Player("media_player.ma_face", "idle", None, None, SPEAKER))
         self.assertEqual((players[SPEAKER].area, players[SPEAKER].device_area), (LIVING, STUDIO))
-        self.assertEqual(len(players), 7)
+        self.assertEqual(len(players), 8)
         templates = [path for method, path, _ in self.ha.requests if method == "POST"]
         self.assertEqual(templates, ["/api/template"])
 
@@ -654,6 +663,10 @@ class HomeAssistantTransportTests(unittest.TestCase):
         room = tvpause.discover(players, STATION, [])
         self.assertEqual(room.area, STUDIO)
         self.assertIn("media_player.weird", [player.entity for player in room.players])
+
+    def test_a_group_helpers_members_are_read_from_its_entity_id_attribute(self):
+        players = {player.entity: player for player in self.transport.players()}
+        self.assertEqual(players["media_player.helper_group"].members, (STUDIO_TV, BEDROOM_TV))
 
     def test_a_state_and_a_service_call_use_the_standard_api(self):
         self.assertEqual(self.transport.state(ENTITY), "playing")

@@ -21,8 +21,11 @@ service calls. Which players count is a rule, not a list (#276):
     speaker has in Home Assistant, named by the websocket, else the only media_player.aisis_speaker_* Home Assistant has. No room
     known (no or several speakers, a speaker without an area, an unknown station) pauses nothing and the reason is the event «skip»;
     so does an unreachable or unreadable Home Assistant (a state that cannot be read is not «playing»).
-    Known limit (UB-277): the dialog log carries no station, so with two speakers talking at once the resume of one room is not told
-    from the other's: a dialog end releases every pause we hold.
+    Known limits (UB-277): the quasar STT client names no station today, so every live turn takes the fallback. It is right while this
+    quasar server serves one station (the only station in its connection log over 72 h is the one whose aisis_speaker player Home
+    Assistant has); a second station would be taken for it until the client names the station. The dialog log carries no station
+    either, so with two speakers talking at once the resume of one room is not told from the other's: a dialog end releases every
+    pause we hold.
 
 Rules of the hold (all deliberate):
   * resume only what *we* paused, only if it is still in the state our pause left it in (`paused`; `idle` for the players that say so,
@@ -70,7 +73,7 @@ ROOM_TEMPLATE = (
     "{% set ns = namespace(rows=[]) %}{% for e in states.media_player %}{% set d = device_id(e.entity_id) %}"
     "{% set ns.rows = ns.rows + [{'entity_id': e.entity_id, 'state': e.state, 'area': area_name(e.entity_id), "
     "'device': d, 'device_area': area_name(d) if d else None, 'queue': e.attributes.get('active_queue'), "
-    "'members': e.attributes.get('group_members')}] %}"
+    "'members': e.attributes.get('group_members'), 'helper_members': e.attributes.get('entity_id')}] %}"
     "{% endfor %}{{ ns.rows | tojson }}"
 )
 # The entities a speaker has in Home Assistant: the AISIS integration's player, else the Yandex integration's one (README, «Which room»).
@@ -140,11 +143,11 @@ def discover(players: list[Player], station: str | None, exclude=()) -> Room:
     areas = {p.entity: p.area for p in players}
 
     def spills(p: Player) -> bool:
-        """A group whose pause would reach the speaker or a player of another room."""
-        return any(m in own or (areas.get(m) is not None and areas[m] != area) for m in p.members)
+        """A group whose pause would reach the speaker, a player of another room or an excluded player."""
+        return any(m in own or m in skipped or (areas.get(m) is not None and areas[m] != area) for m in p.members)
 
     return Room(area, tuple(p for p in players if p.area == area and p.entity not in own and p.queue not in own
-                            and p.entity not in skipped and not spills(p)))
+                            and p.entity not in skipped and p.queue not in skipped and not spills(p)))
 
 
 def config_dir() -> Path:
@@ -239,7 +242,8 @@ class HaPlayers:
                 return self._failed("players", reply=reply)
             rows = json.loads(reply.text())
             return [Player(row["entity_id"], row["state"], _text(row.get("area")), _text(row.get("device")), _text(row.get("queue")),
-                           _text(row.get("device_area")), _members(row.get("members"))) for row in rows]
+                           _text(row.get("device_area")), _members(row.get("members")) + _members(row.get("helper_members")))
+                    for row in rows]
         except (ha_client.HaError, ValueError, KeyError, TypeError) as err:
             return self._failed("players", err=err)
 
