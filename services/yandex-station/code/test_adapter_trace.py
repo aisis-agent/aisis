@@ -328,6 +328,23 @@ class HaReadTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 await Adapter._ha_get_json(host, "/api/states/climate.x")
 
+    async def test_a_call_that_asks_for_data_is_a_plain_request_with_its_query(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        import ha_client
+        import ha_fakes
+        ha = ha_fakes.FakeHomeAssistant([ha_fakes.entity("weather.home", "sunny")])
+        self.addCleanup(ha.close)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ha_client.Store(Path(tmp) / "connection.json")
+            store.save(ha_client.Connection(ha.url, "long_lived", "llat"))
+            host = SimpleNamespace(ha_client=ha_client.HaClient(store, discover_fn=lambda **_: []))
+            path = "/api/services/weather/get_forecasts?return_response"
+            await Adapter._ha_post_json(host, path, {"entity_id": "weather.home", "type": "daily"})
+        self.assertEqual([call[0] for call in ha.calls()], [path])     # Home Assistant got the query, so it answers with the service's data
+        self.assertEqual([r for r in ha.requests if r[0] == "WS"], [])  # and nothing was confirmed against a state: data is not a state change
+
 
 
 if __name__ == "__main__":

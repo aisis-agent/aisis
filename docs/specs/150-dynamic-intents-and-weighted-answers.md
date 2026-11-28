@@ -142,7 +142,7 @@ Every form fits «уже …» («уже меньше минуты», «уже �
 * Aspect `temp`: «Кондиционер {where} выставлен на {set}, сейчас в комнате {current}.» (the missing one is left out)
 * Aspect `since`: «Кондиционер {where} включён {since}.»
 * Home Assistant unreachable: «Состояние кондиционеров сейчас узнать не удаётся.»; no `climate` entity in the home (or none in the named room): «Кондиционеров в доме не найдено.» / «В комнате «{area}» нет кондиционера.»
-* Every state is a live read through the shared client (no cache, formerly the ha-cli proxy), so an answer can never be stale; an unreachable Home Assistant gives the data-unavailable sentence instead.
+* Every state is a live read through the shared client (no cache), so an answer can never be stale; an unreachable Home Assistant gives the data-unavailable sentence instead.
 
 None of these names an actor, asks for a repetition or says what the speaker «не включал». The set-point is spoken as «N градусов» (`home_status.degrees`).
 
@@ -304,4 +304,4 @@ The first line is `trace_view.alternatives_lines` (already used for `correction.
 5. **More status intents** ([#279](https://github.com/alex-mextner/aisis/issues/279)): lights (the quasar layer's `state.report` answers «Сейчас ничего не включено.» from a template; an adapter-side reading with `last_changed` needs the pre-phase hand-over), TV and projector, volume, timers and reminders («что поставлено»), weather follow-ups.
 6. **Persona text** (#273): `user_prompt.CAPABILITIES` still tells the model the speaker «выполняет сама». With §4 the model rarely sees capability questions, but its fallback text is the same actor wording and is changed by the wording ticket, not here.
 7. **Typical-phrase growth** through the nightly intent loop: the phrases of §4 are authored from the grammar's conventions and one real clip each; real variants arrive in the corpus and extend `info-ru.jsonl`.
-8. **RETIRED: stale-cache hedge for the status answer** ([#280](https://github.com/alex-mextner/aisis/issues/280)): obsolete. It hedged answers served from the ha-cli proxy's old cache (`X-Aisis-Cache: stale`); the proxy and every state cache are gone, states are live reads through the shared client, so nothing can be stale.
+8. **RETIRED: stale-cache hedge for the status answer** ([#280](https://github.com/alex-mextner/aisis/issues/280)): obsolete. It hedged answers served from the old local proxy's cache (`X-Aisis-Cache: stale`); the proxy and every state cache are gone, states are live reads through the shared client, so nothing can be stale.

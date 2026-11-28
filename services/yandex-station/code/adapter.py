@@ -270,9 +270,9 @@ class Adapter:
 
     async def _ha_post_json(self, path: str, body: dict) -> ha_actions.HaReply:
         """A service call is confirmed by the device state through Home Assistant's own events (ha_call.py: the reply carries its
-        verdict); any other POST (a template) is a plain request."""
-        parts = path.split("?")[0].split("/")
-        if path.startswith("/api/services/") and len(parts) == 5:
+        verdict); any other POST (a template, a call that asks for data with `?return_response`) is a plain request."""
+        parts = path.split("/")
+        if path.startswith("/api/services/") and len(parts) == 5 and "?" not in path:
             result = await asyncio.to_thread(ha_call.service_call, self.ha_client, parts[3], parts[4], body)
             return ha_actions.HaReply(result.status, result.body, result.verify, None, result.ha, result.down)
         reply = await asyncio.to_thread(self.ha_client.post, path, body, HA_READ_TIMEOUT_S)

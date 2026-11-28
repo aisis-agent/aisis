@@ -155,7 +155,7 @@ class HaHome:
         return entities_from(await self._get("/api/states"))
 
     async def act(self, call: HaCall) -> str:
-        """The call, then what was OBSERVED: ha-cli's verdict, else the state read back. Never what was asked for."""
+        """The call, then what was OBSERVED: the confirmed call's verdict, else the state read back. Never what was asked for."""
         started = time.monotonic()
         reply = await self._post(f"/api/services/{call.domain}/{call.service}", {"entity_id": call.entity_id})
         utterance_trace.call("ha", service=f"{call.domain}.{call.service}", entity=call.entity_id, status=reply.status, verify=reply.verify,

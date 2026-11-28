@@ -77,6 +77,7 @@ class _Call:
         self.expect: ha_verify.Expectation | None = None
         self.before: dict[str, dict | None] = {}
         self.already = False
+        self.sent = False       # the call_service frame was handed to the socket (or half of it)
         self.sent_at = self.started
         self.answer: tuple[int, str] | None = None     # (HTTP-like status, Home Assistant's code) once Home Assistant answered
 
@@ -140,13 +141,27 @@ class _Call:
             if self.entities and not expect.whole_domain:
                 sub = session.send("subscribe_trigger", trigger={"platform": "state", "entity_id": list(self.entities)})
                 self._await_result(session, sub, states)
+            self.sent = True      # from here the call may have reached Home Assistant, even when the send itself fails half way
             call = session.send("call_service", domain=self.domain, service=self.service, service_data=self.data)
             self.sent_at = self.clock()
             return self._loop(session, expect, call, states)
         except ha_ws.WsError as err:
             if err.kind == "timeout":
+                if not self.sent:      # the subscription never completed: the device may have moved for any other reason
+                    return CallResult(504, {"result": "unknown", "reason": "ha_no_answer", "ms": self.ms()}, ha=err.kind)
                 return self._judge_end(expect, states, answered_ok=False)
-            return CallResult(504, {"result": "unknown", "reason": "ha_down_in_flight", "ms": self.ms()}, ha=err.kind)
+            return self._lost_in_flight(expect, err.kind)
+
+    def _lost_in_flight(self, expect: ha_verify.Expectation, kind: str) -> CallResult:
+        """The connection broke: the call is never sent again. When it may have been sent, the device is asked once what it says now (the
+        call may have run before the socket died); only fresh readings of EVERY target that prove the call are a verdict, a reading that
+        failed is never replaced by what the state was before. Anything else stays unknown."""
+        if self.sent and self.entities and not expect.whole_domain and not self.already:
+            fresh, _ = _read_states(self.client, self.entities, min(FINAL_READ_S, max(0.1, self.left())))
+            verdict = expect.check(fresh)
+            if verdict.result == "ok":
+                return self._ok(verdict, "state_matched")
+        return CallResult(504, {"result": "unknown", "reason": "ha_down_in_flight", "ms": self.ms()}, ha=kind)
 
     def _await_result(self, session: ha_ws.Session, ident: int, states: dict[str, dict | None]) -> None:
         """The answer to the subscription; events that come first are kept. A missing answer is simply a Home Assistant that is too slow."""

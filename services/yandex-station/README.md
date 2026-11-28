@@ -175,7 +175,7 @@ that was not observed.
 
 ### What the old local proxy did, and what became of each layer
 
-`aisis-ha-cli` (port 8795, `hacli.py`) stood between every consumer and Home Assistant, with a fake token. It is gone; each layer was judged
+A local proxy service (a user unit on its own port, with a fake token) stood between every consumer and Home Assistant. It is gone; each layer was judged
 by whether Home Assistant's own API cannot do it:
 
 | Layer of the proxy | Verdict | Why |
@@ -187,7 +187,13 @@ by whether Home Assistant's own API cannot do it:
 | Outage statistics, recovery ETA | retired | The ETA is no longer spoken; Home Assistant's availability is what it answers now |
 | Private action journal (`ha-actions.jsonl`) | replaced | Home Assistant's logbook, filtered to AISIS' user |
 
-The adapter keeps no copy of Home Assistant's state either: reads are fresh per question.
+The state of a device is never remembered: the unit a command acts on is read fresh right before the command and judged from Home Assistant's own events
+right after it (`ha_call.py`). Only the lists the executors choose from (which entities exist, which area they are in) are kept for a minute (`ha_actions.py`).
+
+**Operator, after the deploy:** the retired proxy's user unit `aisis-ha-cli.service` is no longer installed or started by anything in this repository and
+no consumer talks to it any more. Stop and disable it yourself once: `systemctl --user disable --now aisis-ha-cli.service`, and delete its leftovers
+(`~/.local/share/aisis/ha-state-cache.json`, `ha-actions.jsonl`, the unit file in `~/.config/systemd/user/`, then `systemctl --user daemon-reload`).
+`scripts/install-systemd-units.sh` never removes a unit by itself. Nothing breaks if it keeps running; it just serves nobody.
 
 ## Home Assistant connection (found by itself, signed in with two clicks)
 
@@ -248,7 +254,7 @@ directory the quasar containers mount read-only), through one client, `code/ha_c
 - **State lives in**: `~/.local/share/aisis/` (venvs `venv/`, `embed-venv/`,
   `dsp-bench-venv/`, `bluegreen-state/`, `corpus/`, `models/`, `prompts/`,
   `releases/`, `voice-archive/`, `dashboard-ui/`, `pm-deps/`, `dialogs.sqlite3`,
-  `ha-state-cache.json`, …), `~/.config/aisis/` (runtime.env, whisper-prompt.env,
+  …), `~/.config/aisis/` (runtime.env, whisper-prompt.env,
   fish.key, per-feature json), `~/.cache/aisis/` (quasar-source checkout, fillers),
   `~/.local/state/aisis/` (adapter/pm sqlite, quasar-prod container state).
   Secrets (fish.key, runtime.env, *.env with tokens, sqlite) are never committed.
@@ -374,7 +380,7 @@ directory the quasar containers mount read-only), through one client, `code/ha_c
   an unstressed vowel, a voiced consonant, a synonym of the grammar's lexicon, one edit). It asks before the brain from `0.75` and after the brain gave up («Повтори?», «Непонятно.», nothing, a Jev
   `garbled`, a grammar catch-all) from `0.5`; chit-chat and questions get nothing. Nothing runs without the spoken «да». With no option at all the line says what was heard and which kinds of action this
   home has («Прозвучало «…», но что сделать, не ясно: свет, кондиционер или телевизор?», «Ничего не расслышал. Что сделать: …?» for a turn without speech), the microphone open once a minute per station.
-  `AISIS_CLARIFY=on|off` (default `on`; `off` keeps only that line). The Home Assistant access is the one seam `clarify.Home` (`HaHome` over the adapter's ha-cli calls). The trace line carries
+  `AISIS_CLARIFY=on|off` (default `on`; `off` keeps only that line). The Home Assistant access is the one seam `clarify.Home` (`HaHome` over the adapter's confirmed Home Assistant calls). The trace line carries
   `correction.options` (phrase, score, source) and `asked: clarify`. The persona in `runtime.env` must not forbid guesses: `user_prompt.CAPABILITIES` tells the brain to answer «Непонятно.» and
   `reply_guard.is_unheard` turns that and any bare «Повтори?» into the clarifier's answer. Python-only: restart `aisis-station-adapter`.
 - **Extra dictionary** (`code/extra_dict.py`, data `code/extra_dict_ru.json`, ticket #268; the runtime layer built from the home's own entity

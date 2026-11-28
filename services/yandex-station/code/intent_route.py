@@ -155,7 +155,7 @@ class IntentRouter:
     extra_dict_mode: str = "off"        # AISIS_EXTRA_DICT: off | shadow (log the extra confusables' candidates) | on (the engine decides with them)
     status_bare: str = "shadow"         # AISIS_STATUS_BARE: shadow (traced, declined; anything but `on`) | on: «кондиционер на втором этаже» alone is answered with the status
     clarify_mode: str = "on"            # AISIS_CLARIFY: on (a phrase nobody read gets the likeliest actions as a question) | off (only the line that says what was heard)
-    home: clarify.Home | None = None    # the catalog and the one service call of a clarification option (clarify.HaHome over the adapter's ha-cli access)
+    home: clarify.Home | None = None    # the catalog and the one service call of a clarification option (clarify.HaHome over the adapter's Home Assistant client)
     capabilities: capabilities.Capabilities | None = field(default=None, init=False)
     correction: correction.Correction | None = field(default=None, init=False)
     clarifier: clarify.Clarifier | None = field(default=None, init=False)
@@ -466,7 +466,7 @@ class IntentRouter:
         if step.call is not None:
             try:
                 done = await self.clarifier.home.act(step.call)
-            except Exception as err:   # ha-cli unreachable: said, never silently dropped
+            except Exception as err:   # Home Assistant unreachable: said, never silently dropped
                 LOG.warning("clarify_act_failed class=%s", type(err).__name__)
                 utterance_trace.error("clarify act: " + type(err).__name__)
                 done = clarify.ACT_FAILED

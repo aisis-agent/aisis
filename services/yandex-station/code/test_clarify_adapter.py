@@ -4,11 +4,13 @@ repeat request is never spoken. The incident is the recorded one (traces 125/126
 television playing."""
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 from unittest.mock import AsyncMock
 
 from aiohttp.test_utils import TestClient, TestServer
 
+import ha_client
 import ha_fakes
 from adapter import Adapter
 from test_correction import Clock, FakeCore
@@ -32,26 +34,22 @@ class ClarifyCase(unittest.IsolatedAsyncioTestCase):
         self.fake = ha_fakes.FakeHomeAssistant(home())
         self.addCleanup(self.fake.close)
         self.env = {"AISIS_ALLOWED_STATIONS": "st1", "AISIS_STATE_DB": self.dir.name + "/adapter.sqlite3", "AISIS_MEMORY": "0",
-                    "AISIS_UTTERANCE_TRACE": "off", "AISIS_CHATGPT_COMMAND": "[]", "AISIS_ADAPTER_TOKEN": "test-only-token",
-                    "AISIS_HACLI_URL": self.fake.url}
+                    "AISIS_UTTERANCE_TRACE": "off", "AISIS_CHATGPT_COMMAND": "[]", "AISIS_ADAPTER_TOKEN": "test-only-token"}
+        self.store = ha_client.Store(Path(self.dir.name) / "connection.json")
+        self.store.save(ha_client.Connection(self.fake.url, "long_lived", "llat"))
         patcher = mock.patch("correction.import_core", return_value=FakeCore())
         patcher.start()
         self.addCleanup(patcher.stop)
 
     async def adapter(self, brain="Повтори?", **extra):
         adapter = Adapter({**self.env, **extra})
+        adapter.ha_client = ha_client.HaClient(self.store, discover_fn=lambda **_: [])
         adapter.turn = AsyncMock(return_value=brain)
         adapter.start = AsyncMock()
         adapter.close = AsyncMock()
         self.clock = Clock()
         adapter.intents.monotonic = self.clock
-        self.addAsyncCleanup(self.close_session, adapter)
         return adapter
-
-    @staticmethod
-    async def close_session(adapter):
-        if adapter.hacli_session is not None:
-            await adapter.hacli_session.close()
 
     async def spoken(self, adapter, text):
         ws = AsyncMock()
@@ -62,7 +60,7 @@ class ClarifyCase(unittest.IsolatedAsyncioTestCase):
         return reply["text"], reply["shouldListen"]
 
     def paused_calls(self):
-        return [call for call in self.fake.calls() if call[0].endswith("/media_pause")]
+        return [(path, body) for kind, path, body in self.fake.requests if kind == "WS" and path.endswith("/media_pause")]
 
 
 class IncidentTests(ClarifyCase):
@@ -137,7 +135,7 @@ class NothingToOfferTests(ClarifyCase):
         self.assertEqual(said, "Прозвучало «Ставьте их на паузу», но что сделать, не ясно.")
         self.assertFalse(listen)
         self.assertEqual(adapter.intents.correction, None)       # no dialog engine was even built
-        self.assertEqual(self.fake.calls("/api/states"), [])      # and Home Assistant was not read for it
+        self.assertEqual([r for r in self.fake.requests if r[0] == "GET" and r[1].startswith("/api/states")], [])      # and Home Assistant was not read for it
 
     async def test_an_emergency_phrase_is_never_turned_into_a_question(self):
         adapter = await self.adapter()

@@ -132,6 +132,11 @@ class DeviceDidNotObey(Stack):
         result, _ = self.call("light", "turn_off", {"entity_id": "light.studiia"})
         self.assertEqual((result.status, result.verify), (400, {"result": "skipped", "reason": "rejected"}))
 
+    def test_a_rejection_wins_when_the_device_already_is_in_the_state(self):
+        self.ha.script("light.turn_on", state_after=None, respond_after=0.0, status=400)
+        result, _ = self.call("light", "turn_on", {"entity_id": "light.studiia"})
+        self.assertEqual((result.status, result.verify), (400, {"result": "skipped", "reason": "rejected"}))   # «on» is no proof the call worked
+
 
 class AnAirConditionerTakesSeconds(Stack):
     """2026-11-15 and 2026-11-20: the state shows the OLD mode while Home Assistant's call is still running."""
@@ -223,11 +228,47 @@ class HomeAssistantIsGone(Stack):
         self.assertEqual((result.status, result.down), (0, "starting"))
 
     def test_a_connection_lost_in_flight_is_unknown_and_not_sent_again(self):
-        self.ha.script("light.turn_off", state_after=None, respond_after=None)
-        import threading
-        threading.Timer(0.3, self.ha.drop_sockets).start()
+        self.ha.script("light.turn_off", state_after=None, respond_after=None, on_receive=lambda ha: ha.drop_sockets())
         result, _ = self.call("light", "turn_off", {"entity_id": "light.studiia"})
         self.assertEqual((result.status, result.verify["reason"]), (504, "ha_down_in_flight"))
+        self.assertEqual(len([r for r in self.ha.requests if r[0] == "WS"]), 1)
+
+    def test_a_connection_lost_after_the_device_obeyed_is_judged_from_the_state(self):
+        """The call ran and the WebSocket died before either the event or the answer arrived: the device is the witness, not the silence."""
+        def obey_then_the_socket_dies(ha):
+            ha.states["light.studiia"]["state"] = "off"      # the state first: the drop wakes the caller, whose recovery read must see it
+            ha.drop_sockets()
+        self.ha.script("light.turn_off", state_after=None, respond_after=None, on_receive=obey_then_the_socket_dies)
+        result, _ = self.call("light", "turn_off", {"entity_id": "light.studiia"})
+        self.assertEqual((result.status, result.verify["result"], result.verify["reason"]), (200, "ok", "state_matched"))
+        self.assertEqual(len([r for r in self.ha.requests if r[0] == "WS"]), 1)   # and still sent once
+
+    def test_a_connection_lost_before_the_call_was_sent_never_confirms_it(self):
+        """Another controller already put the light where the call wants it, and the socket died while subscribing: this call was never sent."""
+        from unittest import mock
+        import ha_ws
+        real_send = ha_ws.Session.send
+
+        def send(session, type_, **fields):
+            if type_ == "subscribe_trigger":
+                self.ha.states["light.studiia"]["state"] = "off"
+                raise ha_ws.WsError("lost", "reset")
+            return real_send(session, type_, **fields)
+        with mock.patch.object(ha_ws.Session, "send", send):
+            result, _ = self.call("light", "turn_off", {"entity_id": "light.studiia"})
+        self.assertEqual((result.status, result.verify["result"], result.verify["reason"]), (504, "unknown", "ha_down_in_flight"))
+        self.assertEqual([r for r in self.ha.requests if r[0] == "WS"], [])
+
+    def test_a_state_that_could_not_be_read_after_the_loss_is_not_taken_from_before_the_call(self):
+        """Two lamps: one was already off and cannot be read any more, the other obeyed. Only fresh readings count; the first has none."""
+        def obey_and_lose_the_other(ha):
+            ha.states["light.studiia"]["state"] = "off"
+            del ha.states["light.kitchen"]
+            ha.drop_sockets()
+        self.ha.script("light.turn_off", state_after=None, respond_after=None, on_receive=obey_and_lose_the_other)
+        self.ha.states["light.kitchen"]["state"] = "off"
+        result, _ = self.call("light", "turn_off", {"entity_id": ["light.studiia", "light.kitchen"]})
+        self.assertEqual((result.status, result.verify["result"], result.verify["reason"]), (504, "unknown", "ha_down_in_flight"))
         self.assertEqual(len([r for r in self.ha.requests if r[0] == "WS"]), 1)
 
 

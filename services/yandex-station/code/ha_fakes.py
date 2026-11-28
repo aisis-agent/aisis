@@ -17,6 +17,7 @@ import re
 import secrets
 import socket
 import struct
+import sys
 import threading
 import time
 import urllib.parse
@@ -37,6 +38,7 @@ class Script:
     respond_after: float | None = 0.0     # Home Assistant answers the HTTP call this long after it arrived (None: never)
     status: int = 200
     effect: Callable[[dict, dict[str, dict]], None] | None = None   # replaces the default effect of the service
+    on_receive: Callable[["FakeHomeAssistant"], None] | None = None   # runs the moment the call arrives (before the answer): a lost connection, a change nobody published
 
 
 def default_effect(domain: str, service: str, body: dict, states: dict[str, dict]) -> None:
@@ -348,6 +350,10 @@ class FakeHomeAssistant:
         class Server(ThreadingHTTPServer):
             allow_reuse_address = True
             daemon_threads = True
+
+            def handle_error(self, request, client_address):
+                if not isinstance(sys.exc_info()[1], ConnectionError):   # a client that gives up mid-request (a budget that ended) is not news
+                    super().handle_error(request, client_address)
         self._server = Server(("127.0.0.1", self.port), _Handler)
         self._server.ha = self  # type: ignore[attr-defined]
         self.port = self._server.server_address[1]
@@ -396,6 +402,8 @@ class FakeHomeAssistant:
         answered); not answered means the answer never comes (a hung Home Assistant)."""
         script = self.scripts.get(f"{domain}.{service}", Script())
         arrived = time.monotonic()
+        if script.on_receive is not None:
+            script.on_receive(self)
         if script.state_after is not None:
             if script.state_after <= 0:
                 self._apply(domain, service, body, script)
