@@ -39,8 +39,9 @@ services:
     volumes:
       # Pre-synthesized filler phrases (gen_fillers.py), read-only.
       - /home/ultra/.cache/aisis/fillers:/src/fillers:ro
-      # Smart home: the connection store of the dashboard's Connect page (url + refresh token), read-only; no proxy, no token here.
-      - {type: bind, source: "${AISIS_HA_CONNECTION_DIR:-${HOME}/.config/aisis/ha}", target: /run/aisis-ha, read_only: true, bind: {create_host_path: false}}
+      # Home Assistant: the dashboard's connection store (address and credential), read-only.
+      # (long form: a missing directory is an error, never a root-owned directory the dashboard could not write into)
+      - {type: bind, source: /home/ultra/.config/aisis/ha, target: /run/aisis-ha, read_only: true, bind: {create_host_path: false}}
     depends_on:
       postgres:
         condition: service_healthy

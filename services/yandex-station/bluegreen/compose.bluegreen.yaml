@@ -36,8 +36,10 @@ x-prod-env: &prod-env
   POSTGRES_URL: "postgres://quasar:${POSTGRES_PASSWORD:?set in private env}@127.0.0.1:31119/quasar"
   PROCESSOR_BASIC_URL: "http://127.0.0.1:31117/processor"
   TTS_OPENAI_BASE_URL: "http://127.0.0.1:31117/v1"
-  # Smart home: the layer reads the connection store of the dashboard's Connect page (url + refresh token, mounted read-only at
-  # /run/aisis-ha/connection.json), signs in to Home Assistant's own API and follows its address when it changes. No proxy, no token here.
+  # Smart home: the layer reads Home Assistant's address and credential from the dashboard's connection store, mounted
+  # read-only at /run/aisis-ha (see the prod colors' volumes); no hand-typed URL or token, no proxy. The mount directory is created
+  # by the dashboard (0700, user-owned) before the first deploy. An image from before the direct connection (it read AISIS_HA_URL and
+  # AISIS_HA_TOKEN) has no Home Assistant under this file: it is not a rollback or restore target any more.
   # Phrases the owner confirmed once («да» → executes directly next time) must outlive a container recreate and
   # a blue/green flip; they used to live in the container's own filesystem and vanished with every deploy.
   AISIS_HA_AMBIGUITY_FILE: /state/ha.ambiguity.json
@@ -54,8 +56,9 @@ x-prod-env: &prod-env
   AISIS_EDGE_TOKEN: ${AISIS_EDGE_TOKEN:-}
 
 # Stage never reaches the real adapter, STT or Home Assistant: processor, TTS,
-# music and STT point at loopback ports nobody listens on, no Home Assistant connection is mounted
-# (the layer is disabled), the database is a private copy.
+# music and STT point at loopback ports nobody listens on, Home Assistant is not configured at all (no connection store is
+# mounted, so the layer is disabled: it can neither read nor deliver a service call to a real device), the database is a
+# private copy.
 x-stage-env: &stage-env
   <<: *quasar-env
   STT_GIGAAM_URL: "ws://127.0.0.1:31422"
@@ -65,7 +68,6 @@ x-stage-env: &stage-env
   # Voice «включи <музыка>» posts here instead of the real adapter; nothing listens
   # unless a stage check starts a recording mock, so stage can never play sound.
   AISIS_ADAPTER_MUSIC_URL: "http://127.0.0.1:31418/music/play"
-  # No Home Assistant connection store is mounted: the fast-intent layer is disabled («no config»), so stage can never reach a device.
   # /intent/decide EXECUTES timers on the adapter it reaches, and with host networking the default URL is the real adapter:
   # stage makes no grammar call at all.
   GRAMMAR_HOOK: "off"
@@ -97,9 +99,9 @@ services:
     environment: {<<: *prod-env, PORT: "31215", API_PORT: "31216", FUNCTION_STATE_SERVER_PORT: "31214"}
     volumes:
       - ${AISIS_FILLERS_DIR:-${HOME}/.cache/aisis/fillers}:/src/fillers:ro
-      - ${AISIS_QUASAR_STATE_DIR:-${HOME}/.local/state/aisis/quasar-prod}:/state
       # Long form: a missing directory is an error, never a root-owned directory the dashboard could not write into.
-      - {type: bind, source: "${AISIS_HA_CONNECTION_DIR:-${HOME}/.config/aisis/ha}", target: /run/aisis-ha, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${AISIS_HA_STORE_DIR:-${HOME}/.config/aisis/ha}", target: /run/aisis-ha, read_only: true, bind: {create_host_path: false}}
+      - ${AISIS_QUASAR_STATE_DIR:-${HOME}/.local/state/aisis/quasar-prod}:/state
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:31216/devices').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 5s
@@ -115,9 +117,9 @@ services:
     environment: {<<: *prod-env, PORT: "31315", API_PORT: "31316", FUNCTION_STATE_SERVER_PORT: "31314"}
     volumes:
       - ${AISIS_FILLERS_DIR:-${HOME}/.cache/aisis/fillers}:/src/fillers:ro
-      - ${AISIS_QUASAR_STATE_DIR:-${HOME}/.local/state/aisis/quasar-prod}:/state
       # Long form: a missing directory is an error, never a root-owned directory the dashboard could not write into.
-      - {type: bind, source: "${AISIS_HA_CONNECTION_DIR:-${HOME}/.config/aisis/ha}", target: /run/aisis-ha, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${AISIS_HA_STORE_DIR:-${HOME}/.config/aisis/ha}", target: /run/aisis-ha, read_only: true, bind: {create_host_path: false}}
+      - ${AISIS_QUASAR_STATE_DIR:-${HOME}/.local/state/aisis/quasar-prod}:/state
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:31316/devices').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 5s

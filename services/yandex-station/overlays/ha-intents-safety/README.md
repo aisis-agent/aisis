@@ -107,14 +107,23 @@ The output (`NEW_DIRECTORY`, a `deploy.sh --overlay SRC_DIR`) holds exactly five
 `backend/asr-correct.ts`, `backend/negation.ts` (new) and `routers/uniproxy/input-handler.ts`. It is byte-identical to the same files of
 the aisis-quasar fork commit that carries the patch (checked, hashes below).
 
+**Status.** The patch is folded into the fork (tag `aisis-bg-admission-safety-20261120` and later); the fork's later changes (the direct
+Home Assistant connection, `ha-connection.ts`, and per-home isolation of the layer's memories) mean its files are no longer byte-identical to
+this overlay's output, so the overlay only applies to the historical baselines hash-pinned below. The checks of the overlays
+(this one, speaker-room, intent-grammar, correction-hook, ac-defer) now target the direct-connection image: they reach Home Assistant
+the way that image does, through a connection store file (a temporary `AISIS_HA_STORE` with a long-lived test token and the mocked
+address `http://ha.test`; no `AISIS_HA_URL`/`AISIS_HA_TOKEN`, which the layer no longer reads). Run against a historical baseline
+(which reads those variables) they would find Home Assistant unconfigured: no such image is running or accepted any more, and the
+historical baselines are kept only as provenance.
+
 **Order in the combined build: this overlay goes LAST.** The overlays that also patch `backend/ha-intents.ts` (`correction-hook`,
-`ha-verify-wording`, `ac-defer-to-adapter`) pin their inputs to the image's file or to one another's output and cannot take this one's.
+`ac-defer-to-adapter`) pin their inputs to the image's file or to one another's output and cannot take this one's.
 Build their combined `ha-intents.ts` first (their documented chain), then run this script with `--ha-intents <that file>` and let its five
 files **replace** the combined directory's `ha-intents.ts` (this output already contains theirs) and add the other four. Checked against
 every shape those overlays produce (`run_check.sh --ha-intents …`, with the `correction-hook` overlay's `grammar-hook.ts` where its
-`ha-intents.ts` imports it): the image's file, `correction-hook`, `correction-hook` + `ha-verify-wording`, `ha-verify-wording`,
-`ac-defer-to-adapter`, and all of them together (the last one built by applying the text of the `ac-defer-to-adapter` block to the
-`correction-hook` + `ha-verify-wording` output, as their pins forbid chaining them): the blocks never overlap theirs (the one shared line, the terminator handler's
+`ha-intents.ts` imports it): the image's file, `correction-hook`, `ac-defer-to-adapter`, and both together (the last one built by
+applying the text of the `ac-defer-to-adapter` block to the `correction-hook` output, as their pins forbid chaining them): the blocks
+never overlap theirs (the one shared line, the terminator handler's
 `pendingClarification = null`, is the two-shape block above), and `ИТОГ 170/170` with the overlay, 86/170 or 88/170 without (the
 `ac-defer-to-adapter` input already hands the AC phrases to the adapter). If another overlay patches `input-handler.ts`, pass its output
 with `--input-handler`.

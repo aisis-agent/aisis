@@ -7,11 +7,12 @@
 //    question is a «нет», not a «да» («не делай», «не давай»).
 // 2. Several stations (three speakers in the home): a question asked on one is answered on that one, «повтори» repeats what
 //    the speaker that says it heard, and none of that memory grows without bound for made-up station ids.
-import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 
 const AMBIGUITY_FILE = `/tmp/ha-ambiguity-safety-${process.pid}.json`
-process.env.AISIS_HA_URL = 'http://ha.test'
-process.env.AISIS_HA_TOKEN = 'test-token'
+const HA_STORE_FILE = `/tmp/ha-store-safety-${process.pid}.json`
+writeFileSync(HA_STORE_FILE, JSON.stringify({ auth: { kind: 'long_lived', token: 'test-token' }, client_id: '', connected_at: 0, name: 'test', url: 'http://ha.test', uuid: 'test', version: 1 }))
+process.env.AISIS_HA_STORE = HA_STORE_FILE
 process.env.AISIS_HA_AMBIGUITY_FILE = AMBIGUITY_FILE
 process.env.SEMANTIC_INTENTS = 'off'
 rmSync(AMBIGUITY_FILE, { force: true })
@@ -382,5 +383,6 @@ const brainTurn = (station: string, spoken: string) => ({ action: null, asked: f
 }
 
 rmSync(AMBIGUITY_FILE, { force: true })
+rmSync(HA_STORE_FILE, { force: true })
 console.log(`\nИТОГ ${total - failed}/${total}`)
 process.exit(failed === 0 ? 0 : 1)

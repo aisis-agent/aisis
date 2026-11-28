@@ -5,6 +5,7 @@
 //     -v "$OVERLAY/backend/ha-intents.ts:/src/backend/ha-intents.ts:ro" \
 //     -v "$OVERLAY/backend/asr-correct.ts:/src/backend/asr-correct.ts:ro" \
 //     -v "$OVERLAY/backend/grammar-hook.ts:/src/backend/grammar-hook.ts:ro" IMAGE /src/backend/check_grammar_hook.mts
+import { rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 
@@ -15,9 +16,8 @@ interface Layer {
 }
 interface Protobuf { encodeProtobufStruct: (value: Record<string, unknown>) => unknown }
 
-// The HA client of the fast layer is configured by env and pointed at the stub below (an empty home): nothing here
+// The HA connection of the fast layer is a store file (AISIS_HA_STORE) pointing at the stub below (an empty home): nothing here
 // ever reaches a real Home Assistant.
-process.env.AISIS_HA_TOKEN = 'check-only'
 
 interface Call { authorization?: string, body: { dialogActive?: boolean, shadow?: boolean, text?: string } }
 const calls: Call[] = []
@@ -40,7 +40,10 @@ const server = createServer((request, response) => {
 })
 await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
 const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-process.env.AISIS_HA_URL = base
+const HA_STORE_FILE = `/tmp/ha-store-grammar-hook-${process.pid}.json`
+writeFileSync(HA_STORE_FILE, JSON.stringify({ auth: { kind: 'long_lived', token: 'check-only' }, client_id: '', connected_at: 0, name: 'test', url: base, uuid: 'test', version: 1 }))
+process.env.AISIS_HA_STORE = HA_STORE_FILE
+process.on('exit', () => rmSync(HA_STORE_FILE, { force: true }))
 process.env.AISIS_ADAPTER_INTENT_URL = `${base}/intent/decide`
 
 // The image compiles to CommonJS: named exports arrive on `default`.
