@@ -331,12 +331,17 @@ class DependencyInspectionTests(unittest.TestCase):
                      "packages": [{"root": str(self.package), "entries": [{"path": "index.js"}]}],
                      "excluded": [], "sources": []}
 
+    # Every inspection hashes the whole node binary (CONTAINER_CHECK reports node_sha256, ~150 MB), so its cost is the machine's disk and
+    # CPU contention, not the check's logic: ~0.15 s idle, 7 s when 32 runs share one core (measured), and once more than 5 s on a shared CI
+    # runner whose page cache was cold. The bound only separates "finishes" from "hangs"; production's own call allows 45 s.
+    INSPECT_TIMEOUT_S = 45
+
     def inspect(self):
         node = shutil.which("node")
         self.assertIsNotNone(node, "CI must provide the existing Node test runtime")
         return subprocess.run([node, "-e", gate.CONTAINER_CHECK], input=json.dumps(self.spec),
                               env={"PATH": os.environ.get("PATH", ""), "HOME": str(self.root)},
-                              capture_output=True, text=True, timeout=5)
+                              capture_output=True, text=True, timeout=self.INSPECT_TIMEOUT_S)
 
     def test_positive_declared_package_and_explicit_mode(self):
         result = self.inspect()
