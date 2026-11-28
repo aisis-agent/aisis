@@ -8,8 +8,8 @@
 <rect x="20" y="708" width="520" height="426" rx="10" fill="#f6f8f9" stroke="#90a4ae" stroke-width="1.5"/><text x="32" y="731" font-size="16" font-weight="bold" fill="#263238">④ ASR</text><text x="528" y="731" text-anchor="end" font-size="14" font-style="italic" fill="#455a64">speech to text</text>
 <rect x="600" y="708" width="900" height="426" rx="10" fill="#f6f8f9" stroke="#90a4ae" stroke-width="1.5"/><text x="612" y="731" font-size="16" font-weight="bold" fill="#263238">⑤ NLU · DIALOG · SKILLS</text><text x="1488" y="731" text-anchor="end" font-size="14" font-style="italic" fill="#455a64">aisis-station-adapter :31117 (Python)</text>
 <rect x="1560" y="708" width="620" height="426" rx="10" fill="#f6f8f9" stroke="#90a4ae" stroke-width="1.5"/><text x="1572" y="731" font-size="16" font-weight="bold" fill="#263238">⑥ TTS</text><text x="2168" y="731" text-anchor="end" font-size="14" font-style="italic" fill="#455a64">text to audio out</text>
-<rect x="20" y="1254" width="1392" height="326" rx="10" fill="#f6f8f9" stroke="#90a4ae" stroke-width="1.5"/><text x="32" y="1277" font-size="16" font-weight="bold" fill="#263238">⑦ EXECUTION: home, media, weather</text>
-<rect x="1472" y="1254" width="708" height="326" rx="10" fill="#f6f8f9" stroke="#90a4ae" stroke-width="1.5"/><text x="1484" y="1277" font-size="16" font-weight="bold" fill="#263238">⑧ BRAIN</text><text x="2168" y="1277" text-anchor="end" font-size="14" font-style="italic" fill="#455a64">language model, no tools</text>
+<rect x="20" y="1254" width="1059" height="326" rx="10" fill="#f6f8f9" stroke="#90a4ae" stroke-width="1.5"/><text x="32" y="1277" font-size="16" font-weight="bold" fill="#263238">⑦ EXECUTION: home, media, weather</text>
+<rect x="1139" y="1254" width="1041" height="326" rx="10" fill="#f6f8f9" stroke="#90a4ae" stroke-width="1.5"/><text x="1151" y="1277" font-size="16" font-weight="bold" fill="#263238">⑧ BRAIN</text><text x="2168" y="1277" text-anchor="end" font-size="14" font-style="italic" fill="#455a64">language model, no tools</text>
 <rect x="20" y="1616" width="2160" height="136" rx="10" fill="#f6f8f9" stroke="#90a4ae" stroke-width="1.5"/><text x="32" y="1639" font-size="16" font-weight="bold" fill="#263238">⑨ OPS</text><text x="2168" y="1639" text-anchor="end" font-size="14" font-style="italic" fill="#455a64">monitoring, deploy, feedback: not on the request path</text>
 <path d="M 406,202.0 L 494,202.0" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
 <path d="M 680.0,272 L 680.0,302" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
@@ -20,18 +20,19 @@
 <path d="M 1008,254 L 1008,580 L 334,580 L 334,744" fill="none" stroke="#37474f" stroke-width="2.2" marker-start="url(#arr)" marker-end="url(#arr)" stroke-linejoin="round"/>
 <path d="M 280.0,866 L 280.0,896" fill="none" stroke="#37474f" stroke-width="2.2" marker-start="url(#arr)" marker-end="url(#arr)" stroke-linejoin="round"/>
 <path d="M 280.0,1030 L 280.0,1000" fill="none" stroke="#37474f" stroke-width="2.2" stroke-dasharray="9 6" marker-end="url(#arr)" stroke-linejoin="round"/>
-<path d="M 1425,272 L 1425,602 L 570.5,602 L 570.5,1290" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
+<path d="M 1425,272 L 1425,602 L 195.5,602 L 195.5,1290" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
 <path d="M 1559.5,272 L 1559.5,624 L 844,624 L 844,744" fill="none" stroke="#37474f" stroke-width="2.2" stroke-dasharray="9 6" marker-end="url(#arr)" stroke-linejoin="round"/>
 <path d="M 1966.5,272 L 1966.5,646 L 954,646 L 954,744" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
 <path d="M 2091,272 L 2091,580 L 1870.0,580 L 1870.0,744" fill="none" stroke="#37474f" stroke-width="2.2" marker-start="url(#arr)" marker-end="url(#arr)" stroke-linejoin="round"/>
 <path d="M 1870.0,830 L 1870.0,860" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
-<path d="M 413,1351.0 L 353,1342.0" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
-<path d="M 1274.0,996 L 1274.0,1134 L 1274.0,1158 L 640.5,1158 L 640.5,1290" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
+<path d="M 993.5,1290 L 993.5,1222 L 125.5,1222 L 125.5,1290" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
+<path d="M 34,1693.0 L 28,1693.0 L 28,1351.0 L 38,1351.0" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
+<path d="M 1274.0,996 L 1274.0,1134 L 1274.0,1158 L 265.5,1158 L 265.5,1290" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
+<path d="M 1274.0,1158 L 570.5,1158 L 570.5,1290" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
 <path d="M 1274.0,1158 L 903.5,1158 L 903.5,1290" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
-<path d="M 1274.0,1158 L 1236.5,1158 L 1236.5,1290" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
-<path d="M 829.0,996 L 829.0,1190 L 1826.0,1190 L 1826.0,1290" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
-<path d="M 1716.0,1394 L 1716.0,1422" fill="none" stroke="#37474f" stroke-width="2.2" stroke-dasharray="9 6" marker-end="url(#arr)" stroke-linejoin="round"/>
-<path d="M 1936.0,1394 L 1936.0,1422" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
+<path d="M 829.0,996 L 829.0,1190 L 1659.5,1190 L 1659.5,1290" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
+<path d="M 1549.5,1376 L 1549.5,1404" fill="none" stroke="#37474f" stroke-width="2.2" stroke-dasharray="9 6" marker-end="url(#arr)" stroke-linejoin="round"/>
+<path d="M 1769.5,1376 L 1769.5,1404" fill="none" stroke="#37474f" stroke-width="2.2" marker-end="url(#arr)" stroke-linejoin="round"/>
 <rect x="34" y="132" width="372" height="140" rx="16" fill="#e0e0e0" stroke="#616161" stroke-width="2"/>
 <text x="220.0" y="163" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">Yandex Station Mini (rooted)</text>
 <text x="220.0" y="187" text-anchor="middle" font-size="14" fill="#222">vendor firmware; the wake-word spotter and</text>
@@ -132,28 +133,23 @@
 <text x="1870.0" y="891" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">Fish Audio / Yandex TTS</text>
 <text x="1870.0" y="915" text-anchor="middle" font-size="14" fill="#222">voice «Брачо» (Fish) by default; Alice voice through the uniproxy WS</text>
 <text x="1870.0" y="937" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">external services</text>
-<rect x="38" y="1290" width="315" height="104" rx="32" fill="#bbdefb" stroke="#1565c0" stroke-width="2"/>
+<rect x="38" y="1290" width="315" height="122" rx="32" fill="#bbdefb" stroke="#1565c0" stroke-width="2"/>
 <text x="195.5" y="1321" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">Home Assistant 2026.9.3</text>
 <text x="195.5" y="1345" text-anchor="middle" font-size="14" fill="#222">image home-assistant:stable on the</text>
-<text x="195.5" y="1363" text-anchor="middle" font-size="14" fill="#222">odroid, REST :8123</text>
-<text x="195.5" y="1385" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">upstream + our config</text>
-<rect x="413" y="1290" width="315" height="122" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2"/>
-<text x="570.5" y="1321" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">aisis-ha-cli :8795</text>
-<text x="570.5" y="1345" text-anchor="middle" font-size="14" fill="#222">Python proxy for Home Assistant:</text>
-<text x="570.5" y="1363" text-anchor="middle" font-size="14" fill="#222">state cache, offline queue of</text>
-<text x="570.5" y="1381" text-anchor="middle" font-size="14" fill="#222">service calls</text>
-<text x="570.5" y="1403" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">own</text>
-<rect x="746" y="1290" width="315" height="104" rx="32" fill="#bbdefb" stroke="#1565c0" stroke-width="2"/>
-<text x="903.5" y="1321" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">Music Assistant 2.10.4</text>
-<text x="903.5" y="1345" text-anchor="middle" font-size="14" fill="#222">ghcr.io/music-assistant/server on</text>
-<text x="903.5" y="1363" text-anchor="middle" font-size="14" fill="#222">the odroid; AirPlay to the speaker</text>
-<text x="903.5" y="1385" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">upstream + our config</text>
-<polygon points="1095,1290 1394,1290 1378,1412 1079,1412" fill="#b2dfdb" stroke="#00695c" stroke-width="2"/>
-<text x="1236.5" y="1321" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">weather-cli 0.2.0</text>
-<text x="1236.5" y="1345" text-anchor="middle" font-size="14" fill="#222">Python, `weather say</text>
-<text x="1236.5" y="1363" text-anchor="middle" font-size="14" fill="#222">--now|--tomorrow|...`: HA +</text>
-<text x="1236.5" y="1381" text-anchor="middle" font-size="14" fill="#222">Open-Meteo, Russian phrases</text>
-<text x="1236.5" y="1403" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">own repo, MIT</text>
+<text x="195.5" y="1363" text-anchor="middle" font-size="14" fill="#222">odroid, standard REST + WebSocket</text>
+<text x="195.5" y="1381" text-anchor="middle" font-size="14" fill="#222">API :8123</text>
+<text x="195.5" y="1403" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">upstream + our config</text>
+<rect x="413" y="1290" width="315" height="104" rx="32" fill="#bbdefb" stroke="#1565c0" stroke-width="2"/>
+<text x="570.5" y="1321" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">Music Assistant 2.10.4</text>
+<text x="570.5" y="1345" text-anchor="middle" font-size="14" fill="#222">ghcr.io/music-assistant/server on</text>
+<text x="570.5" y="1363" text-anchor="middle" font-size="14" fill="#222">the odroid; AirPlay to the speaker</text>
+<text x="570.5" y="1385" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">upstream + our config</text>
+<polygon points="762,1290 1061,1290 1045,1412 746,1412" fill="#b2dfdb" stroke="#00695c" stroke-width="2"/>
+<text x="903.5" y="1321" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">weather-cli 0.2.0</text>
+<text x="903.5" y="1345" text-anchor="middle" font-size="14" fill="#222">Python, `weather say</text>
+<text x="903.5" y="1363" text-anchor="middle" font-size="14" fill="#222">--now|--tomorrow|...`: HA +</text>
+<text x="903.5" y="1381" text-anchor="middle" font-size="14" fill="#222">Open-Meteo, Russian phrases</text>
+<text x="903.5" y="1403" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">own repo, MIT</text>
 <rect x="38" y="1440" width="315" height="122" fill="#f8bbd0" stroke="#ad1457" stroke-width="3" stroke-dasharray="3 3"/>
 <text x="195.5" y="1471" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">aisis_speaker component</text>
 <text x="195.5" y="1495" text-anchor="middle" font-size="14" fill="#222">HA media_player, notify, sensor of</text>
@@ -164,20 +160,18 @@
 <text x="737.0" y="1471" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">remote_announcements, ha-host-actions</text>
 <text x="737.0" y="1495" text-anchor="middle" font-size="14" fill="#222">HA component and the Kodi/host action bridge (HA config repos)</text>
 <text x="737.0" y="1517" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">own repos ha-configs-*</text>
-<rect x="1490" y="1290" width="672" height="104" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2"/>
-<text x="1826.0" y="1321" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">claude_primary.py router</text>
-<text x="1826.0" y="1345" text-anchor="middle" font-size="14" fill="#222">Claude API first (credential slots), guarded ChatGPT web as the last reserve; no</text>
-<text x="1826.0" y="1363" text-anchor="middle" font-size="14" fill="#222">tools</text>
-<text x="1826.0" y="1385" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">own; pinned release dir, branch not merged</text>
-<rect x="1490" y="1422" width="327" height="104" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2"/>
-<text x="1653.5" y="1453" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">aisis-station-pm :31118</text>
-<text x="1653.5" y="1477" text-anchor="middle" font-size="14" fill="#222">ChatGPT tab driven through CDP :9226</text>
-<text x="1653.5" y="1495" text-anchor="middle" font-size="14" fill="#222">(chatgpt-guardian)</text>
-<text x="1653.5" y="1517" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">own + own repo agent-tools</text>
-<polygon points="1853,1422 2144,1422 2162,1474.0 2144,1526 1853,1526 1835,1474.0" fill="#e1bee7" stroke="#6a1b9a" stroke-width="2"/>
-<text x="1998.5" y="1453" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">Claude API / ChatGPT</text>
-<text x="1998.5" y="1477" text-anchor="middle" font-size="14" fill="#222">Anthropic, OpenAI</text>
-<text x="1998.5" y="1499" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">external services</text>
+<rect x="1157" y="1290" width="1005" height="86" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2"/>
+<text x="1659.5" y="1321" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">claude_primary.py router</text>
+<text x="1659.5" y="1345" text-anchor="middle" font-size="14" fill="#222">Claude API first (credential slots), guarded ChatGPT web as the last reserve; no tools</text>
+<text x="1659.5" y="1367" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">own; pinned release dir, branch not merged</text>
+<rect x="1157" y="1404" width="493" height="86" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2"/>
+<text x="1403.5" y="1435" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">aisis-station-pm :31118</text>
+<text x="1403.5" y="1459" text-anchor="middle" font-size="14" fill="#222">ChatGPT tab driven through CDP :9226 (chatgpt-guardian)</text>
+<text x="1403.5" y="1481" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">own + own repo agent-tools</text>
+<polygon points="1686,1404 2143,1404 2161,1447.0 2143,1490 1686,1490 1668,1447.0" fill="#e1bee7" stroke="#6a1b9a" stroke-width="2"/>
+<text x="1914.5" y="1435" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">Claude API / ChatGPT</text>
+<text x="1914.5" y="1459" text-anchor="middle" font-size="14" fill="#222">Anthropic, OpenAI</text>
+<text x="1914.5" y="1481" text-anchor="middle" font-size="13" font-style="italic" fill="#3b3b3b">external services</text>
 <rect x="34" y="1650" width="330" height="86" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2"/>
 <text x="199.0" y="1681" text-anchor="middle" font-size="17" font-weight="bold" fill="#1b1b1b">aisis-dashboard :8781</text>
 <text x="199.0" y="1705" text-anchor="middle" font-size="14" fill="#222">Python HTTP + session pages</text>
@@ -230,10 +224,10 @@
 <text x="254.0325" y="886.0" font-size="13" fill="#1a237e">Wyoming TCP</text>
 <circle cx="234.0325" cy="881.0" r="12" fill="#0d47a1"/>
 <text x="234.0325" y="886.0" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">4</text>
-<rect x="1061.6975" y="590" width="132.10500000000002" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
-<text x="1094.6975" y="607" font-size="13" fill="#1a237e">HA REST :8795</text>
-<circle cx="1074.6975" cy="602" r="12" fill="#0d47a1"/>
-<text x="1074.6975" y="607" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">7</text>
+<rect x="856.485" y="590" width="167.53000000000003" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
+<text x="889.485" y="607" font-size="13" fill="#1a237e">HA REST + WS :8123</text>
+<circle cx="869.485" cy="602" r="12" fill="#0d47a1"/>
+<text x="869.485" y="607" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">7</text>
 <rect x="1047.725" y="612" width="252.55" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
 <text x="1080.725" y="629" font-size="13" fill="#1a237e">unanswered turn: WS /processor</text>
 <circle cx="1060.725" cy="624" r="12" fill="#0d47a1"/>
@@ -248,22 +242,24 @@
 <text x="1808.6075" y="585" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">8</text>
 <rect x="1845.2875" y="833.0" width="49.425000000000004" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
 <text x="1852.2875" y="850.0" font-size="13" fill="#1a237e">HTTPS</text>
-<rect x="340.575" y="1305.0" width="84.85000000000001" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
-<text x="347.575" y="1322.0" font-size="13" fill="#1a237e">REST :8123</text>
-<rect x="552.0225" y="1212.0" width="176.955" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
-<text x="559.0225" y="1229.0" font-size="13" fill="#1a237e">lights, climate, timers</text>
-<rect x="878.7875" y="1212.0" width="49.425000000000004" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
-<text x="885.7875" y="1229.0" font-size="13" fill="#1a237e">music</text>
-<rect x="1204.7025" y="1212.0" width="63.595000000000006" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
-<text x="1211.7025" y="1229.0" font-size="13" fill="#1a237e">weather</text>
-<rect x="1352.0125" y="1178" width="287.975" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
-<text x="1385.0125" y="1195" font-size="13" fill="#1a237e">B: no skill answered, ask the brain</text>
-<circle cx="1365.0125" cy="1190" r="12" fill="#0d47a1"/>
-<text x="1365.0125" y="1195" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">B</text>
-<rect x="1655.8625" y="1396.0" width="120.275" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
-<text x="1662.8625" y="1413.0" font-size="13" fill="#1a237e">ChatGPT reserve</text>
-<rect x="1911.2875" y="1396.0" width="49.425000000000004" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
-<text x="1918.2875" y="1413.0" font-size="13" fill="#1a237e">HTTPS</text>
+<rect x="482.0225" y="1210" width="176.955" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
+<text x="489.0225" y="1227" font-size="13" fill="#1a237e">weather-cli: REST :8123</text>
+<rect x="50.894999999999996" y="1673.0" width="198.21" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
+<text x="57.894999999999996" y="1690.0" font-size="13" fill="#1a237e">dashboard: REST + WS :8123</text>
+<rect x="116.79999999999998" y="1212.0" width="297.40000000000003" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
+<text x="123.79999999999998" y="1229.0" font-size="13" fill="#1a237e">lights, climate, timers: REST + WS :8123</text>
+<rect x="545.7875" y="1212.0" width="49.425000000000004" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
+<text x="552.7875" y="1229.0" font-size="13" fill="#1a237e">music</text>
+<rect x="871.7025" y="1212.0" width="63.595000000000006" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
+<text x="878.7025" y="1229.0" font-size="13" fill="#1a237e">weather</text>
+<rect x="1185.5125" y="1178" width="287.975" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
+<text x="1218.5125" y="1195" font-size="13" fill="#1a237e">B: no skill answered, ask the brain</text>
+<circle cx="1198.5125" cy="1190" r="12" fill="#0d47a1"/>
+<text x="1198.5125" y="1195" text-anchor="middle" font-size="13" font-weight="bold" fill="#fff">B</text>
+<rect x="1489.3625" y="1378.0" width="120.275" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
+<text x="1496.3625" y="1395.0" font-size="13" fill="#1a237e">ChatGPT reserve</text>
+<rect x="1744.7875" y="1378.0" width="49.425000000000004" height="24" rx="7" fill="#fff" stroke="#9fa8da" stroke-width="1"/>
+<text x="1751.7875" y="1395.0" font-size="13" fill="#1a237e">HTTPS</text>
 <rect x="20" y="1776" width="2160" height="132" rx="10" fill="#fff" stroke="#90a4ae" stroke-width="1.5"/>
 <text x="32" y="1799" font-size="16" font-weight="bold" fill="#263238">LEGEND: provenance = color + shape + border. Numbered circles = the request path of one spoken command; dashed = fallback or side path</text>
 <rect x="34" y="1818" width="56" height="30" fill="#c8e6c9" stroke="#2e7d32" stroke-width="2"/>

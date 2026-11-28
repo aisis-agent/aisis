@@ -162,8 +162,8 @@ GAP_B = 150
 RB = TOP + rowA_h + GAP_B
 CW = 315
 HA_GAP = 60
-HACLI_CX = 20 + 18 + CW + HA_GAP + CW / 2
-asr_w, nlu_w, tts_w = int(HACLI_CX - 30 - 20), 900, 0
+MA_CX = 20 + 18 + CW + HA_GAP + CW / 2
+asr_w, nlu_w, tts_w = int(MA_CX - 30 - 20), 900, 0
 asr_x = 20
 nlu_x = asr_x + asr_w + 60
 tts_x = nlu_x + nlu_w + 60
@@ -198,17 +198,15 @@ RC = RB + rowB_h + GAP_C
 ex_x = 20
 cw = CW
 ha = N("ha", ex_x + 18, RC + 36, cw, "cfg", "Home Assistant 2026.9.3",
-       ["image home-assistant:stable on the odroid, REST :8123"], "upstream + our config")
-hacli = N("hacli", ha.r + HA_GAP, RC + 36, cw, "own", "aisis-ha-cli :8795",
-          ["Python proxy for Home Assistant: state cache, offline queue of service calls"], "own")
-ma = N("ma", hacli.r + 18, RC + 36, cw, "cfg", "Music Assistant 2.10.4",
+       ["image home-assistant:stable on the odroid, standard REST + WebSocket API :8123"], "upstream + our config")
+ma = N("ma", ha.r + HA_GAP, RC + 36, cw, "cfg", "Music Assistant 2.10.4",
        ["ghcr.io/music-assistant/server on the odroid; AirPlay to the speaker"], "upstream + our config")
 wcli = N("wcli", ma.r + 18, RC + 36, cw, "ownrepo", "weather-cli 0.2.0",
          ["Python, `weather say --now|--tomorrow|...`: HA + Open-Meteo, Russian phrases"], "own repo, MIT")
-row1b = max(ha.b, hacli.b, ma.b, wcli.b)
+row1b = max(ha.b, ma.b, wcli.b)
 asp = N("asp", ha.x, row1b + 28, cw, "vend", "aisis_speaker component",
         ["HA media_player, notify, sensor of the speaker; adopted from the installed copy"], "vendored, author UNKNOWN")
-rem = N("rem", hacli.x, row1b + 28, cw * 2 + 18, "ownrepo", "remote_announcements, ha-host-actions",
+rem = N("rem", ma.x, row1b + 28, cw * 2 + 18, "ownrepo", "remote_announcements, ha-host-actions",
         ["HA component and the Kodi/host action bridge (HA config repos)"], "own repos ha-configs-*")
 ex_w = wcli.r + 18 - ex_x
 rowC_h = max(ha.b, asp.b, rem.b) + 18 - RC
@@ -257,16 +255,16 @@ edge([(kit.cx, kit.y), (kit.cx, station.b)], "sync + ADB", None, dashed=True)
 edge([(core.x + 50, core.b), (core.x + 50, L[0]), (stt.x + 300, L[0]), (stt.x + 300, stt.y)], "PCM up, text down, WS", "3/5", both=True, at=((core.x + 50 + stt.x + 300) / 2 + 60, L[0]))
 edge([(stt.cx, stt.b), (stt.cx, wh.y)], "Wyoming TCP", 4, both=True)
 edge([(wpt.cx, wpt.y), (wpt.cx, wh.b)], None, dashed=True)
-edge([(fast.x + 60, fast.b), (fast.x + 60, L[1]), (hacli.cx, L[1]), (hacli.cx, hacli.y)], "HA REST :8795", 7, at=((fast.x + 60 + hacli.cx) / 2 + 130, L[1]))
+edge([(fast.x + 60, fast.b), (fast.x + 60, L[1]), (ha.cx, L[1]), (ha.cx, ha.y)], "HA REST + WS :8123", 7, at=((fast.x + 60 + ha.cx) / 2 + 130, L[1]))
 edge([(fast.cx, fast.b), (fast.cx, L[2]), (gr.x + 230, L[2]), (gr.x + 230, gr.y)], "unanswered turn: WS /processor", "A", dashed=True, at=(gr.x + 230 + 330, L[2]))
 edge([(hook.cx, hook.b), (hook.cx, L[3]), (gr.x + 340, L[3]), (gr.x + 340, gr.y)], "POST /intent/decide, 250 ms", 6, at=(gr.x + 340 + 330, L[3]))
 edge([(hook.r - 70, hook.b), (hook.r - 70, L[0]), (tts.cx, L[0]), (tts.cx, tts.y)], "POST /v1/audio/speech", 8, both=True, at=(tts.cx + 20, L[0]))
 edge([(tts.cx, tts.b), (tts.cx, fish.y)], "HTTPS", None)
-edge([(hacli.cx, hacli.b), (hacli.cx, hacli.b)], None) if False else None
-edge([(hacli.x, hacli.cy), (ha.r, ha.cy)], "REST :8123", None, at=((hacli.x + ha.r) / 2, hacli.cy - 34))
 nb = RB + rowB_h
-LC = [nb + 24, nb + 56]
-edge([(sk.cx, sk.b), (sk.cx, nb + 0), (sk.cx, LC[0]), (hacli.cx + 70, LC[0]), (hacli.cx + 70, hacli.y)], "lights, climate, timers", None, at=(hacli.cx + 70, (LC[0] + hacli.y) / 2))
+LC = [nb + 24, nb + 56, nb + 88]
+edge([(wcli.cx + 90, wcli.y), (wcli.cx + 90, LC[2]), (ha.cx - 70, LC[2]), (ha.cx - 70, ha.y)], "weather-cli: REST :8123", None, at=(ma.cx, LC[2]))
+edge([(dash_.x, dash_.cy), (28, dash_.cy), (28, ha.cy), (ha.x, ha.cy)], "dashboard: REST + WS :8123", None, at=(150, dash_.cy - 8))
+edge([(sk.cx, sk.b), (sk.cx, nb + 0), (sk.cx, LC[0]), (ha.cx + 70, LC[0]), (ha.cx + 70, ha.y)], "lights, climate, timers: REST + WS :8123", None, at=(ha.cx + 70, (LC[0] + ha.y) / 2))
 edge([(sk.cx, LC[0]), (ma.cx, LC[0]), (ma.cx, ma.y)], "music :31117/music/play", None, at=(ma.cx + 70, LC[0] + 0)) if False else None
 edge([(sk.cx, LC[0]), (ma.cx, LC[0]), (ma.cx, ma.y)], "music", None, at=(ma.cx, (LC[0] + ma.y) / 2))
 edge([(sk.cx, LC[0]), (wcli.cx, LC[0]), (wcli.cx, wcli.y)], "weather", None, at=(wcli.cx, (LC[0] + wcli.y) / 2))

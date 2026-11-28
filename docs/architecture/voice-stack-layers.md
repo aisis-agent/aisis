@@ -70,7 +70,6 @@ flowchart TB
   subgraph S_EXEC["7 EXECUTION: home, media, weather"]
     direction LR
     HA(["<b>Home Assistant</b> 2026.9.3<br/>odroid, docker"])
-    HACLI["<b>aisis-ha-cli</b> :8795<br/>state cache, offline queue"]
     MA(["<b>Music Assistant</b> 2.10.4"])
     WCLI[/"<b>weather-cli</b> own repo"/]
     ASP["<b>aisis_speaker</b> HA component<br/>vendored, author UNKNOWN"]
@@ -105,9 +104,10 @@ flowchart TB
   QFAST --> QHOOK
   QHOOK -- "6 POST /intent/decide" --> GR
   QCORE -. "A unanswered: WS /processor" .-> GR
-  QFAST -- "7 HA REST :8795" --> HACLI
-  HACLI --> HA
-  SK --> HACLI
+  QFAST -- "7 HA REST + WS :8123" --> HA
+  SK -- "REST + WS :8123" --> HA
+  WCLI -- "REST :8123" --> HA
+  DASH -- "REST + WS :8123" --> HA
   SK --> MA
   SK --> WCLI
   GR --> SK
@@ -134,7 +134,7 @@ flowchart TB
   classDef ext fill:#e1bee7,stroke:#6a1b9a,color:#1b1b1b,stroke-width:2px
   classDef unk fill:#fff9c4,stroke:#f9a825,color:#1b1b1b,stroke-width:3px,stroke-dasharray:6 4
   classDef vend fill:#f8bbd0,stroke:#ad1457,color:#1b1b1b,stroke-width:2px
-  class DNS,SW,QFAST,QHOOK,STT,WPT,GR,MEM,SK,TTS,HACLI,CP,PM,DASH,CLIP,FO,BG own
+  class DNS,SW,QFAST,QHOOK,STT,WPT,GR,MEM,SK,TTS,CP,PM,DASH,CLIP,FO,BG own
   class DEV asis
   class WH,PG,HA,MA,TLS cfg
   class KIT,QCORE fork
@@ -190,8 +190,10 @@ So the three plug-in points the upstream server exposes (STT, processor, TTS) ar
    advisory classifier, off by default.
 6. **TTS.** The adapter synthesises every spoken reply, whoever decided it: voice «Брачо» through Fish Audio by default,
    the Alice voice through Yandex's uniproxy, SpeechKit optional; ffmpeg turns it into Ogg Opus.
-7. **Execution.** `aisis-ha-cli` is the always-on proxy for Home Assistant (state cache, queue of calls while HA
-   restarts). Home Assistant and Music Assistant run in docker on the odroid. `weather-cli` answers weather.
+7. **Execution.** Every component (the quasar fast-intent layer, the adapter, `weather-cli`, the dashboard) talks to
+   Home Assistant directly through its standard REST/WebSocket API on :8123, with one shared client and the connection
+   the dashboard `/ha` page stores. No proxy, no state cache, no queue of calls: a call is done when the device says so.
+   Home Assistant and Music Assistant run in docker on the odroid. `weather-cli` answers weather.
 8. **Brain.** Only for what nothing else answered. No tools: it can talk, not act. The traces of 2026-11-18 show provider `claude`,
    model `claude-sonnet-5-5`; the ChatGPT web tab (driven through CDP by `aisis-station-pm`) is the reserve.
 9. **Ops.** Dashboard, clip feed to Telegram (every heard utterance becomes a post, owner replies become ASR truth),
@@ -291,8 +293,8 @@ The adapter stores one record per call it was asked (`utterance_traces` in `dial
 
 - **A light command («включи свет»).** The device or the gateway turns it into text; the quasar pre-checks pass; the hook
   asks the adapter and gets `none`; the quasar HA catalog resolves device and room (the room is the HA area of the
-  speaker that heard it), calls Home Assistant through `aisis-ha-cli` and the Station plays an earcon. If HA is restarting
-  the answer is a spoken «Умный дом перезагружается …». The adapter only supplies speech when there is text to say.
+  speaker that heard it), calls Home Assistant directly (WebSocket `call_service`) and the Station plays an earcon once the device confirms. If
+  Home Assistant is unreachable nothing is sent and the answer is a spoken «Home Assistant сейчас недоступен, команда не выполнена.» The adapter only supplies speech when there is text to say.
 - **A weather question.** Hook `none`; quasar tiers find nothing (by design, via the overlay); the `/processor` turn hits the
   grammar's `skill.weather`, the adapter runs `weather say --now|--tomorrow|--week|--umbrella|--dress` of `weather-cli`
   and speaks exactly what the CLI words. About 0.3 s, no model.
@@ -378,19 +380,18 @@ in `git log`); "own repo elsewhere" is the owner's other repository.
 | dns-relay | gateway | Python 3.12 alpine container `…-dns-relay-1`, `dns_forwarder.py` | ← Station DNS → upstream resolvers | **own** (source in a release directory of the unmerged branch `aisis-network-recover`, not in `main`) | file docstring, mounts, `git branch --contains` |
 | tls-voice | gateway | nginx container (image `aisis-yandex-https:3b902d6`), :80/:443 | ← Station → switch | **upstream + our config**: `v3rt3p/https-proxy` (GPL-3.0) at `3b902d6` (author Egor Koleda); the cache checkout it is built from is clean at that commit. A second checkout of the same project has an uncommitted `generate.sh` change and local certificates; whether that change reached the running image is `UNKNOWN` | `git remote`, `git status` of both checkouts |
 | switch-prod | gateway | nginx container (same image), :31115/:31116/:31114 | ← tls-voice → active colour | **own** configuration on that image | `bluegreen/compose.bluegreen.yaml` |
-| quasar-server (blue :31215.., green :31315..) | quasar | TypeScript, Node 25, image `aisis-quasar:*`, API :31116 | ← switch; → STT :31121, adapter :31117, ha-cli :8795, postgres :31119 | **fork/patched** upstream plus an **own** fast-intent layer and overlays; the sources are published as [`alex-mextner/aisis-quasar`](https://github.com/alex-mextner/aisis-quasar) (tag per deployed image; the active image's `/src` was compared with tag `aisis-volume-zero-e859a37b` and is identical, 2026-11-19; deploys still go through the overlays) | see [Where quasar comes from](#where-quasar-comes-from) |
+| quasar-server (blue :31215.., green :31315..) | quasar | TypeScript, Node 25, image `aisis-quasar:*`, API :31116 | ← switch; → STT :31121, adapter :31117, Home Assistant :8123, postgres :31119 | **fork/patched** upstream plus an **own** fast-intent layer and overlays; the sources are published as [`alex-mextner/aisis-quasar`](https://github.com/alex-mextner/aisis-quasar) (tag per deployed image; the active image's `/src` was compared with tag `aisis-volume-zero-e859a37b` and is identical, 2026-11-19; deploys still go through the overlays) | see [Where quasar comes from](#where-quasar-comes-from) |
 | postgres | quasar | `postgres:17.6-bookworm`, 127.0.0.1:31119 | ← quasar | **upstream + our config** | `compose.yaml` |
 | aisis-station-lan-proxy | gateway | Python, TCP proxy LAN:31116 → 127.0.0.1:31116 | ← the HA `aisis_speaker` component → quasar API | **own** | `quasar_lan_proxy.py` |
 | aisis-station-stt | ASR (gateway) | Python, aiohttp, :31121; libs `webrtcvad-wheels` (VAD), `aiohttp`, `imageio-ffmpeg` | ← quasar (WS, GigaAM format) → Wyoming; `POST /spotter-clip` ← quasar | **own** | `code/stt_wyoming.py`, `wake_window.py`, `requirements.txt` |
 | wyoming-whisper | ASR | `wyoming-faster-whisper` 3.1.0 (MIT) with `wyoming` 1.9.0, `faster-whisper` 1.2.1, `ctranslate2` 4.7.1; model `large-v3-turbo` (`mobiuslabsgmbh/faster-whisper-large-v3-turbo`), CUDA, :10300 on the tailnet address | ← STT gateway | **upstream + our flags and systemd drop-ins** (initial prompt, temp directory, restart policy); installed package files match the wheel's `RECORD` hashes (18 of 18), so no patch | pip `METADATA`/`RECORD`, `systemd/wyoming-whisper.service.d/` |
 | aisis-whisper-prompt.timer | ASR | systemd timer → `refresh-whisper-prompt.sh` / `voice_vocab.py` | → HA, library | **own** | `systemd/` |
-| aisis-station-adapter | NLU / dialog / TTS | Python, aiohttp, :31117 (`/processor`, `/intent/decide`, `/v1/audio/speech`, `/music/*`, `/asr/correct`, `/laya`) | ← quasar; → ha-cli, pm, weather-cli, Music Assistant, TTS clouds | **own** (`adapter.py`, `intent_route.py`, `intent_grammar/`, `voice_skills.py`, `ha_actions.py`, `timers.py`, `utterance_trace.py`, `memory.py`) | `git log`, files |
+| aisis-station-adapter | NLU / dialog / TTS | Python, aiohttp, :31117 (`/processor`, `/intent/decide`, `/v1/audio/speech`, `/music/*`, `/asr/correct`, `/laya`) | ← quasar; → Home Assistant, pm, weather-cli, Music Assistant, TTS clouds | **own** (`adapter.py`, `intent_route.py`, `intent_grammar/`, `voice_skills.py`, `ha_actions.py`, `timers.py`, `utterance_trace.py`, `memory.py`) | `git log`, files |
 | intent grammar | NLU | `intent_grammar/` (`ru.yaml`, 56 intents, 26 pre-phase) | ← adapter | **own** | files |
 | aisis-station-embed | dialog memory | Python, `embed_server.py`, multilingual-e5-small ONNX, loopback | ← adapter | **own code; upstream model** (licence of the model not checked here) | docstring |
 | Jev | NLU (advisory) | HTTPS to Vercel AI Gateway, `AISIS_JEV` default `off` | ← adapter | **external service** (TypeSafe's decision model) | `jev.py`, README |
-| weather-cli | execution | Python 0.2.0 (MIT) CLI `weather` | ← adapter skills → HA (via ha-cli), Open-Meteo | **own repo elsewhere** (`alex-mextner/weather-cli`) | `pyproject.toml`, `LICENSE`, `git remote` |
-| aisis-ha-cli | execution | Python, :8795 | ← quasar, adapter, weather-cli → Home Assistant REST | **own** | `hacli.py` |
-| Home Assistant | execution | docker `ghcr.io/home-assistant/home-assistant:stable`, 2026.9.3, odroid :8123 | ← ha-cli | **upstream + our config** (config in the owner's `ha-configs-*` repositories) | compose file, `/api/config` |
+| weather-cli | execution | Python 0.2.0 (MIT) CLI `weather` | ← adapter skills → HA (REST :8123), Open-Meteo | **own repo elsewhere** (`alex-mextner/weather-cli`) | `pyproject.toml`, `LICENSE`, `git remote` |
+| Home Assistant | execution | docker `ghcr.io/home-assistant/home-assistant:stable`, 2026.9.3, odroid :8123 | ← quasar fast-intent layer, adapter, weather-cli, dashboard (REST/WebSocket :8123) | **upstream + our config** (config in the owner's `ha-configs-*` repositories) | compose file, `/api/config` |
 | Music Assistant | execution | docker `ghcr.io/music-assistant/server:2.10.4` (digest pinned), odroid, AirPlay provider | ← adapter, HA | **upstream + our config** | compose file |
 | `aisis_speaker` HA component | execution | HA custom component 1.0.1 | ← HA → quasar API through the LAN proxy | **vendored, author UNKNOWN**: adopted on 2026-11-19 from the installed copy, no licence or author notice, now maintained in `services/yandex-station/homeassistant/` | `homeassistant/README.md`, `baseline-provenance.json` |
 | `remote_announcements`, `ha-host-actions` (Kodi bridge) | execution | HA custom component; a user service on the odroid | ← HA | **own repo elsewhere** (`ha-configs-*`; codeowner `@alex-mextner`) | component `manifest.json`, git history of the HA config repository |

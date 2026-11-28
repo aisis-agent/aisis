@@ -33,7 +33,7 @@ Out of scope here: lights, TV, volume and timer status intents on the adapter si
 |---|---|---|
 | Typical phrasings, wake-word forms, fillers | `ru.yaml` lexicon (`wake`, `lead_in`, `fillers`, `rooms`, `ac_words`), whole-utterance stem matching, `examples:` and `negatives:` pinned by `compile --check` | The two new intents are ordinary `tier: query` intents. |
 | A dynamic answer | `IntentRouter._adapter_executor` returns text from `clock.say`, `timer.remaining`, `skill.weather` | New executors `skill.capabilities` and `ha.climate_status`, in `ADAPTER_EXECUTORS`. |
-| Live state, read-only | `HaActions._all_states` (GET `/api/states` through ha-cli, 60 s cache, entities carry `last_changed`) and `_area_registry` (entity to area) | New read-only methods; nothing is ever sent to a service. |
+| Live state, read-only | `HaActions._all_states` (GET `/api/states` through the shared Home Assistant client, a live read, no cache, entities carry `last_changed`) and `_area_registry` (entity to area) | New read-only methods; nothing is ever sent to a service. |
 | Availability of abilities | `IntentRouter.timers`, `.ha`, `.skills` (`Skills.weather_command`), `AISIS_HA_ACTIONS` | Probed per answer: an unconfigured ability is not offered. |
 | Routing before the quasar layer | `phase: pre` intents are decided by the hook `/intent/decide` before the container's own handlers | `home.climate_status` is `pre`: the quasar layer cannot answer it with a question or a denial. `assistant.capabilities` is post-phase (the container has no reading for it). |
 | Alternatives with weights | adapter `HypothesisStore`, the correction engine (`Correction.stored`, `core.decide`), trace field `correction.nbest`, `trace_view.alternatives_lines` | §6; the debug presentation extends `trace_view`, it adds no second renderer. |
@@ -83,7 +83,7 @@ Answer templates (impersonal and nominal; `{rooms}` is a list in the locative, �
 
 ### 4.2 `home.climate_status`
 
-Slots: `room` (optional, the grammar's rooms), `aspect` (`power` default, `mode`, `temp`, `since`). Executor `ha.climate_status {room, aspect}`, `phase: pre`, tier `query`. It reads `climate.*` states and the area registry through the same ha-cli cache as the acting executors and sends nothing. No room means every air conditioner of the home (a question about the state, not an action, so the speaker's own room is not assumed).
+Slots: `room` (optional, the grammar's rooms), `aspect` (`power` default, `mode`, `temp`, `since`). Executor `ha.climate_status {room, aspect}`, `phase: pre`, tier `query`. It reads `climate.*` states and the area registry through the same shared Home Assistant client as the acting executors and sends nothing. No room means every air conditioner of the home (a question about the state, not an action, so the speaker's own room is not assumed).
 
 **Typical phrasings.**
 
@@ -127,7 +127,7 @@ Not read here (the acting intents keep them): «включи кондицион�
 | 24 to 48 h | «больше суток» |
 | more | «несколько дней» |
 
-Every form fits «уже …» («уже меньше минуты», «уже с утра»). On: «уже около 20 минут», «уже больше часа», «уже с утра». Off: the same figure with «выключен». No `last_changed` (the attribute missing, unparsable or without a zone): the duration is left out, the rest of the sentence stands. The states are read FRESH from ha-cli for every status question (the adapter's own 60 s cache is skipped), so a unit switched a moment ago is not reported as it was.
+Every form fits «уже …» («уже меньше минуты», «уже с утра»). On: «уже около 20 минут», «уже больше часа», «уже с утра». Off: the same figure with «выключен». No `last_changed` (the attribute missing, unparsable or without a zone): the duration is left out, the rest of the sentence stands. The states are read FRESH from Home Assistant for every status question (there is no cache to skip), so a unit switched a moment ago is not reported as it was.
 
 **Answer templates** (impersonal; several variants per case, chosen at random so that a repeated question does not sound the same; `{where}` is the locative of the area, `{what}` is «обогрев, 30 градусов»):
 
@@ -142,7 +142,7 @@ Every form fits «уже …» («уже меньше минуты», «уже �
 * Aspect `temp`: «Кондиционер {where} выставлен на {set}, сейчас в комнате {current}.» (the missing one is left out)
 * Aspect `since`: «Кондиционер {where} включён {since}.»
 * Home Assistant unreachable: «Состояние кондиционеров сейчас узнать не удаётся.»; no `climate` entity in the home (or none in the named room): «Кондиционеров в доме не найдено.» / «В комнате «{area}» нет кондиционера.»
-* An old ha-cli cache cannot be told from a live read on the list response today (the adapter marks only dict answers with `X-Aisis-Cache: stale`); hedging such an answer («По последним полученным данным …») is a follow-up (§9).
+* Every state is a live read through the shared client (no cache), so an answer can never be stale; an unreachable Home Assistant gives the data-unavailable sentence instead.
 
 None of these names an actor, asks for a repetition or says what the speaker «не включал». The set-point is spoken as «N градусов» (`home_status.degrees`).
 
@@ -176,7 +176,7 @@ Owner rules (2026-11-22): when the agent would ask a question, or something is u
 * the primary text, with the grammar's decision for it (or none);
 * the alternatives of the second opinion: `NBest.hypotheses` of `Correction.stored(...)` (text, `posterior` = the share among the LISTED readings, `fit`), live 15 s in the adapter's `HypothesisStore`; evidence is absent when the engine is off or the gateway published nothing;
 * the cues of the quasar layer (`noop`);
-* live data through the same executors as normal turns (ha-cli cached states, timers, weather-cli, the dialog store).
+* live data through the same executors as normal turns (live Home Assistant states, timers, weather-cli, the dialog store).
 
 ### 6.2 Reading the alternatives
 
@@ -269,7 +269,7 @@ The first line is `trace_view.alternatives_lines` (already used for `correction.
 
 * **Correction FSM (#182).** The engine stays the author of every question; the new layer decides before it whether a question is needed at all. `consult` is untouched in the `ask`/`ask-choice` paths; the `confirm` regime is one more constructor of `Dialog(state=CONFIRM)`.
 * **#212 / #216 (air conditioner phrases).** The acting phrases still belong to `climate.*` through the quasar overlay `ac-defer-to-adapter`; the status intents add no acting pattern. A phrase read as an act with `w < HIGH` is the engine's `ask`/`confirm` (risky thresholds), never executed.
-* **#190 (verification).** The status answer is a state read; it quotes only what ha-cli reports (`last_changed` of the entity), and the freshness rule of §4.2 hedges a stale cache. Actuation verification rules are untouched.
+* **#190 (verification).** The status answer is a state read; it quotes only what Home Assistant reports (`last_changed` of the entity); states are live reads, so there is no stale cache to hedge. Actuation verification rules are untouched.
 * **Jev, brain.** A verdict of `answer` removes the 2 s brain call; `other` keeps it.
 * **#269 / #268 (extra dictionary).** The dictionary feeds the recogniser; this layer consumes the alternatives it produces. They do not share state.
 
@@ -278,7 +278,7 @@ The first line is `trace_view.alternatives_lines` (already used for `correction.
 | Failure | Behaviour |
 |---|---|
 | grammar bundle unavailable | the adapter runs without it (existing): the brain answers |
-| executor raises, `ha` unbound, ha-cli unreachable | the intent answers its data-unavailable sentence (status) or leaves out the unreachable abilities (capabilities); an exception returns `None`: the old path, never a stack trace or silence |
+| executor raises, `ha` unbound, Home Assistant unreachable | the intent answers its data-unavailable sentence (status) or leaves out the unreachable abilities (capabilities); an exception returns `None`: the old path, never a stack trace or silence |
 | states unparsable, `last_changed` missing | the field is dropped from the sentence |
 | no `climate` entity | «Кондиционеров в доме не найдено.» (named room: «В комнате «{area}» нет кондиционера.») |
 | bare phrase in shadow | traced, declined: the quasar layer's question stands |
@@ -289,8 +289,8 @@ The first line is `trace_view.alternatives_lines` (already used for `correction.
 * **`test_info_intents.py`**: every phrase of `info-ru.jsonl` is classified to the expected intent and slots by `IntentRouter.classify`; the negatives stay with their own intents (`climate.set`, `light.on`, `state.report`, `smalltalk.*`); the acting phrases never match a status intent.
 * **`test_home_status.py`**: the rounding table (both sides of every boundary, `now` injected, the «с утра» and «со вчерашнего вечера» cases, another time zone), every template case with fake units, the aspects, and a check that no sentence contains «колонк», «я», «не включал», «не умею» or a first-person verb.
 * **`test_capabilities.py`**: fake facts (timers on/off, weather on/off, Home Assistant up/down, rooms), time-of-day ordering with an injected clock, cursor rotation and wrap, topic answers, and **every example phrase offered in an answer is read by the grammar into the executor it demonstrates** (the answer cannot offer a phrase the stack does not understand).
-* **`test_ha_status.py`**: `ha.climate_status` and `rooms_with` against the fake ha-cli (`ha_fakes`-shaped states with `last_changed`), the registry areas, a fresh read per question, an unreachable or unreadable ha-cli, a garbled or missing `last_changed`, a dead unit, and an assertion that **no service is ever called**.
-* **`test_info_intents.py`** (also): routing of the executors through `IntentRouter.route` with a fake ha-cli: the real clip answered without the brain, the misheard state question answered from states, the room narrowing, the follow-up that continues only an answer just given, the topic question, the bare phrase in shadow (traced, declined, nothing read) and `on`, no Home Assistant actions, and that no service is ever called.
+* **`test_ha_status.py`**: `ha.climate_status` and `rooms_with` against the fake Home Assistant client (`ha_fakes`-shaped states with `last_changed`), the registry areas, a fresh read per question, an unreachable or unreadable Home Assistant, a garbled or missing `last_changed`, a dead unit, and an assertion that **no service is ever called**.
+* **`test_info_intents.py`** (also): routing of the executors through `IntentRouter.route` with a fake Home Assistant client: the real clip answered without the brain, the misheard state question answered from states, the room narrowing, the follow-up that continues only an answer just given, the topic question, the bare phrase in shadow (traced, declined, nothing read) and `on`, no Home Assistant actions, and that no service is ever called.
 * **Policy tests** (with the module in §9): fake `NBest`s over the thresholds of §6.3, one case per cell of the regime table, the coherence rule (same key, same subject, different subject, other), pooling, and that no regime ever executes an act.
 
 **Corpus contract.** The private corpus and its hashes (`intents-ru.jsonl`, 469 rows, pinned in the offload manifest) are NOT edited by this change: new phrases live in git as the fixture above and as grammar `examples`. The quasar corpus runner reaches no adapter, so the row `что ты умеешь` (`llm`) stays `llm` there. Measured on the host that holds the private corpus (`backtest --route combined --gate --no-latest`, a copy of the last promoted report as the baseline, nothing promoted): gate `ok`, 0 rows worse, 2 better (the row `что ты умеешь`, and the held-out row `какая температура на кондиционере`, `llm`/`climate`, which `home.climate_status` now answers: the intent carries the corpus label `climate`, a state question about the climate is a climate-domain answer). Any change to `ru.yaml` / `ru.json` changes two of the eight pinned adapter files: `ADAPTER_FILES` is updated in the same pull request, and `ADAPTER_REVISION` must name a commit that holds those bytes: the pull request pins its own grammar commit (so its CI is green), and after the squash-merge a one-line re-pin pull request names the squash commit (the precedent: #236, #254). The merge must not be deployed to a quasar colour with the old pin.
@@ -304,4 +304,4 @@ The first line is `trace_view.alternatives_lines` (already used for `correction.
 5. **More status intents** ([#279](https://github.com/alex-mextner/aisis/issues/279)): lights (the quasar layer's `state.report` answers «Сейчас ничего не включено.» from a template; an adapter-side reading with `last_changed` needs the pre-phase hand-over), TV and projector, volume, timers and reminders («что поставлено»), weather follow-ups.
 6. **Persona text** (#273): `user_prompt.CAPABILITIES` still tells the model the speaker «выполняет сама». With §4 the model rarely sees capability questions, but its fallback text is the same actor wording and is changed by the wording ticket, not here.
 7. **Typical-phrase growth** through the nightly intent loop: the phrases of §4 are authored from the grammar's conventions and one real clip each; real variants arrive in the corpus and extend `info-ru.jsonl`.
-8. **Stale-cache hedge for the status answer** ([#280](https://github.com/alex-mextner/aisis/issues/280)): ha-cli's `X-Aisis-Cache: stale` is read by the adapter only for dict bodies, so a list answer served from its old cache looks live; carry the mark through `_ha_get_json` for lists and add the «По последним полученным данным, …» variant.
+8. **RETIRED: stale-cache hedge for the status answer** ([#280](https://github.com/alex-mextner/aisis/issues/280)): obsolete. It hedged answers served from the old local proxy's cache (`X-Aisis-Cache: stale`); the proxy and every state cache are gone, states are live reads through the shared client, so nothing can be stale.

@@ -5,7 +5,7 @@ The static file (extra_dict_ru.json) holds what somebody wrote down. This module
 same format, and never commits it:
 
   vocabulary   the words the owner's commands are made of: the friendly names and rooms of Home Assistant (voice_vocab.fetch_catalog: the
-               read-only `/api/states` list and the area template of ha-cli's cache, nothing is actuated), and the imperatives and comparatives
+               read-only `/api/states` list and the area template of Home Assistant, nothing is actuated), and the imperatives and comparatives
                of the intent grammar (wake_word.command_verbs);
   evidence     the stored transcripts of voice_clips (`sent`, not the speaker's own spotter text, read-only) from the dialog database;
   entries      a word that is none of the known words (the vocabulary, every word of the grammar bundle, the catalog) but looks very like exactly one
@@ -19,7 +19,7 @@ bounded (MAX_ENTRIES entries, MAX_NAMES names, MAX_BYTES on disk). The file is w
 cannot read Home Assistant, produces an invalid or oversized layer, or fails to write keeps the previous file. The services read it with
 `extra_dict.Live` (merged under the static file: static wins every conflict) and the shadow flag applies as to the static layer.
 
-    extra_dict_dynamic.py refresh [--db FILE] [--hacli-url URL] [--out FILE]    build and install the layer (exit 3: Home Assistant unreadable, previous kept)
+    extra_dict_dynamic.py refresh [--db FILE] [--out FILE]    build and install the layer (exit 3: Home Assistant unreadable, previous kept)
     extra_dict_dynamic.py show [--out FILE]                                       the installed layer's entries
 """
 from __future__ import annotations
@@ -47,7 +47,6 @@ import wake_word
 LOG = logging.getLogger("aisis.extra_dict_dynamic")
 
 DB = Path(os.environ.get("AISIS_DIALOGS_DB") or Path.home() / ".local/share/aisis/dialogs.sqlite3")
-DEFAULT_HACLI_URL = "http://127.0.0.1:8795"
 MIN_SUPPORT = extra_dict.MIN_DYNAMIC_SUPPORT   # distinct clips a variant needs: one occurrence is an anecdote, two a coincidence
 MIN_SIMILARITY = 0.84                          # difflib ratio of the variant to its vocabulary word
 MARGIN = 0.06                                  # the best word must beat the second best by this much: a variant between two words is nobody's
@@ -217,12 +216,12 @@ def stored_transcripts(db: str | os.PathLike[str], limit: int = MAX_CLIPS) -> li
     return [(clip_id, text) for clip_id, text in rows]
 
 
-def refresh(out: str | os.PathLike[str], db: str | os.PathLike[str] = DB, hacli_url: str = DEFAULT_HACLI_URL,
+def refresh(out: str | os.PathLike[str], db: str | os.PathLike[str] = DB,
             fetch: Callable[..., voice_vocab.Catalog] = voice_vocab.fetch_catalog) -> int:
     """Build the layer from Home Assistant and the stored clips and install it. 0: done (or nothing changed); 3: Home Assistant unreadable, the
     previous layer stays; 1: the layer could not be built or written, the previous layer stays."""
     try:
-        catalog = fetch(hacli_url, strict=True)
+        catalog = fetch(strict=True)
     except voice_vocab.CatalogUnavailable as exc:
         LOG.warning("extra_dict_dynamic_ha_unreadable keeping the previous layer: %s", exc)
         return 3
@@ -241,12 +240,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("command", choices=("refresh", "show"))
     parser.add_argument("--db", default=str(DB))
-    parser.add_argument("--hacli-url", default=os.environ.get("AISIS_HACLI_URL", DEFAULT_HACLI_URL))
     parser.add_argument("--out", default=str(extra_dict.dynamic_path()))
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.command == "refresh":
-        return refresh(args.out, args.db, args.hacli_url)
+        return refresh(args.out, args.db)
     try:
         layer = extra_dict.load(args.out, layer="dynamic")
     except extra_dict.ExtraDictError as err:

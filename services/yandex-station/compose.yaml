@@ -40,7 +40,8 @@ services:
       # Pre-synthesized filler phrases (gen_fillers.py), read-only.
       - /home/ultra/.cache/aisis/fillers:/src/fillers:ro
       # Home Assistant: the dashboard's connection store (address and credential), read-only.
-      - /home/ultra/.config/aisis/ha:/run/aisis-ha:ro
+      # (long form: a missing directory is an error, never a root-owned directory the dashboard could not write into)
+      - {type: bind, source: /home/ultra/.config/aisis/ha, target: /run/aisis-ha, read_only: true, bind: {create_host_path: false}}
     depends_on:
       postgres:
         condition: service_healthy

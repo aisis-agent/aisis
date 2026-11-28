@@ -4,7 +4,7 @@ import re, subprocess, html, json, time, os, urllib.request, threading, http.cli
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 import dialogstore
-import ha_action_log
+import ha_logbook
 import ha_client
 import ha_connect
 import session_pages
@@ -59,7 +59,6 @@ SYSTEMD_META = {
     "aisis-dashboard.service": ("Дашборд", "этот интерфейс :8781"),
     "aisis-clipfeed.service": ("Лента клипов", "реплики с записями в Telegram, сбор эталона (:31124)"),
     "aisis-station-kit.service": ("Kit", "sync-сервер колонки (quasar.yandex.net)"),
-    "aisis-ha-cli.service": ("HA CLI", "прокси Home Assistant с кэшем (:8795)"),
     "aisis-failover.service": ("Failover", "автофейловер голосового стека"),
 }
 
@@ -236,8 +235,9 @@ def session_html(dialog_id=None, clip_id=None):
         c["gain"] = clipfeed.boost_for(c.get("peak"))
         c["hypotheses"] = clipfeed.evidence_of(dialogstore.DB_PATH, c)    # the second opinion stored for the clip (#182)
     found = dialog is not None or bool(clips)
-    ha_actions = ha_action_log.read(ha_action_log.JOURNAL_PATH, min(c["ts"] for c in clips) - 3, max(c["ts"] for c in clips) + 45) if clips else []
-    return (200 if found else 404), session_pages.render_session(dialog, clips, traces, focus_clip=clip_id, key=key, ha_actions=ha_actions)
+    def ha_lines(start, end):
+        return ha_logbook.lines(ha_client.default(), start, end)
+    return (200 if found else 404), session_pages.render_session(dialog, clips, traces, focus_clip=clip_id, key=key, ha_lines=ha_lines)
 
 def dialogs_stats():
     conn = dialogstore.connect()

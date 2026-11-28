@@ -75,8 +75,8 @@ def test_only_home_vocabulary_reaches_the_prompt():
 
 
 def get_from(responses):
-    def get(url, body=None, timeout=4.0):
-        value = responses[url.rsplit("/api/", 1)[1].split("/")[0]]
+    def get(path, body=None, timeout=4.0):
+        value = responses[path.rsplit("/api/", 1)[1].split("/")[0]]
         if isinstance(value, Exception):
             raise value
         return value
@@ -126,3 +126,25 @@ def test_the_static_prompt_command_needs_no_home_assistant(monkeypatch, capsys):
     monkeypatch.setattr(voice_vocab, "fetch_catalog", lambda **kwargs: pytest.fail("no lookup for --static"))
     assert voice_vocab.main(["prompt", "--static"]) == 0
     assert capsys.readouterr().out.strip() == whisper_prompt(Catalog())
+
+
+def test_the_default_read_goes_through_the_shared_client(tmp_path, monkeypatch):
+    import ha_client
+    import ha_fakes
+    ha = ha_fakes.FakeHomeAssistant(STATES)
+    try:
+        store = ha_client.Store(tmp_path / "connection.json")
+        store.save(ha_client.Connection(ha.url, "long_lived", "llat"))
+        ha.long_lived.add("llat")
+        monkeypatch.setattr(ha_client, "default", lambda: ha_client.HaClient(store, discover_fn=lambda **_: []))
+        assert fetch_catalog().entities == ("Люстра",)
+    finally:
+        ha.close()
+
+
+def test_without_a_connection_strict_refuses_and_lenient_is_empty(tmp_path, monkeypatch):
+    import ha_client
+    monkeypatch.setattr(ha_client, "default", lambda: ha_client.HaClient(ha_client.Store(tmp_path / "none.json"), discover_fn=lambda **_: []))
+    with pytest.raises(CatalogUnavailable):
+        fetch_catalog(strict=True)
+    assert fetch_catalog().empty()

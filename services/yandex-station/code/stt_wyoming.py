@@ -570,8 +570,7 @@ class STTGateway:
         # Domain bias for the recognizer, opt-in (AISIS_STT_DOMAIN_CONTEXT=1): only an stt-cli recognizer reads it.
         # `domain_catalog` is injectable for tests.
         self.domain_catalog = domain_catalog if domain_catalog is not None else (
-            voice_vocab.CatalogCache(lambda: voice_vocab.fetch_catalog(
-                self.env.get("AISIS_HACLI_URL", "http://127.0.0.1:8795"), voice_vocab.library_artists))
+            voice_vocab.CatalogCache(lambda: voice_vocab.fetch_catalog(voice_vocab.library_artists))
             if self.env.get("AISIS_STT_DOMAIN_CONTEXT") == "1" else None)
         self.tv = tv                  # tvpause.TvPause: pause the players of the station's room when the station starts listening
         self.slots = asyncio.Semaphore(self.SLOTS)

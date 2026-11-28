@@ -21,7 +21,7 @@ class FakeHome:
 
     async def entities(self):
         if self.fail:
-            raise ConnectionError("ha-cli is down")
+            raise ConnectionError("Home Assistant is down")
         return tuple(self.items)
 
     async def act(self, call: HaCall) -> str:

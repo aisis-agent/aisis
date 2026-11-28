@@ -202,7 +202,7 @@ class Capabilities:
             try:
                 light, climate = await asyncio.wait_for(self._rooms(), HOME_TIMEOUT_S)
                 home_up = True
-            except Exception:   # Home Assistant, ha-cli or the registry did not answer in time: the home abilities are left out
+            except Exception:   # Home Assistant or the registry did not answer in time: the home abilities are left out
                 pass
         left = None
         if self._timers is not None:

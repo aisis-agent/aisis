@@ -99,7 +99,8 @@ services:
     environment: {<<: *prod-env, PORT: "31215", API_PORT: "31216", FUNCTION_STATE_SERVER_PORT: "31214"}
     volumes:
       - ${AISIS_FILLERS_DIR:-${HOME}/.cache/aisis/fillers}:/src/fillers:ro
-      - ${AISIS_HA_STORE_DIR:-${HOME}/.config/aisis/ha}:/run/aisis-ha:ro
+      # Long form: a missing directory is an error, never a root-owned directory the dashboard could not write into.
+      - {type: bind, source: "${AISIS_HA_STORE_DIR:-${HOME}/.config/aisis/ha}", target: /run/aisis-ha, read_only: true, bind: {create_host_path: false}}
       - ${AISIS_QUASAR_STATE_DIR:-${HOME}/.local/state/aisis/quasar-prod}:/state
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:31216/devices').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
@@ -116,7 +117,8 @@ services:
     environment: {<<: *prod-env, PORT: "31315", API_PORT: "31316", FUNCTION_STATE_SERVER_PORT: "31314"}
     volumes:
       - ${AISIS_FILLERS_DIR:-${HOME}/.cache/aisis/fillers}:/src/fillers:ro
-      - ${AISIS_HA_STORE_DIR:-${HOME}/.config/aisis/ha}:/run/aisis-ha:ro
+      # Long form: a missing directory is an error, never a root-owned directory the dashboard could not write into.
+      - {type: bind, source: "${AISIS_HA_STORE_DIR:-${HOME}/.config/aisis/ha}", target: /run/aisis-ha, read_only: true, bind: {create_host_path: false}}
       - ${AISIS_QUASAR_STATE_DIR:-${HOME}/.local/state/aisis/quasar-prod}:/state
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:31316/devices').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
@@ -157,26 +159,3 @@ services:
       timeout: 3s
       retries: 3
       start_period: 20s
-
-  # Dry-run Home Assistant proxy for stage: same hacli.py as prod, HA URL is a
-  # dead port, so it can only serve the cached snapshot (read-only mount) and
-  # can never deliver a service call to a real device.
-  ha-cli-stage:
-    image: python:3.12-alpine
-    container_name: aisis-ha-cli-stage
-    profiles: [stage]
-    restart: unless-stopped
-    network_mode: host
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    environment:
-      AISIS_HACLI_PORT: "8895"
-      AISIS_HACLI_HA_URL: "http://127.0.0.1:9"
-      HOME: /home/stage
-    command: [python3, -B, /app/hacli.py]
-    volumes:
-      - ${AISIS_CODE_DIR:-${HOME}/xp/aisis/services/yandex-station/code}/hacli.py:/app/hacli.py:ro
-      - ${AISIS_CODE_DIR:-${HOME}/xp/aisis/services/yandex-station/code}/ha_action_log.py:/app/ha_action_log.py:ro
-      - ${AISIS_CODE_DIR:-${HOME}/xp/aisis/services/yandex-station/code}/ha_verify.py:/app/ha_verify.py:ro
-      - ${AISIS_DATA_DIR:-${HOME}/.local/share/aisis}/ha-state-cache.json:/home/stage/.local/share/aisis/ha-state-cache.json:ro

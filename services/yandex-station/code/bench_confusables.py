@@ -181,7 +181,7 @@ def recognizer_extras() -> dict:
     vocab = stt_wyoming.voice_vocab
     catalog = None
     if os.environ.get("AISIS_STT_DOMAIN_CONTEXT") == "1":
-        loaded = vocab.fetch_catalog(os.environ.get("AISIS_HACLI_URL", "http://127.0.0.1:8795"), vocab.library_artists)   # loaded now: the live cache is warm, a cold one answers empty
+        loaded = vocab.fetch_catalog(vocab.library_artists)   # loaded now: the live cache is warm, a cold one answers empty
         catalog = types.SimpleNamespace(get=lambda: loaded)
     return stt_wyoming.STTGateway.recognizer_extras(types.SimpleNamespace(env=os.environ, domain_catalog=catalog))
 

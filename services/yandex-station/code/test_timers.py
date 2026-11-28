@@ -498,7 +498,7 @@ class AnnouncerCase(unittest.IsolatedAsyncioTestCase):
         return ok, calls
 
     async def test_statuses(self):
-        for status, expected in ((200, True), (201, True), (202, True), (400, False), (500, False)):
+        for status, expected in ((200, True), (201, True), (202, False), (0, False), (400, False), (500, False)):     # no queue: 202 is not Home Assistant's acceptance
             ok, _ = await self.run_status(status)
             self.assertEqual(ok, expected, status)
 

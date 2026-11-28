@@ -308,22 +308,42 @@ class TraceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(trace["errors"], ["reply not delivered: " + failure.__name__])
 
 
-class HaCacheMarkTests(unittest.IsolatedAsyncioTestCase):
-    """hacli serves its old cache with `X-Aisis-Cache: stale` while Home Assistant is down; the adapter hands that to the executors as `_stale`."""
+class HaReadTests(unittest.IsolatedAsyncioTestCase):
+    """The adapter reads Home Assistant live through the shared client; when it does not answer the read fails, never an old copy."""
 
-    async def test_a_stale_entity_is_marked_and_a_live_one_is_not(self):
-        from aiohttp import ClientSession, web
+    async def test_a_read_is_live_and_an_outage_is_an_error_not_a_cached_state(self):
+        import tempfile
+        from pathlib import Path
         from types import SimpleNamespace
+        import ha_client
+        import ha_fakes
+        ha = ha_fakes.FakeHomeAssistant([ha_fakes.entity("climate.x", "cool")])
+        self.addCleanup(ha.close)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ha_client.Store(Path(tmp) / "connection.json")
+            store.save(ha_client.Connection(ha.url, "long_lived", "llat"))
+            host = SimpleNamespace(ha_client=ha_client.HaClient(store, discover_fn=lambda **_: []))
+            self.assertEqual((await Adapter._ha_get_json(host, "/api/states/climate.x"))["state"], "cool")
+            ha.stop_listening()
+            with self.assertRaises(RuntimeError):
+                await Adapter._ha_get_json(host, "/api/states/climate.x")
 
-        async def reply(request):
-            return web.json_response({"entity_id": "climate.x"}, headers={"X-Aisis-Cache": request.match_info["kind"]})
-
-        app = web.Application()
-        app.router.add_get("/api/states/{kind}", reply)
-        async with TestServer(app) as server, ClientSession() as session:
-            host = SimpleNamespace(intent_ha_url=str(server.make_url("")).rstrip("/"), _hacli=lambda: session)
-            self.assertEqual(await Adapter._ha_get_json(host, "/api/states/stale"), {"entity_id": "climate.x", "_stale": True})
-            self.assertEqual(await Adapter._ha_get_json(host, "/api/states/live"), {"entity_id": "climate.x"})
+    async def test_a_call_that_asks_for_data_is_a_plain_request_with_its_query(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        import ha_client
+        import ha_fakes
+        ha = ha_fakes.FakeHomeAssistant([ha_fakes.entity("weather.home", "sunny")])
+        self.addCleanup(ha.close)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ha_client.Store(Path(tmp) / "connection.json")
+            store.save(ha_client.Connection(ha.url, "long_lived", "llat"))
+            host = SimpleNamespace(ha_client=ha_client.HaClient(store, discover_fn=lambda **_: []))
+            path = "/api/services/weather/get_forecasts?return_response"
+            await Adapter._ha_post_json(host, path, {"entity_id": "weather.home", "type": "daily"})
+        self.assertEqual([call[0] for call in ha.calls()], [path])     # Home Assistant got the query, so it answers with the service's data
+        self.assertEqual([r for r in ha.requests if r[0] == "WS"], [])  # and nothing was confirmed against a state: data is not a state change
 
 
 

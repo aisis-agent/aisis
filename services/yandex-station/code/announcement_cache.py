@@ -312,7 +312,16 @@ def install(source: str, folder: Path | None = None, *, progress=None) -> dict:
     return publish_generation(folder, manifest, clips, prepared)
 
 
+def connected_source():
+    """The base URL of the Home Assistant AISIS is connected to (the connection store the dashboard writes)."""
+    import ha_client
+    return ha_client.default().url
+
+
 def failure_reason(error):
+    import ha_client
+    if isinstance(error, ha_client.NotConnected):
+        return "Home Assistant is not connected (connect it on the dashboard /ha page or pass --source)"
     if isinstance(error, (CacheValidationError, CacheNotReady)):
         return str(error)
     if isinstance(error, HTTPError):
@@ -328,7 +337,7 @@ def failure_reason(error):
 
 def main():
     parser = argparse.ArgumentParser(description="Import prepared HA clips without playback or synthesis")
-    parser.add_argument("--source", required=True, help="Reachable Home Assistant base URL")
+    parser.add_argument("--source", help="Home Assistant base URL; default: the connected Home Assistant")
     parser.add_argument("--folder", type=Path, default=DEFAULT_FOLDER)
     args = parser.parse_args()
     os.umask(0o077)
@@ -341,7 +350,7 @@ def main():
             log.flush()
         progress("Import started")
         try:
-            result = install(args.source, args.folder, progress=progress)
+            result = install(args.source or connected_source(), args.folder, progress=progress)
             progress("Import complete")
             print(json.dumps(result))
         except Exception as error:

@@ -73,8 +73,8 @@ act on. Do not perform the command. The work is:
 Every device of the house (lights, television, climate, media players, scripts, scenes) is driven only through the Home Assistant
 API by the shared Home Assistant client (module `ha_client`): service calls, scripts and Home Assistant automations. A new side
 script, proxy, cache or private state file of device state, or a new timer of our own that acts on a device, is not allowed. Code
-that still reaches Home Assistant another way (the legacy `hacli.py` proxy and its cache, direct calls in the dashboard) is being
-migrated to the client and is not a pattern to copy. Behaviour of the house that runs on a timer or an event of its own (schedules,
+that reached Home Assistant another way (the former local proxy and its cache, direct calls in the dashboard) has been moved onto the
+client and is gone: do not bring a second way back. Behaviour of the house that runs on a timer or an event of its own (schedules,
 presence rules) is built as a native Home Assistant automation. If something does not work through
 the API, or the architecture is unclear, investigate it in Home Assistant itself (states, attributes, services, logs) and solve it
 there; do not work around it here. Discovery of the Home Assistant server and onboarding are automatic (mDNS discovery and the

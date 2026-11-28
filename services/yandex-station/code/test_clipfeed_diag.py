@@ -9,7 +9,6 @@ from unittest import mock
 import clipfeed
 import cliptruth
 import dialogstore
-import ha_action_log
 import session_links
 import voiceclips
 
@@ -135,9 +134,9 @@ class FeedPosts(unittest.TestCase):
         self.addCleanup(env.stop)
         self.addCleanup(setattr, session_links, "_cache", None)
         session_links._cache = None
-        journal = mock.patch.object(ha_action_log, "JOURNAL_PATH", os.path.join(self.tmp.name, "no-ha-actions.jsonl"))
-        journal.start()        # the live journal of this host must not add «HA» lines to the captions asserted here
-        self.addCleanup(journal.stop)
+        logbook = mock.patch.object(clipfeed.ha_logbook, "lines", return_value=[])
+        logbook.start()        # the live Home Assistant of this host must not add «Home Assistant» lines to the captions asserted here
+        self.addCleanup(logbook.stop)
         self.now = time.time()
         conn = dialogstore.init_db(self.db)
         conn.execute("INSERT INTO dialogs(id,station,kind,src,ts_start,ts_end,status,heard,answered,actions) VALUES(?,?,?,?,?,?,?,?,?,?)",

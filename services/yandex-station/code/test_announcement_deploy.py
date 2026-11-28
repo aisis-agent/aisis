@@ -410,7 +410,7 @@ class UnitInstallTargetTests(unittest.TestCase):
         self.deploy_main = home / "xp/aisis/.worktrees/deploy-main/services/yandex-station/code"
         for folder in (self.primary, self.deploy_main):
             folder.mkdir(parents=True)
-            for name in ("adapter.py", "stt_wyoming.py", "hacli.py", "pm_cdp_server.py"):
+            for name in ("adapter.py", "stt_wyoming.py", "pm_cdp_server.py"):
                 (folder / name).write_text(self.old)
         (self.bin / "systemctl").write_text(
             '#!/bin/sh\nif [ "$2" = show ]; then\n'
@@ -426,9 +426,6 @@ class UnitInstallTargetTests(unittest.TestCase):
 
     def install(self, unit, name):
         (self.source / name).write_text("VERSION = 'new'\n")
-        if unit == "ha-cli":      # hacli.py imports these two; the installer refuses a hacli.py without them
-            for companion in ("ha_verify.py", "ha_action_log.py"):
-                (self.source / companion).write_text("VERSION = 'new'\n")
         return subprocess.run(["bash", str(DEPLOY), "unit", unit, str(self.source / name)],
             env=self.env, capture_output=True, text=True, timeout=10)
 
@@ -489,16 +486,6 @@ class UnitInstallTargetTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.deploy_main / "pm_cdp_server.py").read_text(), "VERSION = 'new'\n")
         self.assertEqual((self.primary / "pm_cdp_server.py").read_text(), self.old)
-
-    def test_ha_cli_installs_into_primary_checkout(self):
-        for unit, name in (("ha-cli", "hacli.py"),):
-            result = self.install(unit, name)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((self.primary / name).read_text(), "VERSION = 'new'\n", unit)
-            if unit == "ha-cli":
-                for companion in ("ha_verify.py", "ha_action_log.py"):
-                    self.assertEqual((self.primary / companion).read_text(), "VERSION = 'new'\n", companion)
-            self.assertEqual((self.deploy_main / name).read_text(), self.old, unit)
 
 
 if __name__ == "__main__":

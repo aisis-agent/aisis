@@ -46,7 +46,8 @@ from pathlib import Path
 import clipbot
 import cliptruth
 import dialogstore
-import ha_action_log
+import ha_client
+import ha_logbook
 import session_links
 import trace_view
 import voiceclips
@@ -327,10 +328,9 @@ def processing_lines(conn: sqlite3.Connection, clip: dict, end: float, dialog: d
         mine = trace_view.traces_of_clip(clip, traces, end)
         lines = trace_caption_lines(clip, mine, dialog, end) + evidence_caption_lines(evidence, mine)
         if clip["status"] == "sent" and (clip.get("transcript") or "").strip():
-            # What ha-cli verified for the phrase (the quasar layer's own Home Assistant calls are not in the adapter's trace; the
-            # adapter's calls are, by journal id) and how Home Assistant was doing meanwhile.
-            known = {call["aid"] for trace in mine for call in trace.get("calls") or [] if call.get("aid")}
-            lines += ha_action_log.window_lines(clip["ts"] - trace_view.MATCH_BEFORE_S, end + trace_view.MATCH_AFTER_S, known)
+            # Home Assistant's own record of what AISIS did in the phrase's window (the quasar layer's direct calls are not in the
+            # adapter's trace).
+            lines += ha_logbook.lines(ha_client.default(), clip["ts"] - trace_view.MATCH_BEFORE_S, end + trace_view.MATCH_AFTER_S)
         return lines
     except Exception as exc:
         LOG.warning("clip_feed_diag_failed clip=%s class=%s", clip["id"], type(exc).__name__)

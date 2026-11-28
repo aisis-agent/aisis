@@ -15,7 +15,6 @@ import math
 import re
 import threading
 import time
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -83,15 +82,17 @@ def catalog_from(states: list[dict], areas: list[str], artists: list[str], now: 
                    time.time() if now is None else now)
 
 
-def fetch_json(url: str, body: dict | None = None, timeout: float = 4.0):
-    data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read()
+def _ha_get(path: str, body: dict | None = None, timeout: float = 4.0):
+    """One read through the shared Home Assistant client: the parsed JSON, else the text. Anything but a 2xx answer is an error."""
+    import ha_client
+    client = ha_client.default()
+    reply = client.get(path, timeout) if body is None else client.post(path, body, timeout)
+    if not reply.ok:
+        raise OSError(f"Home Assistant {path}: " + (reply.error or f"HTTP {reply.status}"))
     try:
-        return json.loads(raw)
+        return reply.json()
     except ValueError:
-        return raw.decode()
+        return reply.text()
 
 
 def library_artists(limit: int = 40) -> list[str]:
@@ -105,8 +106,7 @@ class CatalogUnavailable(RuntimeError):
     """Home Assistant could not be read: a prompt built now would silently lack the live device and room names."""
 
 
-def fetch_catalog(hacli_url: str = "http://127.0.0.1:8795", artists: Callable[[], list[str]] | None = None,
-                  get: Callable[..., object] = fetch_json, strict: bool = False) -> Catalog:
+def fetch_catalog(artists: Callable[[], list[str]] | None = None, get: Callable[..., object] = _ha_get, strict: bool = False) -> Catalog:
     """Live catalog. Music artists are always optional. Home Assistant parts are optional too (a failed one just
     leaves its part empty) unless `strict`: then a request that failed or answered with something other than a list
     raises CatalogUnavailable, so a caller that installs the result for hours (the Whisper prompt) keeps what it had
@@ -115,12 +115,12 @@ def fetch_catalog(hacli_url: str = "http://127.0.0.1:8795", artists: Callable[[]
     areas: list[str] | None = None
     names: list[str] = []
     try:
-        loaded = get(hacli_url + "/api/states")
+        loaded = get("/api/states")
         states = loaded if isinstance(loaded, list) else None
     except Exception:
         pass
     try:
-        rendered = get(hacli_url + "/api/template", {"template": "{{ areas() | map('area_name') | list | tojson }}"})
+        rendered = get("/api/template", {"template": "{{ areas() | map('area_name') | list | tojson }}"})
         parsed = json.loads(rendered) if isinstance(rendered, str) else rendered
         areas = parsed if isinstance(parsed, list) else None
     except Exception:
