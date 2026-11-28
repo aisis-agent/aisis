@@ -731,6 +731,34 @@ class StationDialogTests(TvCase):
         self.assertEqual(self.ha.calls, ["media_pause"])
         self.assertEqual(self.tv.status()["paused"], {})
 
+    def test_an_owner_action_on_one_speakers_room_player_is_kept_whoever_ends_first(self):
+        self.ha.add(f"media_player.aisis_speaker_{self.THIRD_STATION}", "idle", STUDIO, "dev-speaker-3")
+        self.tv.activation(STATION)
+        self.tv.activation(self.THIRD_STATION)             # both speakers hold the studio TV
+        self.tv.observe(self.clock.now + 1, "Fast intent executed: pause [media_player.studio_tv]")
+        self.ended(self.D1, STATION)
+        self.ended(self.D3, self.THIRD_STATION)
+        self.assertEqual(self.ha.calls, ["media_pause"])
+
+    def test_a_player_the_owner_switched_off_is_forgotten_by_every_speaker_that_held_it(self):
+        self.ha.add(f"media_player.aisis_speaker_{self.THIRD_STATION}", "idle", STUDIO, "dev-speaker-3")
+        self.tv.activation(STATION)
+        self.tv.activation(self.THIRD_STATION)
+        self.ha.set(STUDIO_TV, "off")
+        self.tv.activation(self.THIRD_STATION)
+        self.ha.set(STUDIO_TV, "paused")                   # later the owner pauses it again himself
+        self.started(self.D1, STATION)
+        self.ended(self.D1, STATION)
+        self.assertEqual(self.ha.calls, ["media_pause"])
+        self.assertEqual(self.tv.status()["paused"], {})
+
+    def test_a_named_activation_during_a_home_assistant_outage_renews_a_hold_of_the_previous_state_format(self):
+        self.legacy_hold()
+        self.ha.up = False
+        self.tv.activation(STATION)
+        self.assertEqual(self.tv.status()["last_activation"], self.clock.now)
+        self.assertIn(f"hold:", next(iter(self.tv.timers)))
+
 
 class SettingsTests(unittest.TestCase):
     def setUp(self):

@@ -335,36 +335,28 @@ class TvPause:
 
     # ----- state file -----
     def _load(self) -> dict:
-        """The state: `stations` maps a station id (lower case; "" for a hold of the previous state format) to what we hold for it:
-        paused (entity -> when), rest (entity -> the state it showed once our pause took: normally paused, some players say idle), watch
-        (the players of the rooms we paused in: a dialog acting on one of them is the owner's own action), last_activation and
-        user_touched; plus the `events`."""
+        """The state: `holds` maps a held player to {owners: station id (lower case) -> when it paused or joined, rest: the state it showed
+        once our pause took (normally paused, some players say idle), watch: the players of the rooms we paused it for (a dialog acting
+        on one of them is the owner's own action), touched: such an action happened}; `last` maps a station to its last activation;
+        plus the `events`. A state file of the format before per-station holds is one hold owned by station "" (LEGACY_STATION)."""
         try:
             data = json.loads(self.state_file.read_text())
         except (OSError, ValueError):
             data = {}
         data.setdefault("events", [])
-        stations = data.setdefault("stations", {})
-        legacy = {key: data.pop(key) for key in ("paused", "rest", "watch", "last_activation", "user_touched") if key in data}
-        if legacy.get("paused"):
-            stations[""] = legacy
-        for key in stations:
-            self._sub(data, key)
+        data.setdefault("holds", {})
+        data.setdefault("last", {})
+        old = {key: data.pop(key) for key in ("paused", "rest", "watch", "last_activation", "user_touched") if key in data}
+        for entity, since in old.get("paused", {}).items():
+            data["holds"][entity] = {"owners": {LEGACY_STATION: since}, "rest": old.get("rest", {}).get(entity, "paused"),
+                                     "watch": old.get("watch", []), "touched": bool(old.get("user_touched"))}
+        if old.get("paused"):
+            data["last"][LEGACY_STATION] = old.get("last_activation", 0.0)
         return data
-
-    @staticmethod
-    def _sub(st: dict, key: str) -> dict:
-        sub = st["stations"].setdefault(key, {})
-        sub.setdefault("paused", {})
-        sub.setdefault("rest", {})
-        sub.setdefault("watch", [])
-        sub.setdefault("last_activation", 0.0)
-        sub.setdefault("user_touched", False)
-        return sub
 
     def _save(self, st: dict):
         st["events"] = st["events"][-EVENT_LIMIT:]
-        st["stations"] = {key: sub for key, sub in st["stations"].items() if sub["paused"]}     # a station that holds nothing has no state
+        st["last"] = {key: ts for key, ts in st["last"].items() if key in self._owners(st)}     # a station that holds nothing has no state
         fd, tmp = tempfile.mkstemp(dir=self.state_file.parent, prefix=".tv_pause_state.")
         with os.fdopen(fd, "w") as fh:
             json.dump(st, fh, ensure_ascii=False)
@@ -378,9 +370,8 @@ class TvPause:
     def status(self) -> dict:
         with _Locked(self.state_file):
             st = self._load()
-        subs = st["stations"].values()
-        return {"paused": {entity: ts for sub in subs for entity, ts in sub["paused"].items()},
-                "last_activation": max((sub["last_activation"] for sub in subs), default=0.0), "events": st["events"][-10:]}
+        return {"paused": {entity: max(hold["owners"].values()) for entity, hold in st["holds"].items()},
+                "last_activation": max(st["last"].values(), default=0.0), "events": st["events"][-10:]}
 
     # ----- activation: pause -----
     def activation(self, station: str | None = None):
@@ -404,66 +395,58 @@ class TvPause:
             for key in keys:
                 self._arm(f"hold:{key}", cfg["max_hold_s"], self._hold_expired, now, key)
 
+    @staticmethod
+    def _owners(st: dict) -> list[str]:
+        """The stations that hold a pause now."""
+        return sorted({key for hold in st["holds"].values() for key in hold["owners"]})
+
     def _activated(self, st: dict, key: str, now: float) -> list[str]:
-        """Note an activation of the station `key` (an activation that names none and resolves none belongs to every station we hold
-        a pause for); returns the stations that hold a pause."""
-        keys = [key] if key else [k for k, sub in st["stations"].items() if sub["paused"]]
+        """Note an activation of the station `key`: its holds, and a hold of the previous state format, are renewed (an activation that
+        names none renews every hold); returns the stations whose hold timer must follow."""
+        keys = [k for k in self._owners(st) if not key or k in (key, LEGACY_STATION)]
         for k in keys:
-            sub = self._sub(st, k)
-            sub["last_activation"] = now
-            if not sub["paused"]:
-                sub["user_touched"] = False
-        return [k for k in keys if st["stations"][k]["paused"]]
+            st["last"][k] = now
+        return keys
 
     def _pause_room(self, cfg, st, now, players, station) -> list[str]:
-        """Pause the playing players of the activated speaker's room (caller holds the state lock); returns the stations that hold a pause."""
+        """Pause the playing players of the activated speaker's room (caller holds the state lock); returns the stations whose hold timer
+        must follow."""
         room = discover(players, station, cfg["exclude"])
         key = room.station or _key(station)
-        keys = self._activated(st, key, now)
         if room.area is None:
             self._event(st, "skip", detail=room.why)
+            keys = self._activated(st, key, now)
             self._save(st)
             return keys
-        sub = self._sub(st, key)
         states = {p.entity: p.state for p in players}
+        for entity in list(st["holds"]):
+            # Someone else changed it: no longer anybody's. A player Home Assistant cannot tell for now (unloaded, unavailable) stays held.
+            if states.get(entity) not in (None, st["holds"][entity]["rest"], "unavailable", "unknown"):
+                del st["holds"][entity]
+                self._event(st, "forget", entity, f"state {states[entity]}")
+        watch = sorted(p.entity for p in room.players)
         paused_now = []
         for player in room.players:
             entity = player.entity
             if player.state != "playing":
-                other = self._holder(st, key, entity)
-                if other is not None and entity not in sub["paused"]:       # another speaker of the room holds it: this one joins the hold
-                    sub["paused"][entity] = now
-                    sub["rest"][entity] = other["rest"].get(entity, "paused")
-                    sub["watch"] = sorted({*sub["watch"], *(p.entity for p in room.players)})
-                    sub["user_touched"] = sub["user_touched"] or other["user_touched"]     # the owner's own command is not undone by whoever releases last
+                hold = st["holds"].get(entity)
+                if hold is not None:                                          # another speaker of the room holds it: this one joins the hold
+                    hold["owners"][key] = now
+                    hold["watch"] = sorted({*hold["watch"], *watch})
                 continue
             if self.dry_run:
                 self._event(st, "dry-run", entity, f"would pause ({room.area})")
             elif self.ha.call("media_pause", entity):       # every pause first: the second player is not kept waiting for the first
-                sub["paused"][entity] = now
-                sub["watch"] = sorted({*sub["watch"], *(p.entity for p in room.players)})
+                st["holds"][entity] = {"owners": {key: now}, "rest": "paused", "watch": watch, "touched": False}
                 paused_now.append(entity)
                 self._event(st, "pause", entity, room.area)
             else:
                 self._event(st, "error", entity, "media_pause failed")
         for entity, state in self._settled(paused_now).items():
-            sub["rest"][entity] = state
-        for entity in list(sub["paused"]):
-            state = states.get(entity)
-            # Someone else changed it: no longer ours. A player Home Assistant cannot tell for now (unloaded, unavailable) stays ours.
-            if entity not in paused_now and state not in (None, sub["rest"].get(entity, "paused"), "unavailable", "unknown"):
-                del sub["paused"][entity]
-                sub["rest"].pop(entity, None)
-                self._event(st, "forget", entity, f"state {state}")
-        if not sub["paused"]:
-            sub["watch"] = []
+            st["holds"][entity]["rest"] = state
+        keys = self._activated(st, key, now)
         self._save(st)
-        return [key] if sub["paused"] else []
-
-    @staticmethod
-    def _holder(st: dict, key: str, entity: str) -> dict | None:
-        """The state of another station that holds `entity` paused, None when no other does."""
-        return next((sub for k, sub in st["stations"].items() if k != key and entity in sub["paused"]), None)
+        return keys
 
     def _settled(self, entities: list[str]) -> dict[str, str]:
         """The state each player shows once our pause took, polled together within one SETTLE_S: HTTP 200 only says Home Assistant handed
@@ -499,7 +482,7 @@ class TvPause:
 
     def _hold_expired(self, activation_ts, station=None):
         # a newer activation of the station owns the hold
-        self.resume("max hold elapsed", unless=lambda sub: sub["last_activation"] != activation_ts, station=station)
+        self.resume("max hold elapsed", unless=lambda view: view["last_activation"] != activation_ts, station=station)
 
     # ----- dialog log events -----
     def observe(self, ts: float, message: str):
@@ -522,22 +505,22 @@ class TvPause:
             if any(t.startswith("media_player.") for t in targets):      # a light or a climate command never takes the state lock
                 with _Locked(self.state_file):
                     st = self._load()
-                    touched = [sub for sub in st["stations"].values() if sub["paused"] and targets & {*sub["paused"], *sub["watch"]}]
-                    for sub in touched:
-                        sub["user_touched"] = True
+                    touched = [hold for entity, hold in st["holds"].items() if targets & {entity, *hold["watch"]}]
+                    for hold in touched:
+                        hold["touched"] = True
                     if touched:
                         self._event(st, "user-action", ",".join(sorted(targets)), "dialog acted on a player of the room; will not resume")
                         self._save(st)
 
     def dialog_ended(self, did: str, ended_ts: float, station: str | None = None):
         """A dialog ended: release the pauses of its station (its end line names it, else its start line did); a dialog that names no
-        station (an older quasar image) releases every station's pauses."""
+        station (an older quasar image) releases every station's pauses. A hold of the previous state format (no owner known) goes with any end."""
         cfg = self.settings()
         started, started_station = self._started.pop(did, (None, None))
         station = station or started_station
         with _Locked(self.state_file):
             st = self._load()
-            held = {key: sub["last_activation"] for key, sub in st["stations"].items() if sub["paused"]}
+            held = {key: st["last"].get(key, 0.0) for key in self._owners(st)}
         if not cfg["resume"]:
             return
         for key, last in held.items():
@@ -549,31 +532,37 @@ class TvPause:
 
     def _resume_if_idle(self, ended_ts, station=None):
         # the next turn/dialog of the station started during the grace
-        self.resume("dialog ended", unless=lambda sub: sub["last_activation"] > ended_ts, station=station)
+        self.resume("dialog ended", unless=lambda view: view["last_activation"] > ended_ts, station=station)
 
     # ----- resume -----
     def resume(self, reason: str, unless=None, station: str | None = None):
-        """Resume what we paused for `station` (every station when None). `unless(station state)` is evaluated under the same lock as
-        the resume, so an activation cannot slip in between the idle check and the release. A player another speaker of its room still
-        holds stays paused until that one is released too."""
+        """Release what `station` holds (every station when None; a named station also releases a hold of the previous state format).
+        `unless(view)` gets {"paused": the players the station holds, "last_activation": its last one} and is evaluated under the same lock
+        as the release, so an activation cannot slip in between the idle check and the release. A player another speaker still holds stays
+        paused until that one is released too; a player the owner acted on is never resumed."""
         cfg = self.settings()
         with _Locked(self.state_file):
             st = self._load()
-            for key in [_key(station)] if station is not None else list(st["stations"]):
-                sub = st["stations"].get(key)
-                if not sub or not sub["paused"] or (unless is not None and unless(sub)):
+            owners = self._owners(st)
+            for key in owners if station is None else [k for k in (_key(station), LEGACY_STATION) if k in owners]:
+                view = {"paused": {e: h["owners"][key] for e, h in st["holds"].items() if key in h["owners"]},
+                        "last_activation": st["last"].get(key, 0.0)}
+                if unless is not None and unless(view):
                     continue
-                ours, rest, touched = dict(sub["paused"]), dict(sub["rest"]), sub["user_touched"]
-                del st["stations"][key]
-                for entity in ours:
+                st["last"].pop(key, None)
+                for entity in view["paused"]:
+                    hold = st["holds"][entity]
+                    del hold["owners"][key]
+                    if hold["owners"]:
+                        self._event(st, "skip-resume", entity, "another speaker of the room still holds it")
+                        continue
+                    del st["holds"][entity]
                     if not cfg["resume"]:
                         self._event(st, "skip-resume", entity, "resume disabled")
-                    elif touched:
+                    elif hold["touched"]:
                         self._event(st, "skip-resume", entity, "dialog acted on a player of the room")
-                    elif any(entity in other["paused"] for other in st["stations"].values()):
-                        self._event(st, "skip-resume", entity, "another speaker of the room still holds it")
                     else:
-                        self._resume_player(st, entity, rest.get(entity, "paused"), reason)
+                        self._resume_player(st, entity, hold["rest"], reason)
             self._save(st)
 
     def _resume_player(self, st: dict, entity: str, rest: str, reason: str):
@@ -592,7 +581,7 @@ class TvPause:
         cfg = self.settings()
         with _Locked(self.state_file):
             st = self._load()
-            holds = {key: sub["last_activation"] for key, sub in st["stations"].items() if sub["paused"]}
+            holds = {key: st["last"].get(key, 0.0) for key in self._owners(st)}
         for key, last in holds.items():
             self._arm(f"hold:{key}", max(1.0, last + cfg["max_hold_s"] - self.clock()), self._hold_expired, last, key)
 
