@@ -21,12 +21,11 @@ service calls. Which players count is a rule, not a list (#276):
     speaker has in Home Assistant, named by the websocket, else the only media_player.aisis_speaker_* Home Assistant has. No room
     known (no or several speakers, a speaker without an area, an unknown station) pauses nothing and the reason is the event «skip»;
     so does an unreachable or unreadable Home Assistant (a state that cannot be read is not «playing»).
-    Known limits (UB-277): the quasar STT client names no station today, so every live turn takes the fallback. It is right while this
-    quasar server serves one station (the only station in its connection log over 72 h is the one whose aisis_speaker player Home
-    Assistant has). With a second available aisis_speaker player and no station named, nothing is paused (event «skip», the dashboard
-    card's `why`) until the client names the station. The dialog log carries no station either, so with two speakers talking at once
-    the resume of one room is not told from the other's: a dialog end releases every pause we hold. A pause polls the player for up to
-    SETTLE_S (2 s) under the state lock.
+    The quasar fork names the station on its STT websocket (x-aisis-station) and on its «Dialog <id> started/ended» log lines
+    (`station=<id>`), so a live turn resolves its room exactly (UB-277). A quasar image that names none (the one in production before
+    that fork) takes the fallback: right while it serves one station; with a second available aisis_speaker player and no station
+    named, nothing is paused (event «skip», the dashboard card's `why`). A pause polls the player for up to SETTLE_S (2 s) under the
+    state lock.
 
 Rules of the hold (all deliberate):
   * resume only what *we* paused, only if it is still in the state our pause left it in (`paused`; `idle` for the players that say so,
@@ -35,8 +34,12 @@ Rules of the hold (all deliberate):
     owner said pause/stop/play, never undo it; a command for a player of another room does not count);
   * a held player that Home Assistant cannot tell for a moment (`unavailable`, `unknown`, gone) stays ours; one in any other state
     than the pause left it in is no longer ours;
-  * a new activation inside the resume grace cancels the resume (next turn/dialog owns it);
-  * if no end signal ever arrives, a timer resumes after `max_hold_s` since the last activation;
+  * a new activation of the same speaker inside the resume grace cancels the resume (next turn/dialog owns it);
+  * holds are per station: a dialog end (its end line names its station, else its start line did) releases only the pauses of that
+    station's room, an activation or a dialog acting on a player of another room never cancels or blocks that resume; a dialog line
+    that names no station releases every station's pauses; a player two speakers of one room both paused stays paused until both
+    dialogs ended;
+  * if no end signal ever arrives, a timer resumes after `max_hold_s` since the station's last activation;
   * `AISIS_TVPAUSE_DRY_RUN=1` reads states but never calls a service (events say "dry-run").
 
 Settings: ~/.config/aisis/tv_pause.json (atomic, 0600), edited in the dashboard. The `entities` list of the first version is not read
@@ -65,8 +68,10 @@ ENTITY_RE = re.compile(r"^media_player\.[a-z0-9_]+$")
 # A dialog belongs to an activation if it started at most this long after it (clock/queue jitter
 # between the STT open and the container's "Dialog started"); a later start is another dialog.
 START_TOLERANCE_S = 3.0
+LEGACY_STATION = ""      # the key of a hold read from a state file of the format before per-station holds: its owner is unknown
 EVENT_LIMIT = 30
 DIALOG_RE = re.compile(r"Dialog ([0-9a-f-]{36}) (started|ended)")
+STATION_RE = re.compile(r"\bstation=([A-Za-z0-9._-]+)")      # the container's dialog lines end with it (UB-277)
 EXECUTED_RE = re.compile(r"Fast intent executed: .*\[([^\]]*)\]")
 # Every media player with its live state, its area (its own, else its device's), its device and the device's area, and the queue it
 # fronts: one call, always fresh. The speaker's room is its DEVICE's area (README, «Which room»), the other players' room is their area.
@@ -102,6 +107,7 @@ class Room:
     area: str | None
     players: tuple[Player, ...] = ()
     why: str = ""
+    station: str = ""     # the speaker's id (lower case) when it is known, whether or not its room is
 
 
 def _text(value) -> str | None:
@@ -113,6 +119,11 @@ def _members(value) -> tuple[str, ...]:
     """A group player's member entity ids; anything else is no members."""
     return tuple(m for m in value if isinstance(m, str)) if isinstance(value, list) else ()
 
+
+
+def _key(station: str | None) -> str:
+    """The id the state is keyed by: the station as Home Assistant has it in its entity ids."""
+    return (station or "").strip().lower()
 
 
 def discover(players: list[Player], station: str | None, exclude=()) -> Room:
@@ -150,7 +161,7 @@ def discover(players: list[Player], station: str | None, exclude=()) -> Room:
         if not reaching:
             break
         forbidden |= reaching
-    return Room(area, tuple(p for p in players if p.area == area and p.entity not in forbidden))
+    return Room(area, tuple(p for p in players if p.area == area and p.entity not in forbidden), station=ident)
 
 
 def config_dir() -> Path:
@@ -320,24 +331,32 @@ class TvPause:
         self.clock = clock
         self.sleep = sleep
         self.timers: dict[str, threading.Timer] = {}
-        self._started: dict[str, float] = {}      # dialog id -> start time seen in this process
+        self._started: dict[str, tuple[float, str | None]] = {}      # dialog id -> (start time, station) seen in this process
 
     # ----- state file -----
     def _load(self) -> dict:
+        """The state: `holds` maps a held player to {owners: station id (lower case) -> when it paused or joined, rest: the state it showed
+        once our pause took (normally paused, some players say idle), watch: the players of the rooms we paused it for (a dialog acting
+        on one of them is the owner's own action), touched: such an action happened}; `last` maps a station to its last activation;
+        plus the `events`. A state file of the format before per-station holds is one hold owned by station "" (LEGACY_STATION)."""
         try:
             data = json.loads(self.state_file.read_text())
         except (OSError, ValueError):
             data = {}
-        data.setdefault("paused", {})
-        data.setdefault("last_activation", 0.0)
-        data.setdefault("user_touched", False)
-        data.setdefault("rest", {})          # entity -> the state it showed once our pause took (normally paused; some players say idle)
-        data.setdefault("watch", [])         # the players of the rooms we paused in: a dialog acting on one of them is the owner's own action
         data.setdefault("events", [])
+        data.setdefault("holds", {})
+        data.setdefault("last", {})
+        old = {key: data.pop(key) for key in ("paused", "rest", "watch", "last_activation", "user_touched") if key in data}
+        for entity, since in old.get("paused", {}).items():
+            data["holds"][entity] = {"owners": {LEGACY_STATION: since}, "rest": old.get("rest", {}).get(entity, "paused"),
+                                     "watch": old.get("watch", []), "touched": bool(old.get("user_touched"))}
+        if old.get("paused"):
+            data["last"][LEGACY_STATION] = old.get("last_activation", 0.0)
         return data
 
     def _save(self, st: dict):
         st["events"] = st["events"][-EVENT_LIMIT:]
+        st["last"] = {key: ts for key, ts in st["last"].items() if key in self._owners(st)}     # a station that holds nothing has no state
         fd, tmp = tempfile.mkstemp(dir=self.state_file.parent, prefix=".tv_pause_state.")
         with os.fdopen(fd, "w") as fh:
             json.dump(st, fh, ensure_ascii=False)
@@ -351,7 +370,8 @@ class TvPause:
     def status(self) -> dict:
         with _Locked(self.state_file):
             st = self._load()
-        return {"paused": st["paused"], "last_activation": st["last_activation"], "events": st["events"][-10:]}
+        return {"paused": {entity: max(hold["owners"].values()) for entity, hold in st["holds"].items()},
+                "last_activation": max(st["last"].values(), default=0.0), "events": st["events"][-10:]}
 
     # ----- activation: pause -----
     def activation(self, station: str | None = None):
@@ -361,58 +381,72 @@ class TvPause:
         now = self.clock()
         with _Locked(self.state_file):
             st = self._load()
-            st["last_activation"] = now
-            if not st["paused"]:
-                st["user_touched"] = False
             players = self.ha.players()
             if players is None:
                 self._event(st, "skip", detail=getattr(self.ha, "why", "") or "Home Assistant unreachable or unreadable")
-                self._save(st)
                 # A pause held from an earlier activation must follow this newer last_activation,
                 # or its hold timer (keyed to the older one) expires as a no-op and never resumes.
-                holding = bool(st["paused"])
+                keys = self._activated(st, _key(station), now)
+                self._save(st)
             else:
-                holding = self._pause_room(cfg, st, now, players, station)
+                keys = self._pause_room(cfg, st, now, players, station)
             # Armed under the state lock: an older activation must not replace the timer of a newer one
             # after releasing the lock (its timestamp guard would then expire as a no-op).
-            if holding:
-                self._arm("hold", cfg["max_hold_s"], self._hold_expired, now)
+            for key in keys:
+                self._arm(f"hold:{key}", cfg["max_hold_s"], self._hold_expired, now, key)
 
-    def _pause_room(self, cfg, st, now, players, station) -> bool:
-        """Pause the playing players of the activated speaker's room (caller holds the state lock); returns whether any pause is held."""
+    @staticmethod
+    def _owners(st: dict) -> list[str]:
+        """The stations that hold a pause now."""
+        return sorted({key for hold in st["holds"].values() for key in hold["owners"]})
+
+    def _activated(self, st: dict, key: str, now: float) -> list[str]:
+        """Note an activation of the station `key`: its holds, and a hold of the previous state format, are renewed (an activation that
+        names none renews every hold); returns the stations whose hold timer must follow."""
+        keys = [k for k in self._owners(st) if not key or k in (key, LEGACY_STATION)]
+        for k in keys:
+            st["last"][k] = now
+        return keys
+
+    def _pause_room(self, cfg, st, now, players, station) -> list[str]:
+        """Pause the playing players of the activated speaker's room (caller holds the state lock); returns the stations whose hold timer
+        must follow."""
         room = discover(players, station, cfg["exclude"])
+        key = room.station or _key(station)
         if room.area is None:
             self._event(st, "skip", detail=room.why)
+            keys = self._activated(st, key, now)
             self._save(st)
-            return bool(st["paused"])
+            return keys
         states = {p.entity: p.state for p in players}
+        for entity in list(st["holds"]):
+            # Someone else changed it: no longer anybody's. A player Home Assistant cannot tell for now (unloaded, unavailable) stays held.
+            if states.get(entity) not in (None, st["holds"][entity]["rest"], "unavailable", "unknown"):
+                del st["holds"][entity]
+                self._event(st, "forget", entity, f"state {states[entity]}")
+        watch = sorted(p.entity for p in room.players)
         paused_now = []
         for player in room.players:
-            if player.state != "playing":
-                continue
             entity = player.entity
+            if player.state != "playing":
+                hold = st["holds"].get(entity)
+                if hold is not None:                                          # another speaker of the room holds it: this one joins the hold
+                    hold["owners"][key] = now
+                    hold["watch"] = sorted({*hold["watch"], *watch})
+                continue
             if self.dry_run:
                 self._event(st, "dry-run", entity, f"would pause ({room.area})")
             elif self.ha.call("media_pause", entity):       # every pause first: the second player is not kept waiting for the first
-                st["paused"][entity] = now
-                st["watch"] = sorted({*st["watch"], *(p.entity for p in room.players)})
+                st["holds"][entity] = {"owners": {key: now}, "rest": "paused", "watch": watch, "touched": False}
                 paused_now.append(entity)
                 self._event(st, "pause", entity, room.area)
             else:
                 self._event(st, "error", entity, "media_pause failed")
         for entity, state in self._settled(paused_now).items():
-            st["rest"][entity] = state
-        for entity in list(st["paused"]):
-            state = states.get(entity)
-            # Someone else changed it: no longer ours. A player Home Assistant cannot tell for now (unloaded, unavailable) stays ours.
-            if entity not in paused_now and state not in (None, st["rest"].get(entity, "paused"), "unavailable", "unknown"):
-                del st["paused"][entity]
-                st["rest"].pop(entity, None)
-                self._event(st, "forget", entity, f"state {state}")
-        if not st["paused"]:
-            st["watch"] = []
+            st["holds"][entity]["rest"] = state
+        keys = self._activated(st, key, now)
         self._save(st)
-        return bool(st["paused"])
+        return keys
 
     def _settled(self, entities: list[str]) -> dict[str, str]:
         """The state each player shows once our pause took, polled together within one SETTLE_S: HTTP 200 only says Home Assistant handed
@@ -446,9 +480,9 @@ class TvPause:
         self.timers[name] = timer
         timer.start()
 
-    def _hold_expired(self, activation_ts):
-        # a newer activation owns the hold
-        self.resume("max hold elapsed", unless=lambda st: st["last_activation"] != activation_ts)
+    def _hold_expired(self, activation_ts, station=None):
+        # a newer activation of the station owns the hold
+        self.resume("max hold elapsed", unless=lambda view: view["last_activation"] != activation_ts, station=station)
 
     # ----- dialog log events -----
     def observe(self, ts: float, message: str):
@@ -456,12 +490,14 @@ class TvPause:
         m = DIALOG_RE.search(message)
         if m:
             did, what = m.groups()
+            station = STATION_RE.search(message)
+            station = station.group(1) if station else None
             if what == "started":
-                self._started[did] = ts
+                self._started[did] = (ts, station)
                 if len(self._started) > 64:
                     self._started.pop(next(iter(self._started)))
             else:
-                self.dialog_ended(did, ts)
+                self.dialog_ended(did, ts, station)
             return
         m = EXECUTED_RE.search(message)
         if m:
@@ -469,65 +505,86 @@ class TvPause:
             if any(t.startswith("media_player.") for t in targets):      # a light or a climate command never takes the state lock
                 with _Locked(self.state_file):
                     st = self._load()
-                    if st["paused"] and targets & {*st["paused"], *st["watch"]}:
-                        st["user_touched"] = True
+                    touched = [hold for entity, hold in st["holds"].items() if targets & {entity, *hold["watch"]}]
+                    for hold in touched:
+                        hold["touched"] = True
+                    if touched:
                         self._event(st, "user-action", ",".join(sorted(targets)), "dialog acted on a player of the room; will not resume")
                         self._save(st)
 
-    def dialog_ended(self, did: str, ended_ts: float):
+    def dialog_ended(self, did: str, ended_ts: float, station: str | None = None):
+        """A dialog ended: release the pauses of its station (its end line names it, else its start line did); a dialog that names no
+        station (an older quasar image) releases every station's pauses. A hold of the previous state format (no owner known) goes with any end."""
         cfg = self.settings()
-        started = self._started.pop(did, None)
+        started, started_station = self._started.pop(did, (None, None))
+        station = station or started_station
         with _Locked(self.state_file):
             st = self._load()
-            holding = bool(st["paused"])
-            last = st["last_activation"]
-        if not holding or not cfg["resume"]:
+            held = {key: st["last"].get(key, 0.0) for key in self._owners(st)}
+        if not cfg["resume"]:
             return
-        if started is not None and started > last + START_TOLERANCE_S:
-            return                                   # a dialog opened after the activation we hold (e.g. text command)
-        self._arm("resume", cfg["resume_delay_s"], self._resume_if_idle, ended_ts)
+        newest = max(held.values(), default=0.0)
+        for key, last in held.items():
+            if station and key not in (_key(station), LEGACY_STATION):
+                continue
+            if started is not None and key != LEGACY_STATION and started > (last if station else newest) + START_TOLERANCE_S:
+                continue                             # a dialog opened after the activation we hold (e.g. text command); an unnamed one belongs to the latest activation of any station
+            self._arm(f"resume:{key}", cfg["resume_delay_s"], self._resume_if_idle, ended_ts, key)
 
-    def _resume_if_idle(self, ended_ts):
-        # the next turn/dialog started during the grace
-        self.resume("dialog ended", unless=lambda st: st["last_activation"] > ended_ts)
+    def _resume_if_idle(self, ended_ts, station=None):
+        # the next turn/dialog of the station started during the grace
+        self.resume("dialog ended", unless=lambda view: view["last_activation"] > ended_ts, station=station)
 
     # ----- resume -----
-    def resume(self, reason: str, unless=None):
-        """Resume what we paused. `unless(state)` is evaluated under the same lock as the resume,
-        so an activation cannot slip in between the idle check and the release."""
+    def resume(self, reason: str, unless=None, station: str | None = None):
+        """Release what `station` holds (every station when None; a named station also releases a hold of the previous state format).
+        `unless(view)` gets {"paused": the players the station holds, "last_activation": its last one} and is evaluated under the same lock
+        as the release, so an activation cannot slip in between the idle check and the release. A player another speaker still holds stays
+        paused until that one is released too; a player the owner acted on is never resumed."""
         cfg = self.settings()
         with _Locked(self.state_file):
             st = self._load()
-            if unless is not None and unless(st):
-                return
-            ours, rest, touched = dict(st["paused"]), dict(st["rest"]), st["user_touched"]
-            st["paused"], st["rest"], st["watch"], st["user_touched"] = {}, {}, [], False
-            for entity in ours:
-                if not cfg["resume"]:
-                    self._event(st, "skip-resume", entity, "resume disabled")
+            owners = self._owners(st)
+            for key in owners if station is None else [k for k in (_key(station), LEGACY_STATION) if k in owners]:
+                view = {"paused": {e: h["owners"][key] for e, h in st["holds"].items() if key in h["owners"]},
+                        "last_activation": st["last"].get(key, 0.0)}
+                if unless is not None and unless(view):
                     continue
-                if touched:
-                    self._event(st, "skip-resume", entity, "dialog acted on a player of the room")
-                    continue
-                state = self.ha.state(entity)
-                if state != rest.get(entity, "paused"):
-                    self._event(st, "skip-resume", entity, f"state {state}")
-                elif self.dry_run:
-                    self._event(st, "dry-run", entity, f"would resume ({reason})")
-                elif self.ha.call("media_play", entity):
-                    self._event(st, "resume", entity, reason)
-                else:
-                    self._event(st, "error", entity, "media_play failed")
+                st["last"].pop(key, None)
+                for entity in view["paused"]:
+                    hold = st["holds"][entity]
+                    del hold["owners"][key]
+                    if hold["owners"]:
+                        self._event(st, "skip-resume", entity, "another speaker of the room still holds it")
+                        continue
+                    del st["holds"][entity]
+                    if not cfg["resume"]:
+                        self._event(st, "skip-resume", entity, "resume disabled")
+                    elif hold["touched"]:
+                        self._event(st, "skip-resume", entity, "dialog acted on a player of the room")
+                    else:
+                        self._resume_player(st, entity, hold["rest"], reason)
             self._save(st)
 
+    def _resume_player(self, st: dict, entity: str, rest: str, reason: str):
+        state = self.ha.state(entity)
+        if state != rest:
+            self._event(st, "skip-resume", entity, f"state {state}")
+        elif self.dry_run:
+            self._event(st, "dry-run", entity, f"would resume ({reason})")
+        elif self.ha.call("media_play", entity):
+            self._event(st, "resume", entity, reason)
+        else:
+            self._event(st, "error", entity, "media_play failed")
+
     def recover(self):
-        """After a service restart: a pause we still hold is released once max_hold_s has passed."""
+        """After a service restart: a pause we still hold is released once max_hold_s has passed since its station's last activation."""
         cfg = self.settings()
         with _Locked(self.state_file):
             st = self._load()
-            holding, last = bool(st["paused"]), st["last_activation"]
-        if holding:
-            self._arm("hold", max(1.0, last + cfg["max_hold_s"] - self.clock()), self._hold_expired, last)
+            holds = {key: st["last"].get(key, 0.0) for key in self._owners(st)}
+        for key, last in holds.items():
+            self._arm(f"hold:{key}", max(1.0, last + cfg["max_hold_s"] - self.clock()), self._hold_expired, last, key)
 
 
 _default = None

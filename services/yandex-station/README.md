@@ -225,14 +225,19 @@ directory the quasar containers mount read-only), through one client, `code/ha_c
   it never restarts a running unit (it names the ones to restart). `--check` exits 3
   on drift, `--plan` only prints it. A fresh machine gets it from the `aisis`
   module of the `.files` profile (clones this repository, runs the installer).
-- **Deployment worktree**: adapter, clip feed, dashboard, the STT gateway and the quasar LAN proxy run their code from
-  `~/xp/aisis/.worktrees/deploy-main` (branch `deploy-main`), selected by the
+- **Deployment worktree**: adapter, clip feed, dashboard, the STT gateway, the quasar LAN proxy, the failover watchdog and the pm bridge run their
+  code from `~/xp/aisis/.worktrees/deploy-main` (branch `deploy-main`), selected by the
   `deploy-worktree.conf` drop-ins in `systemd/<unit>.service.d/`; the shared
   primary checkout is not their code path. Create it once with
   `git worktree add .worktrees/deploy-main -b deploy-main origin/main`, update it with
   `flock -w 120 "${AISIS_BG_STATE:-$HOME/.local/share/aisis/bluegreen-state}/maintenance.lock" git -C ~/xp/aisis/.worktrees/deploy-main merge --ff-only origin/main`
   (the lock `deploy.sh` holds while it backs up and installs, so an update never lands in the middle of one), then
   restart the unit you want to move, one at a time, and check its health.
+  A machine-local drop-in that wraps the watchdog in a launcher (this host's `front-exclude.conf`: `failover-exclude.py` leaves out the
+  components of another host) sorts after `deploy-worktree.conf`, so its `ExecStart` is the one that runs. That launcher loads `failover.py` from
+  `AISIS_BLUEGREEN_DIR`, which `zz-launcher-bluegreen-dir.conf` points at the same worktree whatever directory the launcher's drop-in fixed; the
+  exclusions (and the operator's `zz-operator-*` pauses) are never replaced by the repository's drop-ins. The installer refuses a worktree without
+  `failover.py` or `pm_cdp_server.py` (exit 10) and never starts a unit under `--no-start`.
 - **ASR benchmark**: `bin/install-asr-bench.sh [--enable]` builds `~/.local/share/aisis/asr-bench-venv` (exact pins in
   `code/requirements-asr-bench.txt`); `--enable` installs the units through `scripts/install-systemd-units.sh --no-start` and
   starts only `aisis-station-asr-bench.timer` (03:40, `Nice=19`, idle I/O, 200 % CPU quota, 6 GB cap, temp files in
@@ -648,8 +653,9 @@ never read aloud.
   the adapter about this phrase right after the final, so the evidence must be stored first. The outcome is logged
   (`stt_hyp publish status=ok|http:<code>|timeout|error:<class>`); a POST still running at the bound finishes on its own. The
   adapter keeps the evidence 15 s, at most 64 entries (`hypothesis_store.py`), for the quasar hook and the correction dialog;
-  `/healthz` of the adapter shows the store. The gateway's websocket carries no station id today (it uses `x-aisis-station` or
-  `?station=` when a client sends one), so the evidence is stored for any station. The adapter checks `AISIS_ADAPTER_TOKEN`: give
+  `/healthz` of the adapter shows the store. The gateway's websocket names its station in the `x-aisis-station` header (the quasar
+  fork sets it from the connected speaker's id, UB-277; `?station=` is read too), so the evidence is stored under that station; a
+  client that names none (a quasar image from before that fork) is stored for any station. The adapter checks `AISIS_ADAPTER_TOKEN`: give
   the gateway unit the same value. With speaker enforcement on, the words of a foreign voice (the empty `foreign_voice` final) are
   never published, however late the opinion arrives, and that final does not wait for the opinion; it is still kept with the clip.
   **Shadow only in this change:** nothing reads the stored evidence yet (the consumers arrive with the correction-FSM change), and

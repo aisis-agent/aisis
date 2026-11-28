@@ -410,7 +410,7 @@ class UnitInstallTargetTests(unittest.TestCase):
         self.deploy_main = home / "xp/aisis/.worktrees/deploy-main/services/yandex-station/code"
         for folder in (self.primary, self.deploy_main):
             folder.mkdir(parents=True)
-            for name in ("adapter.py", "stt_wyoming.py"):
+            for name in ("adapter.py", "stt_wyoming.py", "pm_cdp_server.py"):
                 (folder / name).write_text(self.old)
         (self.bin / "systemctl").write_text(
             '#!/bin/sh\nif [ "$2" = show ]; then\n'
@@ -479,6 +479,13 @@ class UnitInstallTargetTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.deploy_main / "stt_wyoming.py").read_text(), "VERSION = 'new'\n")
         self.assertEqual((self.primary / "stt_wyoming.py").read_text(), self.old)
+
+    def test_pm_installs_into_the_worktree_its_unit_runs_from(self):
+        self.exec_start(self.deploy_main, "pm_cdp_server.py")
+        result = self.install("pm", "pm_cdp_server.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.deploy_main / "pm_cdp_server.py").read_text(), "VERSION = 'new'\n")
+        self.assertEqual((self.primary / "pm_cdp_server.py").read_text(), self.old)
 
 
 if __name__ == "__main__":

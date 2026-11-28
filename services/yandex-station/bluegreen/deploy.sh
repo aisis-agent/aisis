@@ -398,9 +398,9 @@ cmd_unit() {
   maintenance_on
   # Resolved only while the maintenance lock is held (the installer takes the same lock around drop-in install + daemon-reload),
   # so the unit cannot migrate between this lookup and the restart. Without an explicit AISIS_CODE_DIR the adapter's files go where
-  # systemd actually runs it (adapter or stt; its effective ExecStart: primary checkout or the deploy-main worktree), never where a directory
+  # systemd actually runs it (adapter, stt or pm; its effective ExecStart: primary checkout or the deploy-main worktree), never where a directory
   # merely exists: a restart must run the code just installed.
-  if [[ ( $name == adapter || $name == stt ) && -z $code_dir_overridden ]]; then
+  if [[ ( $name == adapter || $name == stt || $name == pm ) && -z $code_dir_overridden ]]; then
     local exec_start exec_path argv adapter_path
     exec_start=$(systemctl --user show -p ExecStart --value "$unit") || die "cannot read ExecStart of $unit"
     # systemd prints `{ path=P ; argv[]=P ARG... ; ignore_errors=... }` with no quoting: split on the field separators, not on

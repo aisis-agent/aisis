@@ -6,11 +6,40 @@ Nothing touches the real systemd or the real ~/.config.
 """
 import fcntl
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+
+def merged_service(dest, unit, home):
+    """What systemd makes of the [Service] section of a user unit: the unit file, then the drop-ins of <unit>.d in file-name order. A later
+    `Environment=` assignment of a variable wins, an empty `ExecStart=` clears the commands, `%h` is the home directory and `${VAR}` an
+    assigned variable."""
+    env, commands, workdir = {}, [], None
+    for path in [dest / unit, *sorted((dest / f"{unit}.d").glob("*.conf"), key=lambda p: p.name)]:
+        section = None
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if line.startswith("["):
+                section = line
+            if section != "[Service]" or not line or line.startswith(("#", "[")) or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            value = value.replace("%h", str(home))
+            if key == "Environment":
+                name, _, assigned = value.partition("=")
+                env[name] = assigned
+            elif key == "ExecStart":
+                if value == "":
+                    commands.clear()
+                else:
+                    commands.append(value)
+            elif key == "WorkingDirectory":
+                workdir = value
+    return {"env": env, "workdir": workdir, "exec": [re.sub(r"\$\{(\w+)\}", lambda m: env[m.group(1)], command) for command in commands]}
 
 SCRIPT = Path(__file__).resolve().parent / "install-systemd-units.sh"
 UNITS = Path(__file__).resolve().parents[1] / "services" / "yandex-station" / "systemd"
@@ -67,9 +96,11 @@ class InstallerTest(unittest.TestCase):
             shutil.copytree(src, self.repo / "services" / src.parent.name / "systemd")
         code = self.repo / "services" / "yandex-station" / "code"
         code.mkdir(parents=True, exist_ok=True)
-        for name in ("adapter.py", "clipfeed.py", "dashboard.py", "extra_dict_dynamic.py", "stt_wyoming.py"):
+        for name in ("adapter.py", "clipfeed.py", "dashboard.py", "extra_dict_dynamic.py", "pm_cdp_server.py", "stt_wyoming.py"):
             (code / name).write_text("# entry\n")
         (code / "quasar_lan_proxy.py").write_text("# entry: reads ALLOWED_PEERS\n")
+        (self.repo / self.BLUEGREEN).mkdir(parents=True)
+        (self.repo / self.BLUEGREEN / "failover.py").write_text("# entry\n")
         for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "init"],
                      ["update-ref", "refs/remotes/origin/main", "HEAD"]):
             self.git(*args)
@@ -369,6 +400,74 @@ class InstallerTest(unittest.TestCase):
             self.assertIn("unusable:", result.stdout, flag)
             self.assertIn("missing services/yandex-station/code/dashboard.py", result.stdout, flag)
         self.assertEqual(self.run_script("--check").returncode, 3)
+
+    # ----- the watchdog and the pm bridge run from the deploy worktree (UB-279) -----
+
+    BLUEGREEN = "services/yandex-station/bluegreen"
+    HOST_LAUNCHER = ("ExecStart=\nExecStart=/usr/bin/python3 /home/u/.config/aisis/failover-exclude.py --env prod"
+                     " --exclude-component tls-voice --exclude-component dns-relay\n")
+
+    def merged(self, unit):
+        return merged_service(self.dest, unit, self.home)
+
+    def host_failover_dropins(self, bluegreen_dir):
+        """The machine-local drop-ins of the real host: the front-exclusion launcher (rendered from a template that fixes the directory) and the
+        operator's temporary pm exclusion that comes after it."""
+        dropins = self.dest / "aisis-failover.service.d"
+        dropins.mkdir(parents=True)
+        (dropins / "front-exclude.conf").write_text(f"[Service]\nEnvironment=AISIS_BLUEGREEN_DIR={bluegreen_dir}\n{self.HOST_LAUNCHER}")
+        (dropins / "zz-operator-paused-chatgpt-20261127.conf").write_text(
+            "[Service]\nExecStart=\nExecStart=/usr/bin/python3 /home/u/.config/aisis/failover-exclude.py --env prod"
+            " --exclude-component tls-voice --exclude-component dns-relay --exclude-component pm\n")
+
+    def test_the_watchdog_runs_from_the_deploy_worktree(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        unit = self.merged("aisis-failover.service")
+        failover = self.deploy_tree / self.BLUEGREEN / "failover.py"
+        self.assertEqual(unit["exec"], [f"/usr/bin/python3 {failover} --env prod"])
+        self.assertEqual(unit["env"]["AISIS_BLUEGREEN_DIR"], str(failover.parent), "the launcher's directory and the unit's ExecStart name one place")
+        self.assertTrue(failover.is_file())
+
+    def test_a_machine_local_launcher_that_fixes_the_primary_checkout_still_runs_the_deploy_worktree(self):
+        """The host's front-exclude.conf sorts after any drop-in named deploy-worktree.conf and sets the directory itself: the repository's
+        drop-in must still decide it, and must leave the launcher's ExecStart (with the operator's later exclusion) alone."""
+        self.host_failover_dropins(f"{self.primary}/{self.BLUEGREEN}")
+        before = {p.name: p.read_bytes() for p in (self.dest / "aisis-failover.service.d").iterdir()}
+        self.assertEqual(self.run_script().returncode, 0)
+        unit = self.merged("aisis-failover.service")
+        self.assertEqual(unit["env"]["AISIS_BLUEGREEN_DIR"], f"{self.deploy_tree}/{self.BLUEGREEN}")
+        self.assertEqual(len(unit["exec"]), 1)
+        self.assertIn("failover-exclude.py", unit["exec"][0])
+        self.assertIn("--exclude-component pm", unit["exec"][0])
+        for name, content in before.items():
+            self.assertEqual((self.dest / "aisis-failover.service.d" / name).read_bytes(), content, f"the host's {name} is not ours to change")
+
+    def test_the_launcher_directory_and_the_repository_agree_whatever_the_host_file_says(self):
+        self.host_failover_dropins("/anywhere/else")
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(self.merged("aisis-failover.service")["env"]["AISIS_BLUEGREEN_DIR"], f"{self.deploy_tree}/{self.BLUEGREEN}")
+
+    def test_deploy_worktree_without_the_watchdog_is_refused(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        (self.deploy_tree / self.BLUEGREEN / "failover.py").unlink()
+        shutil.rmtree(self.dest)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 10)
+        self.assertIn(f"missing {self.BLUEGREEN}/failover.py", result.stderr)
+        self.assertFalse(self.dest.exists())
+
+    def test_the_pm_bridge_runs_from_the_deploy_worktree_and_the_operator_stop_survives(self):
+        dropins = self.dest / "aisis-station-pm.service.d"
+        dropins.mkdir(parents=True)
+        stop = "[Unit]\nConditionPathExists=!/x/operator-stop\n"
+        (dropins / "zz-operator-paused-chatgpt-20261127.conf").write_text(stop)
+        self.assertEqual(self.run_script().returncode, 0)
+        unit = self.merged("aisis-station-pm.service")
+        code = self.deploy_tree / "services/yandex-station/code"
+        self.assertEqual(unit["workdir"], str(code))
+        self.assertTrue(unit["exec"][0].endswith(f"/python {code}/pm_cdp_server.py"), unit["exec"])
+        self.assertTrue((code / "pm_cdp_server.py").is_file())
+        self.assertEqual((dropins / "zz-operator-paused-chatgpt-20261127.conf").read_text(), stop)
 
 
 if __name__ == "__main__":

@@ -136,7 +136,8 @@ HYP_GUARD_S = 0.05             # a second opinion (or a POST) that ignores its o
 
 def station_of(request):
     """The station a websocket or upload belongs to when it says so (header x-aisis-station or query ?station=), else None: the
-    quasar STT client sends neither today, and the adapter's store then serves the evidence to any station."""
+    quasar fork sets the header from the connected speaker's id (UB-277); an older quasar image names none, and the adapter's store then
+    serves the evidence to any station and the TV pause takes the only speaker Home Assistant has."""
     value = (request.headers.get("x-aisis-station") or request.query.get("station") or "").strip()
     return value[:64] if value and value.isprintable() else None
 
