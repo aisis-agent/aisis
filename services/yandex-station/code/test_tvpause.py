@@ -698,6 +698,39 @@ class StationDialogTests(TvCase):
         self.tv.resume("max hold elapsed")
         self.assertEqual(self.ha.targets, [("media_play", ENTITY)])
 
+    def legacy_hold(self):
+        """A pause held in the previous state format (one hold, no station): the studio TV."""
+        self.ha.set(STUDIO_TV, "paused")
+        self.tv.state_file.write_text(json.dumps({"paused": {STUDIO_TV: 900.0}, "rest": {}, "watch": [STUDIO_TV], "last_activation": 900.0,
+                                                  "user_touched": False, "events": []}))
+
+    def test_a_named_dialog_end_releases_a_hold_of_the_previous_state_format(self):
+        self.legacy_hold()
+        self.started(self.D1, STATION)
+        self.ended(self.D1, STATION)
+        self.assertEqual(self.ha.targets, [("media_play", STUDIO_TV)])
+        self.assertEqual(self.tv.status()["paused"], {})
+
+    def test_a_speaker_that_joins_a_hold_of_the_previous_state_format_releases_it_with_its_own_dialog(self):
+        self.legacy_hold()
+        self.tv.activation(STATION)                        # the TV is paused already: this speaker joins the old hold
+        self.started(self.D1, STATION)
+        self.ended(self.D1, STATION)
+        self.assertEqual(self.ha.targets, [("media_play", STUDIO_TV)])
+        self.assertEqual(self.tv.status()["paused"], {})
+
+    def test_a_speaker_that_joins_after_the_owner_acted_does_not_undo_the_owners_pause(self):
+        self.ha.add(f"media_player.aisis_speaker_{self.THIRD_STATION}", "idle", STUDIO, "dev-speaker-3")
+        self.tv.activation(STATION)
+        self.tv.observe(self.clock.now + 1, "Fast intent executed: pause [media_player.studio_tv]")     # the owner said «pause» in the first dialog
+        self.tv.activation(self.THIRD_STATION)             # the studio TV is held already: this speaker joins the hold
+        self.started(self.D1, STATION)
+        self.started(self.D3, self.THIRD_STATION)
+        self.ended(self.D1, STATION)
+        self.ended(self.D3, self.THIRD_STATION)
+        self.assertEqual(self.ha.calls, ["media_pause"])
+        self.assertEqual(self.tv.status()["paused"], {})
+
 
 class SettingsTests(unittest.TestCase):
     def setUp(self):

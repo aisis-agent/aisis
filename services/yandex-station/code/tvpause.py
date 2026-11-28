@@ -68,6 +68,7 @@ ENTITY_RE = re.compile(r"^media_player\.[a-z0-9_]+$")
 # A dialog belongs to an activation if it started at most this long after it (clock/queue jitter
 # between the STT open and the container's "Dialog started"); a later start is another dialog.
 START_TOLERANCE_S = 3.0
+LEGACY_STATION = ""      # the key of a hold read from a state file of the format before per-station holds: its owner is unknown
 EVENT_LIMIT = 30
 DIALOG_RE = re.compile(r"Dialog ([0-9a-f-]{36}) (started|ended)")
 STATION_RE = re.compile(r"\bstation=([A-Za-z0-9._-]+)")      # the container's dialog lines end with it (UB-277)
@@ -434,6 +435,7 @@ class TvPause:
                     sub["paused"][entity] = now
                     sub["rest"][entity] = other["rest"].get(entity, "paused")
                     sub["watch"] = sorted({*sub["watch"], *(p.entity for p in room.players)})
+                    sub["user_touched"] = sub["user_touched"] or other["user_touched"]     # the owner's own command is not undone by whoever releases last
                 continue
             if self.dry_run:
                 self._event(st, "dry-run", entity, f"would pause ({room.area})")
@@ -539,9 +541,9 @@ class TvPause:
         if not cfg["resume"]:
             return
         for key, last in held.items():
-            if station and key != _key(station):
+            if station and key not in (_key(station), LEGACY_STATION):
                 continue
-            if started is not None and started > last + START_TOLERANCE_S:
+            if started is not None and key != LEGACY_STATION and started > last + START_TOLERANCE_S:
                 continue                             # a dialog opened after the activation we hold (e.g. text command)
             self._arm(f"resume:{key}", cfg["resume_delay_s"], self._resume_if_idle, ended_ts, key)
 
