@@ -203,5 +203,18 @@ class Migration(Store):
         self.assertEqual(self.errors()["t-1"], "x")
 
 
+class StationNamed(Store):
+    """UB-277: the quasar fork ends its dialog start/end lines with the station id; the store reads them as it read the old lines."""
+
+    def test_a_dialog_whose_lines_name_the_station_is_stored_with_its_status(self):
+        lines = spoken_exchange()
+        lines[0] = lines[0] + " station=M0TESTSPEAKER1"
+        lines[-1] = lines[-1] + " station=M0TESTSPEAKER1"
+        dialog = self.replay(lines)
+        self.assertEqual(dialog["status"], "serverFinished")
+        self.assertEqual(dialog["heard"], ["Какая погода."])
+        self.assertTrue(dialog["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

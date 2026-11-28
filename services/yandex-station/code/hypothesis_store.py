@@ -5,7 +5,8 @@ quasar hook (`/intent/decide`, which receives only a phrase and no station) and 
 behind this text say?" by the phrase they were given. Plain data in, plain data out: the clock is the caller's `now`, the phrase
 comparison is stt-cli's `same_text` (imported on first use: a venv without the core refuses evidence instead of failing the adapter).
 
-Station key: the gateway's websocket carries no station id, so its evidence is stored under None (`quasar` is the same "unknown").
+Station key: the gateway's websocket names its station (x-aisis-station, set by the quasar fork); a client that names none (an older
+quasar image) is stored under None (`quasar` is the same "unknown").
 A lookup for a named station finds its own entries and the unknown-station ones; a lookup with station None looks across all.
 """
 from __future__ import annotations

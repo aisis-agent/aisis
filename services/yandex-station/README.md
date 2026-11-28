@@ -637,8 +637,9 @@ never read aloud.
   the adapter about this phrase right after the final, so the evidence must be stored first. The outcome is logged
   (`stt_hyp publish status=ok|http:<code>|timeout|error:<class>`); a POST still running at the bound finishes on its own. The
   adapter keeps the evidence 15 s, at most 64 entries (`hypothesis_store.py`), for the quasar hook and the correction dialog;
-  `/healthz` of the adapter shows the store. The gateway's websocket carries no station id today (it uses `x-aisis-station` or
-  `?station=` when a client sends one), so the evidence is stored for any station. The adapter checks `AISIS_ADAPTER_TOKEN`: give
+  `/healthz` of the adapter shows the store. The gateway's websocket names its station in the `x-aisis-station` header (the quasar
+  fork sets it from the connected speaker's id, UB-277; `?station=` is read too), so the evidence is stored under that station; a
+  client that names none (a quasar image from before that fork) is stored for any station. The adapter checks `AISIS_ADAPTER_TOKEN`: give
   the gateway unit the same value. With speaker enforcement on, the words of a foreign voice (the empty `foreign_voice` final) are
   never published, however late the opinion arrives, and that final does not wait for the opinion; it is still kept with the clip.
   **Shadow only in this change:** nothing reads the stored evidence yet (the consumers arrive with the correction-FSM change), and
