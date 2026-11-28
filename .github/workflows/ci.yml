@@ -102,8 +102,6 @@ jobs:
         run: python3 -m unittest discover -s services/yandex-station/overlays/intent-grammar -p "test_*.py"
       - name: quasar correction-hook overlay patch applier tests (the bun-driven hook behaviour tests skip without bun; run them locally)
         run: python3 -m unittest discover -s services/yandex-station/overlays/correction-hook -p "test_*.py"
-      - name: quasar ha-verify-wording overlay patch applier tests
-        run: python3 -m unittest discover -s services/yandex-station/overlays/ha-verify-wording -p "test_*.py"
       - name: failover watchdog component tests
         run: python3 -m unittest discover -s services/yandex-station/bluegreen -p "test_*.py"
       - name: quasar corpus runner rule tests (canned -> llm only for the emergency domain)

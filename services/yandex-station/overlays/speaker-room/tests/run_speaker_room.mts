@@ -2,11 +2,13 @@
 // mocked Home Assistant that has the real home's areas (no network, no device actions, no sound).
 //   overlays/speaker-room/run_tests.sh   (applies the overlay to the active image's sources, runs every tests/*.mts in a
 //   scratch container of that image)
-import { rmSync } from 'node:fs'
+import { rmSync, writeFileSync } from 'node:fs'
 
 const AMBIGUITY_FILE = `/tmp/ha-ambiguity-speaker-room-${process.pid}.json`
-process.env.AISIS_HA_URL = 'http://ha.test'
-process.env.AISIS_HA_TOKEN = 'test-token'
+const HA_STORE_FILE = `/tmp/ha-store-speaker-room-${process.pid}.json`
+writeFileSync(HA_STORE_FILE, JSON.stringify({ auth: { kind: 'long_lived', token: 'test-token' }, client_id: '', connected_at: 0, name: 'test', url: 'http://ha.test', uuid: 'test', version: 1 }))
+process.env.AISIS_HA_STORE = HA_STORE_FILE
+process.on('exit', () => rmSync(HA_STORE_FILE, { force: true }))
 process.env.AISIS_HA_AMBIGUITY_FILE = AMBIGUITY_FILE
 process.env.SEMANTIC_INTENTS = 'off'
 rmSync(AMBIGUITY_FILE, { force: true })

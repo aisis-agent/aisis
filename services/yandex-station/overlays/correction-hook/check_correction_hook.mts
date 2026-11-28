@@ -4,6 +4,7 @@
 //     -v "$PWD/check_correction_hook.mts:/src/backend/check_correction_hook.mts:ro" \
 //     -v "$OVERLAY/backend/ha-intents.ts:/src/backend/ha-intents.ts:ro" \
 //     -v "$OVERLAY/backend/grammar-hook.ts:/src/backend/grammar-hook.ts:ro" "$IMAGE" /src/backend/check_correction_hook.mts
+import { rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 
@@ -13,7 +14,8 @@ interface Layer { matchFastIntent: (text: string, options?: Options) => Promise<
 interface Body { deviceId?: string, dialogActive?: boolean, noop?: { desired: string, label: string, targets: string[] }, rerun?: boolean, shadow?: boolean, text?: string }
 interface Reply { body: unknown, delayMs?: number, status?: number }
 
-process.env.AISIS_HA_TOKEN = 'check-only'
+// The layer reads Home Assistant's address and credential from a connection store (AISIS_HA_STORE), written below once the
+// stub's port is known; nothing here reaches a real Home Assistant.
 
 // Stub Home Assistant: two lights in two rooms (the default room of a station nobody places is «Гостиная»).
 const lights: Record<string, { area: string, name: string, state: string }> = {
@@ -65,7 +67,10 @@ const server = createServer((request, response) => {
 })
 await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
 const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-process.env.AISIS_HA_URL = base
+const HA_STORE_FILE = `/tmp/ha-store-correction-hook-${process.pid}.json`
+writeFileSync(HA_STORE_FILE, JSON.stringify({ auth: { kind: 'long_lived', token: 'check-only' }, client_id: '', connected_at: 0, name: 'test', url: base, uuid: 'test', version: 1 }))
+process.env.AISIS_HA_STORE = HA_STORE_FILE
+process.on('exit', () => rmSync(HA_STORE_FILE, { force: true }))
 process.env.AISIS_ADAPTER_INTENT_URL = `${base}/intent/decide`
 
 const loaded = await import('./ha-intents.ts') as Layer & { default?: Layer }

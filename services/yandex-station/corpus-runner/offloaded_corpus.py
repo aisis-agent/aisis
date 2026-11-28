@@ -42,7 +42,7 @@ NODE_ARCHIVE_SHA = "1d8db7d6e291d167e8c467ae4094be175e1a0b3969c7ae1f8955b9f7824f
 NODE_SHA = "7fd113446e9171a28885227b3c275ff965b2fd1f45ccf1fb3a1c20308f34e627"
 FIXTURES = {
     "intents-ru.jsonl": "249a0fd34e3e4c5d697bd1e34465d62cf356de5e513ba8e13b8f5d6b506c2280",
-    "run_dialogs.mts": "5f02421d3f21d18a3158535aab03c404fd2ebc80e85b34d5ce403b89f7e66a1e",
+    "run_dialogs.mts": "ff578b4a5258dd96d9dad83e93d25035cfe95d3f9fcbcb5094155659802d8548",
     "run_corpus.mts": "0be3f4c146eef11839fae25e85d328cd1d04842d8dd4e85d4b242dd701078830",
     "expected_kind.mjs": "e7da6f96298f1158a9535595be3905be15db7efa5416d4e677987a0702ad62ec",
     "check_reminder_layers.py": "7a3e1a4ad8721ae5a76d799d6cb168786924bfb5de033dbeaf9ddadcfc2d597a",
@@ -68,7 +68,7 @@ SOURCE_PATHS = {
     "/src/backend/entity-index.ts", "/src/backend/fuzzy-ru.ts", "/src/backend/grammar-hook.ts",
     "/src/backend/intent-catalog.ts", "/src/backend/music-intents.ts",
     "/src/backend/music-parse.ts", "/src/backend/semantic-shadow.ts",
-    "/src/backend/settings-voice.ts", "/src/backend/speaker-room.ts", "/src/backend/negation.ts",
+    "/src/backend/settings-voice.ts", "/src/backend/speaker-room.ts", "/src/backend/negation.ts", "/src/backend/ha-connection.ts",
     "/package.json", "/pnpm-lock.yaml", "/pnpm-workspace.yaml", "/tsconfig.json",
 }
 PACKAGE_NAMES = {

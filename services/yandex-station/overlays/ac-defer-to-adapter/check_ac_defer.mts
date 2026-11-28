@@ -2,13 +2,15 @@
 // 2026-11-20 11:18 incident (and its relatives) must go on to the brain tier (the adapter) with NO Home Assistant call and NO
 // question from the container; everything else (lights, state answers) keeps its quasar answer. Mocked Home Assistant, no
 // network. Against the UNPATCHED image the AC cases fail: that is the incident.
-import { readFileSync, rmSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 
 const phrases = JSON.parse(readFileSync('/src/backend/ac-phrases.json', 'utf8')) as { handed_over: string[], kept_by_quasar: string[] }
 
 const AMBIGUITY_FILE = `/tmp/ha-ambiguity-ac-defer-${process.pid}.json`
-process.env.AISIS_HA_URL = 'http://ha.test'
-process.env.AISIS_HA_TOKEN = 'test-token'
+const HA_STORE_FILE = `/tmp/ha-store-ac-defer-${process.pid}.json`
+writeFileSync(HA_STORE_FILE, JSON.stringify({ auth: { kind: 'long_lived', token: 'test-token' }, client_id: '', connected_at: 0, name: 'test', url: 'http://ha.test', uuid: 'test', version: 1 }))
+process.env.AISIS_HA_STORE = HA_STORE_FILE
+process.on('exit', () => rmSync(HA_STORE_FILE, { force: true }))
 process.env.AISIS_HA_AMBIGUITY_FILE = AMBIGUITY_FILE
 process.env.SEMANTIC_INTENTS = 'off'
 rmSync(AMBIGUITY_FILE, { force: true })
