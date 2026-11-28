@@ -759,6 +759,15 @@ class StationDialogTests(TvCase):
         self.assertEqual(self.tv.status()["last_activation"], self.clock.now)
         self.assertIn(f"hold:", next(iter(self.tv.timers)))
 
+    def test_an_unnamed_dialog_after_staggered_activations_releases_every_room(self):
+        self.tv.activation(STATION)
+        self.clock.now += 10
+        self.tv.activation(OTHER_STATION)
+        self.started(self.D1, at=0.2)                      # the image names no station: the dialog belongs to the latest activation, whichever room
+        self.ended(self.D1, at=5.0)
+        self.assertEqual(self.tv.status()["paused"], {})
+        self.assertEqual(sorted(t for s, t in self.ha.targets if s == "media_play"), [BEDROOM_TV, STUDIO_TV])
+
 
 class SettingsTests(unittest.TestCase):
     def setUp(self):

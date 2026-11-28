@@ -523,11 +523,12 @@ class TvPause:
             held = {key: st["last"].get(key, 0.0) for key in self._owners(st)}
         if not cfg["resume"]:
             return
+        newest = max(held.values(), default=0.0)
         for key, last in held.items():
             if station and key not in (_key(station), LEGACY_STATION):
                 continue
-            if started is not None and key != LEGACY_STATION and started > last + START_TOLERANCE_S:
-                continue                             # a dialog opened after the activation we hold (e.g. text command)
+            if started is not None and key != LEGACY_STATION and started > (last if station else newest) + START_TOLERANCE_S:
+                continue                             # a dialog opened after the activation we hold (e.g. text command); an unnamed one belongs to the latest activation of any station
             self._arm(f"resume:{key}", cfg["resume_delay_s"], self._resume_if_idle, ended_ts, key)
 
     def _resume_if_idle(self, ended_ts, station=None):
