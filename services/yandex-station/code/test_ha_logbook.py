@@ -23,7 +23,6 @@ def entry(name, state, user, when="2026-11-26T10:00:05+00:00", **extra):
 
 class Logbook(unittest.TestCase):
     def setUp(self):
-        ha_logbook._user_ids.clear()
         self.ha = ha_fakes.FakeHomeAssistant()
         self.ha.require_auth = True
         self.ha.long_lived.add("llat")
@@ -54,12 +53,12 @@ class Logbook(unittest.TestCase):
         self.assertEqual(urllib.parse.unquote(start_part), datetime.fromtimestamp(START, timezone.utc).isoformat(timespec="seconds"))
         self.assertEqual(urllib.parse.parse_qs(query)["end_time"], [datetime.fromtimestamp(END, timezone.utc).isoformat(timespec="seconds")])
 
-    def test_the_user_is_asked_once_per_process(self):
-        self.ha.logbook = [entry("Студия", "выключен", "user-aisis")]
-        ha_logbook.lines(self.client, START, END)
-        ha_logbook.lines(self.client, START, END)
-        self.assertEqual(ha_logbook._user_ids[self.ha.url], "user-aisis")
-        self.assertEqual(sum(1 for m, p, _ in self.ha.requests if m == "GET" and p == "/api/websocket"), 1)
+    def test_signing_in_as_another_user_changes_whose_entries_are_shown(self):
+        """The same Home Assistant address, a new grant for another user: the old user's actions are not AISIS' any more."""
+        self.ha.logbook = [entry("Студия", "выключен", "user-aisis"), entry("Кухня", "включен", "user-new")]
+        self.assertEqual([text.split(" → ")[0] for _, text in ha_logbook.lines(self.client, START, END)], ["Home Assistant: Студия"])
+        self.ha.user_id = "user-new"
+        self.assertEqual([text.split(" → ")[0] for _, text in ha_logbook.lines(self.client, START, END)], ["Home Assistant: Кухня"])
 
     def test_no_connection_gives_no_lines(self):
         client = ha_client.HaClient(ha_client.Store(Path(self.dir.name) / "none.json"), discover_fn=lambda **_: [])

@@ -94,7 +94,7 @@ jobs:
         run: python3 -m unittest test_tvpause test_stt_tvpause
       - name: Home Assistant confirmed calls (fake Home Assistant over REST and WebSocket, incident replays, wording, logbook, isolated clip replay)
         working-directory: services/yandex-station/code
-        run: python3 -m unittest test_ha_verify test_ha_call test_ha_wording test_ha_logbook test_ha_trace_view test_ha_replay test_music_airplay_discovery
+        run: python3 -m unittest test_ha_verify test_ha_ws test_ha_call test_ha_wording test_ha_logbook test_ha_trace_view test_ha_replay test_music_airplay_discovery
       - name: Claude cache and shared transport integration
         working-directory: services/yandex-station/code
         run: python3 -m unittest test_claude_cache_integration

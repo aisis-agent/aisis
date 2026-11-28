@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import concurrent.futures
 import difflib
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import tempfile
 import threading
@@ -77,27 +79,48 @@ def _read_env_file(path: str) -> dict[str, str]:
 MA_SERVICE_TYPE = "_mass._tcp.local"
 MA_DISCOVERY_TTL_S = 60.0
 _discovered: tuple[float, str] | None = None   # (when, url) of the last mDNS look, an empty url when nothing answered
+_discovered_for = ""                            # the Home Assistant host that look was trusted for: another host or none is a new look
 _discovery_lock = threading.Lock()
 
 
 def _discover_ma_url(now: float | None = None) -> str:
-    """Where Music Assistant announces itself on the local network (`_mass._tcp`), cached for a minute; "" when nobody does."""
-    global _discovered
+    """Where Music Assistant announces itself on the local network (`_mass._tcp`), cached for a minute; "" when nobody does.
+
+    The bearer token goes to this address and anybody on the network can answer a multicast question (or a name lookup), so the address is
+    never taken from the announcement: only an announcement that names the connected Home Assistant's own IP address (what the owner
+    confirmed when signing in; Music Assistant runs beside it) is accepted, the URL is built from that address and the announced port, and
+    the answer is valid only while that connection stays. A Home Assistant connected by name, a disconnect, or another host: nothing is
+    discovered, `MA_URL` names a Music Assistant explicitly."""
+    global _discovered, _discovered_for
+    import ha_client
+    try:
+        host = urllib.parse.urlsplit(ha_client.default().url).hostname or ""
+        ipaddress.ip_address(host)
+    except (ha_client.HaError, ValueError):
+        return ""
     with _discovery_lock:
         moment = time.monotonic() if now is None else now
-        if _discovered is not None and moment - _discovered[0] < MA_DISCOVERY_TTL_S:
+        if _discovered is not None and _discovered_for == host and moment - _discovered[0] < MA_DISCOVERY_TTL_S:
             return _discovered[1]
-        import ha_client
         url = ""
         for service in ha_client.browse(MA_SERVICE_TYPE):
             announced = service.txt.get("base_url", "").rstrip("/")
-            if announced:
-                url = announced
-            elif service.addresses:
-                url = f"http://{service.addresses[0]}:{service.port}"
-            if url:
+            try:
+                scheme, tail = "http", ""
+                if announced:
+                    parts = urllib.parse.urlsplit(announced)
+                    scheme = parts.scheme
+                    tail = (f":{parts.port}" if parts.port else "") + parts.path
+                    found = parts.hostname == host
+                else:
+                    tail = f":{service.port}"
+                    found = host in service.addresses
+            except ValueError:      # a malformed announcement is skipped, the next one still counts
+                continue
+            if found and scheme in ("http", "https"):
+                url = f"{scheme}://{'[' + host + ']' if ':' in host else host}{tail}"
                 break
-        _discovered = (moment, url)
+        _discovered, _discovered_for = (moment, url), host
         return url
 
 

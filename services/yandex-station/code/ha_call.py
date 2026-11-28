@@ -141,6 +141,8 @@ class _Call:
             if self.entities and not expect.whole_domain:
                 sub = session.send("subscribe_trigger", trigger={"platform": "state", "entity_id": list(self.entities)})
                 self._await_result(session, sub, states)
+            if self.left() <= 0:      # connecting ate the budget: a command nobody can still be told the outcome of is not sent
+                raise ha_ws.WsError("бюджет вызова вышел до отправки", "timeout")
             self.sent = True      # from here the call may have reached Home Assistant, even when the send itself fails half way
             call = session.send("call_service", domain=self.domain, service=self.service, service_data=self.data)
             self.sent_at = self.clock()
@@ -225,8 +227,12 @@ class _Call:
             return None     # the device already was there: its state proves nothing, only Home Assistant's acceptance does
         return self._ok(verdict, "already_in_state" if self.already else "state_matched")
 
-    def _whole_domain(self, expect: ha_verify.Expectation) -> CallResult:
-        reply = self.client.template(ha_verify.whole_domain_template(expect.whole_domain or "", expect.whole_state or ""), timeout=READ_S)
+    def _whole_domain(self, expect: ha_verify.Expectation, final: bool = False) -> CallResult:
+        """One template read of the whole domain, never longer than what is left of the budget (the last look may use FINAL_READ_S more)."""
+        allowed = min(READ_S, self.left() + (FINAL_READ_S if final else 0.0))
+        if allowed < 0.05:
+            return CallResult(504, {"result": "unknown", "reason": "state_unreadable", "ms": self.ms()}, ha=self.answer[1] if self.answer else None)
+        reply = self.client.template(ha_verify.whole_domain_template(expect.whole_domain or "", expect.whole_state or ""), timeout=allowed)
         verdict = ha_verify.whole_domain_verdict(reply.text()) if reply.status == 200 else ha_verify.Verdict("pending", "state_unreadable", {})
         if verdict.result == "ok":
             return self._ok(verdict, "state_matched")
@@ -250,7 +256,7 @@ class _Call:
         ha = self.answer[1] if self.answer else None
         if expect.whole_domain:
             if answered_ok:
-                return self._whole_domain(expect)
+                return self._whole_domain(expect, final=True)
             return CallResult(504, {"result": "unknown", "reason": "ha_no_answer", "ms": ms}, ha=ha)
         verdict = expect.check(states)
         if verdict.result != "ok" and any(isinstance(v, dict) for v in states.values()):

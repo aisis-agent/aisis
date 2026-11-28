@@ -257,6 +257,8 @@ class _Handler(BaseHTTPRequestHandler):
             if self.ha.hang_reads:
                 self.ha.stopping.wait(30)
                 return
+            if self.ha.template_delay and self.ha.stopping.wait(self.ha.template_delay):
+                return
             self._reply(200, self.ha.render(body["template"]))
         elif path.startswith("/api/services/"):
             domain, service = path.split("/")[3:5]
@@ -272,6 +274,7 @@ class FakeHomeAssistant:
         self.requests: list[tuple[str, str, Any]] = []
         self.starting = False
         self.hang_reads = False         # state reads and templates never answer (a Home Assistant that is busy or wedged)
+        self.template_delay = 0.0       # a template takes this long to render (a slow registry)
         self.areas: dict[str, str] = {}  # entity id -> HA area name, for the adapter's registry and area_entities templates
         self.devices: dict[str, str] = {}  # entity id -> HA device id, for the media player rows of tvpause
         self.device_areas: dict[str, str] = {}  # entity id -> area of its device (an entity's own area in `areas` may differ), same rows

@@ -99,6 +99,19 @@ class ObeyedButUnanswered(Stack):
         result, _ = self.call("light", "turn_off", {"entity_id": "all"})
         self.assertEqual((result.status, result.verify["result"]), (200, "ok"))
 
+    def test_slow_template_reads_never_push_the_answer_past_the_callers_timeout(self):
+        """«выключи весь свет», acknowledged, the lamps never follow, every template read takes half a second: the budget still holds."""
+        self.ha.template_delay = 0.5
+        self.ha.script("light.turn_off", state_after=None, respond_after=0.0)
+        result, elapsed = self.call("light", "turn_off", {"entity_id": "all"})
+        self.assertNotEqual(result.verify["result"], "ok")
+        self.assertLess(elapsed, QUASAR_FETCH_TIMEOUT_S)
+
+    def test_a_whole_domain_call_whose_budget_is_spent_is_not_sent(self):
+        result, _ = self.call("light", "turn_off", {"entity_id": "all"}, budget=0.0)
+        self.assertEqual([r for r in self.ha.requests if r[0] == "WS"], [])
+        self.assertEqual(result.verify["result"], "unknown")
+
     def test_a_partial_confirmation_names_what_the_state_cannot_say(self):
         self.ha.states["light.rgb"] = ha_fakes.entity("light.rgb", "on", supported_color_modes=["rgb"], color_mode="rgb")
         self.ha.script("light.turn_on", state_after=0.1, respond_after=0.0)

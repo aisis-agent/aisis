@@ -2,7 +2,8 @@
 
 The clip feed and the session page show these lines next to the adapter's trace, so a command the quasar layer sent straight to Home
 Assistant is visible too. A logbook entry carries `context_user_id`, the user whose call changed the entity; only entries of AISIS's own
-user are kept. That user id is asked once per process over the WebSocket (`auth/current_user`) and cached. Nothing here raises and
+user are kept. That user id is asked over the WebSocket (`auth/current_user`) every time and remembered nowhere: a grant for another user
+at the same address must change whose entries are shown at once. Nothing here raises and
 nothing waits longer than TOTAL_S: the dashboard page and the clip feed must not stall on a Home Assistant that is down.
 """
 from __future__ import annotations
@@ -19,15 +20,9 @@ import ha_ws
 TOTAL_S = 2.0
 RANK = 2                       # the caption rank of a line (the same scale as the adapter's trace lines)
 
-_user_ids: dict[str, str] = {}     # Home Assistant URL -> the id of the user AISIS is signed in as
-_lock = threading.Lock()
 
 
 def _current_user_id(client: ha_client.HaClient, deadline: float) -> str | None:
-    with _lock:
-        known = _user_ids.get(client.url)
-    if known:
-        return known
     session = ha_ws.Session.open(client, timeout=max(0.1, deadline - time.monotonic()))
     try:
         want = session.send("auth/current_user")
@@ -38,11 +33,7 @@ def _current_user_id(client: ha_client.HaClient, deadline: float) -> str | None:
             if message.get("id") == want and message.get("type") == "result":
                 user = (message.get("result") or {}) if message.get("success") else {}
                 found = user.get("id")
-                if isinstance(found, str) and found:
-                    with _lock:
-                        _user_ids[client.url] = found
-                    return found
-                return None
+                return found if isinstance(found, str) and found else None
         return None
     finally:
         session.close()

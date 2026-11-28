@@ -56,15 +56,19 @@ class WebSocket:
     def __init__(self, sock: socket.socket) -> None:
         self._sock = sock
         self._buffer = b""
+        self._message = b""      # the fragments of a message that has not ended yet; both survive a receive that timed out
 
     @classmethod
     def open(cls, url: str, headers: dict[str, str] | None = None, timeout: float = 3.0) -> "WebSocket":
-        """The upgrade handshake against `http(s)://host:port/path` (the scheme is the server's, ws/wss follows from it)."""
+        """The upgrade handshake against `http(s)://host:port/path` (the scheme is the server's, ws/wss follows from it), all of it within
+        `timeout` IN TOTAL: connecting, the TLS handshake and every read of the answer share one deadline."""
+        deadline = time.monotonic() + timeout
         parts = urllib.parse.urlsplit(url)
         secure = parts.scheme in ("https", "wss")
         host, port = parts.hostname or "", parts.port or (443 if secure else 80)
         try:
             raw = socket.create_connection((host, port), timeout)
+            raw.settimeout(max(0.01, deadline - time.monotonic()))
             sock = ssl.create_default_context().wrap_socket(raw, server_hostname=host) if secure else raw
         except (OSError, ssl.SSLError) as err:
             raise WsError(f"WebSocket не открылся: {err}", ha_client.classify(err)) from err
@@ -74,9 +78,12 @@ class WebSocket:
                    + "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items()) + "\r\n")
         ws = cls(sock)
         try:
-            sock.settimeout(timeout)
+            sock.settimeout(max(0.01, deadline - time.monotonic()))
             sock.sendall(request.encode())
-            head = ws._read_until(b"\r\n\r\n")
+            head = ws._read_until(b"\r\n\r\n", deadline)
+        except WsError:
+            sock.close()
+            raise
         except (OSError, ssl.SSLError) as err:
             sock.close()
             raise WsError(f"WebSocket не открылся: {err}", ha_client.classify(err)) from err
@@ -91,23 +98,52 @@ class WebSocket:
             raise WsError("WebSocket: неверный ключ подтверждения", "protocol")
         return ws
 
-    def _read_until(self, marker: bytes) -> bytes:
+    def _read_until(self, marker: bytes, deadline: float) -> bytes:
         while marker not in self._buffer:
-            chunk = self._sock.recv(4096)
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise WsError("WebSocket: рукопожатие не уложилось во время", "timeout")
+            self._sock.settimeout(left)
+            try:
+                chunk = self._sock.recv(4096)
+            except (socket.timeout, TimeoutError) as err:
+                raise WsError("WebSocket: рукопожатие не уложилось во время", "timeout") from err
             if not chunk:
                 raise WsError("WebSocket закрыт при рукопожатии", "reset")
             self._buffer += chunk
         head, _, self._buffer = self._buffer.partition(marker)
         return head
 
-    def _read(self, size: int) -> bytes:
-        while len(self._buffer) < size:
-            chunk = self._sock.recv(65536)
-            if not chunk:
-                raise WsError("WebSocket закрыт", "reset")
-            self._buffer += chunk
-        data, self._buffer = self._buffer[:size], self._buffer[size:]
-        return data
+    def _take_frame(self) -> tuple[int, bool, bytes] | None:
+        """One whole frame (opcode, final, payload) out of the buffer; None while it has not fully arrived, and then NOTHING is consumed: the
+        next call starts from the same bytes, so a frame that comes in pieces is never read from its middle."""
+        buf = self._buffer
+        if len(buf) < 2:
+            return None
+        second = buf[1]
+        size, at = second & 0x7F, 2
+        if size == 126:
+            if len(buf) < 4:
+                return None
+            size, at = struct.unpack(">H", buf[2:4])[0], 4
+        elif size == 127:
+            if len(buf) < 10:
+                return None
+            size, at = struct.unpack(">Q", buf[2:10])[0], 10
+        if size > MAX_FRAME:
+            raise WsError("WebSocket: слишком большой кадр", "protocol")
+        key = b""
+        if second & 0x80:
+            if len(buf) < at + 4:
+                return None
+            key, at = buf[at:at + 4], at + 4
+        if len(buf) < at + size:
+            return None
+        payload = buf[at:at + size]
+        self._buffer = buf[at + size:]
+        if key:
+            payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+        return buf[0] & 0x0F, bool(buf[0] & 0x80), payload
 
     def send_json(self, message: dict[str, Any]) -> None:
         try:
@@ -116,41 +152,42 @@ class WebSocket:
             raise WsError(f"WebSocket оборвался: {err}", ha_client.classify(err)) from err
 
     def recv_json(self, timeout: float) -> dict[str, Any] | None:
-        """The next message, None when nothing came within `timeout`. Pings are answered, a close or a broken stream raises WsError."""
+        """The next message, None when nothing complete came within `timeout` (what has come stays for the next call). Pings are answered,
+        a close or a broken stream raises WsError."""
         deadline = time.monotonic() + max(0.0, timeout)
-        message = b""
         while True:
-            left = deadline - time.monotonic()
-            if left <= 0 and not self._buffer:
-                return None
-            self._sock.settimeout(max(0.01, left))
-            try:
-                first, second = self._read(2)
-                size = second & 0x7F
-                if size == 126:
-                    size = struct.unpack(">H", self._read(2))[0]
-                elif size == 127:
-                    size = struct.unpack(">Q", self._read(8))[0]
-                if size > MAX_FRAME:
-                    raise WsError("WebSocket: слишком большой кадр", "protocol")
-                key = self._read(4) if second & 0x80 else b""
-                payload = self._read(size)
-            except (socket.timeout, TimeoutError):
-                return None
-            except (OSError, ssl.SSLError) as err:
-                raise WsError(f"WebSocket оборвался: {err}", ha_client.classify(err)) from err
-            if key:
-                payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
-            opcode = first & 0x0F
+            frame = self._take_frame()
+            if frame is None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                self._sock.settimeout(left)
+                try:
+                    chunk = self._sock.recv(65536)
+                except (socket.timeout, TimeoutError):
+                    return None
+                except (OSError, ssl.SSLError) as err:
+                    raise WsError(f"WebSocket оборвался: {err}", ha_client.classify(err)) from err
+                if not chunk:
+                    raise WsError("WebSocket закрыт", "reset")
+                self._buffer += chunk
+                continue
+            opcode, final, payload = frame
             if opcode == 8:
                 raise WsError("WebSocket закрыт сервером", "reset")
             if opcode == 9:
-                self._sock.sendall(encode_frame(payload, 10))
+                try:
+                    self._sock.sendall(encode_frame(payload, 10))
+                except (OSError, ssl.SSLError) as err:
+                    raise WsError(f"WebSocket оборвался: {err}", ha_client.classify(err)) from err
                 continue
             if opcode == 10:
                 continue
-            message += payload
-            if first & 0x80:
+            self._message += payload
+            if len(self._message) > MAX_FRAME:
+                raise WsError("WebSocket: слишком большое сообщение", "protocol")
+            if final:
+                message, self._message = self._message, b""
                 try:
                     decoded = json.loads(message.decode("utf-8"))
                 except ValueError as err:
@@ -177,16 +214,27 @@ class Session:
 
     @classmethod
     def open(cls, client: ha_client.HaClient, timeout: float = 3.0) -> "Session":
+        """Connect and authenticate within `timeout` IN TOTAL (the token, the upgrade, the challenge and the answer share one deadline)."""
+        deadline = time.monotonic() + timeout
+
+        def left() -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise WsError("WebSocket: время на подключение вышло", "timeout")
+            return remaining
+
         conn = client.connection()
-        token = client.access_token(timeout=timeout)
+        token = client.access_token(timeout=left())
         for attempt in (0, 1):
-            ws = WebSocket.open(conn.url.rstrip("/") + "/api/websocket", timeout=timeout)
+            ws = WebSocket.open(conn.url.rstrip("/") + "/api/websocket", timeout=left())
             try:
-                first = ws.recv_json(timeout)
+                first = ws.recv_json(left())
                 if not first or first.get("type") != "auth_required":
-                    raise WsError("Home Assistant не запросил авторизацию WebSocket", "protocol")
+                    raise WsError("Home Assistant не запросил авторизацию WebSocket", "timeout" if first is None else "protocol")
                 ws.send_json({"type": "auth", "access_token": token})
-                answer = ws.recv_json(timeout) or {}
+                answer = ws.recv_json(left())
+                if answer is None:
+                    raise WsError("Home Assistant не ответил на авторизацию WebSocket", "timeout")
             except BaseException:
                 ws.close()
                 raise
@@ -194,7 +242,7 @@ class Session:
                 return cls(ws)
             ws.close()
             if attempt == 0 and conn.kind == "oauth":
-                token = client.access_token(force=True, timeout=timeout)    # the token expired between the fetch and now
+                token = client.access_token(force=True, timeout=left())    # the token expired between the fetch and now
                 continue
             raise ha_client.AuthRevoked(str(answer.get("message") or "auth_invalid"))
         raise WsError("WebSocket: авторизация не удалась", "protocol")
