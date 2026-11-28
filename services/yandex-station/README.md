@@ -70,7 +70,10 @@ The station is rooted and its Yandex cloud is not reachable, so there is no stoc
 speaker. A heard phrase is tried in this order; the first layer that recognises it answers:
 
 1. quasar fast intents (container): lights, climate, TV, volume, media keys, «включи <исполнитель>»
-   (adapter `/music/play` → Music Assistant → AirPlay on the speaker), outdoor humidity and pressure from HA sensors.
+   (adapter `/music/play` → Music Assistant → AirPlay on the speaker), outdoor humidity and pressure from HA sensors. The layer
+   reads and calls Home Assistant itself, through the dashboard's connection store mounted read-only at `/run/aisis-ha/connection.json`
+   (`src/backend/ha-connection.ts` of the fork: OAuth refresh, address re-read when the dashboard rewrites the file; no proxy, no
+   cache, no queue) and tells the owner what it observed (no answer within 3 s, device did not follow, address unreachable).
    Weather and the outdoor temperature are NOT answered here: `overlays/weather-via-cli` makes the entity lookup
    return "none", so the turn reaches the adapter (before 2026-11-16 the HA weather entity answered «какая погода»
    with its own template and a humidity percentage, and weather-cli never ran);
@@ -114,7 +117,7 @@ query string, which `weather.get_forecasts?return_response` needs.
 The quasar-server source of the running image is the public fork
 [alex-mextner/aisis-quasar](https://github.com/alex-mextner/aisis-quasar) (GPL-3.0, upstream
 [v3rt3p/quasar-server](https://github.com/v3rt3p/quasar-server)). `quasar-source.lock` pins its repository, tag, 40-hex commit and the
-production image (name and immutable id) whose sources that commit reproduces; today `aisis-volume-zero-e859a37b`.
+production image (name and immutable id) whose sources that commit reproduces; today `aisis-ha-direct-20261128`.
 This is the recovery and audit path of https://github.com/alex-mextner/aisis/issues/108: a lost image or host is rebuilt from the
 tag, and `verify_quasar_image.py` proves a running image carries exactly those sources.
 
@@ -128,8 +131,8 @@ Not yet supported: **deploying** an image built that way. The corpus-evidence pr
 `COPY src /src` layer over a base image with overlay provenance (`deploy.sh` `build_image overlay`), which a from-scratch build is
 not; teaching the protocol a checkout-built candidate is part of https://github.com/alex-mextner/aisis/issues/188. Until then the
 overlay path above is the only deploy path and nothing in it changed. `verify_quasar_image.py` only reads the image
-(`docker create --pull=never` + `docker cp`, no run, no environment). The Home Assistant token is passed at run time
-(`AISIS_HA_TOKEN` or an untracked `/src/ha.config.json`), never read from the repository.
+(`docker create --pull=never` + `docker cp`, no run, no environment). The Home Assistant credential is never in the image or the
+repository: the container reads the dashboard's connection store (`/run/aisis-ha/connection.json`, mounted read-only) at run time.
 
 | Public repository | What | Base and license |
 |---|---|---|

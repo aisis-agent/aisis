@@ -75,7 +75,7 @@ stream with a nonzero granule origin would add that origin to the running total.
 ## Build, check, deploy
 
 The input is the ACTIVE image's three files (SHA-256 pinned, no fuzz; no other pending overlay touches them, so this composes with
-`ha-verify-wording`, `correction-hook`, `ac-defer-to-adapter`, `speaker-room` and `uniproxy-close-log` in one merged overlay directory: it
+`correction-hook`, `ac-defer-to-adapter`, `speaker-room` and `uniproxy-close-log` in one merged overlay directory: it
 owns `backend/fuzzy-ru.ts`, `codecs/opus-processor.ts`, `codecs/ogg-stitcher.ts` and nothing else).
 
 ```

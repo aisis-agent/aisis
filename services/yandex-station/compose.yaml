@@ -36,13 +36,11 @@ services:
       TTS_OPENAI_MODEL: bracho
       TTS_OPENAI_VOICE: Брачо
       TTS_OPENAI_SPEED: "1"
-      # Smart home goes through the always-on ha-cli proxy: state reads keep
-      # working from its cache while Home Assistant restarts.
-      AISIS_HA_URL: "http://127.0.0.1:8795"
-      AISIS_HA_TOKEN: "hacli-local"
     volumes:
       # Pre-synthesized filler phrases (gen_fillers.py), read-only.
       - /home/ultra/.cache/aisis/fillers:/src/fillers:ro
+      # Home Assistant: the dashboard's connection store (address and credential), read-only.
+      - /home/ultra/.config/aisis/ha:/run/aisis-ha:ro
     depends_on:
       postgres:
         condition: service_healthy

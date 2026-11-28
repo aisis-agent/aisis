@@ -482,8 +482,12 @@ class SourceClosureTests(unittest.TestCase):
         self.assertIn("/src/backend/negation.ts", gate.SOURCE_PATHS)
         self.validate(gate.SOURCE_PATHS)
 
+    def test_connection_module_is_part_of_the_declared_source_closure(self):
+        self.assertIn("/src/backend/ha-connection.ts", gate.SOURCE_PATHS)
+        self.validate(gate.SOURCE_PATHS)
+
     def test_an_image_without_or_with_an_extra_source_file_is_rejected(self):
-        for paths in (gate.SOURCE_PATHS - {"/src/backend/negation.ts"},
+        for paths in (gate.SOURCE_PATHS - {"/src/backend/negation.ts"}, gate.SOURCE_PATHS - {"/src/backend/ha-connection.ts"},
                       gate.SOURCE_PATHS | {"/src/backend/not-declared.ts"}):
             with self.subTest(count=len(paths)), self.assertRaisesRegex(ValueError, "source closure differs"):
                 self.validate(paths)

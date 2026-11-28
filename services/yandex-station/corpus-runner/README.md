@@ -6,7 +6,7 @@ stage/prod color. It never executes those suites on the workstation or a running
 home-service container, and missing evidence has no local fallback.
 
 This v1 protocol is deliberately tied to the reviewed source-equivalent export:
-24 source/config files, 11 installed package trees and their 13 literal links,
+25 source/config files, 11 installed package trees and their 13 literal links,
 the unchanged 469-row private corpus and dialog fixture, the maintained runners,
 and the hash-pinned Node 25.9.0 runtime. A separate eight-file maintained adapter
 grammar closure checks the three explicitly identified reminder contracts.
@@ -14,8 +14,10 @@ The source closure includes `src/backend/negation.ts`, the module the fast-inten
 layer imports to refuse negated phrases (overlay `ha-intents-safety`). It was
 added to the closure rather than folded into `end-dialog.ts`, so the fork keeps one
 file per concern and the receipt proves the module's exact bytes. The declared
-closure is exact: a manifest that omits that module, or lists any source file
-not declared here, is refused (`source closure differs`). The check covers the
+closure is exact: a manifest that omits either module, or lists any source file
+not declared here, is refused (`source closure differs`). `src/backend/ha-connection.ts`
+is the second one: the fast-intent layer reads Home Assistant through it (the dashboard's connection store,
+no proxy). The check covers the
 manifest and the archive; it does not enumerate other files under `/src` in the image.
 The Docker image is **not executed remotely**. The proof covers these exact
 source/dependency bytes, then deployment independently verifies the immutable

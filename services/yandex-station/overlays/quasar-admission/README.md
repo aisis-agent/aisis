@@ -58,7 +58,7 @@ python3 -m unittest discover -s . -p "test_*.py"   # AISIS_QUASAR_BASELINE_DIR=<
 overlay directory (the router file is the one the close-log overlay produced when that overlay is in the same build; `--router` takes it). Pinned: pristine `main.ts` `dc56a983…` → `d4b49d99…`;
 pristine router `84a65653…` → `ea1c6ba3…`; router after close-log `34f1c54d…` → `5fd84c5e…`; `admission.ts` `75ebda5b…`.
 
-The deploy is part of ONE combined flip with the other pending overlays (uniproxy-close-log, ha-verify-wording, correction-hook, the AC overlay): build the combined overlay directory,
+The deploy is part of ONE combined flip with the other pending overlays (uniproxy-close-log, correction-hook, the AC overlay): build the combined overlay directory,
 prebuild the image, run the corpus on it and collect the receipt (`../../corpus-runner/README.md`), then `deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"`.
 
 **Before the flip (owner/deploy owner):**

@@ -14,8 +14,8 @@ gets them wrong:
   bare «Включить.» that follows executes it;
 - a phrase without a floor acts on the AC of the speaker's room, else on `kondei_1` (floor 1): the Studio speaker has no AC, so
   «включи кондиционер» reaches the first-floor unit (reproduced by `check_ac_defer.mts` on the unpatched image);
-- a call that outlives the container's 2 s timeout is queued by ha-cli and reported as «перезагружается» (fixed in the ha-cli
-  verification work, #190).
+- (historical) a call that outlived the 2 s timeout of the old ha-cli proxy was queued by it and reported as «перезагружается»; the
+  proxy is gone: the layer talks to Home Assistant itself and says what it observed.
 
 The adapter has the right behaviour already: `ha.climate` / `ha.climate_delta` (`intent_grammar/grammar/ru.yaml` `climate.*`,
 `ha_actions.py`): the floor from the phrase, the mode from the phrase («обогрев» = heat), a warm-up mode for a set-point on an
@@ -63,9 +63,10 @@ Deliberately **not** handed over (kept, with their known remainders):
 Follow-ups on the adapter side that would let the overlay widen: an AC-off rule in the grammar/executor and a bare-AC question
 with a remembered floor.
 
-HARD PREREQUISITES on the adapter side (deploy and restart the adapter first; this overlay must NOT go live before them): `ha-verify`
-(#190: verified calls, no false «перезагружается») and the AC turn-on rule (#195): «включи кондиционер [на втором этаже]» without a
-mode must turn the unit on. The committed grammar alone answers «Не понял, что сделать» to that phrase without any HA call.
+HARD PREREQUISITES on the adapter side (deploy and restart the adapter first; this overlay must NOT go live before them): the
+adapter's verified calls through the shared Home Assistant client (`ha_client.py`; no proxy, no false «перезагружается») and the AC
+turn-on rule (#195): «включи кондиционер [на втором этаже]» without a mode must turn the unit on. The committed grammar alone answers
+«Не понял, что сделать» to that phrase without any HA call.
 
 ## Build, check, deploy
 
@@ -81,12 +82,12 @@ Deploy like the other overlays: prebuild one immutable image with `--overlay $OV
 `../../bluegreen/deploy.sh deploy --image "$VERIFIED_IMAGE_ID" --corpus-receipt "$CORPUS_RECEIPT"`. Corpus caveat: the maintained
 intent corpus expects a quasar `execute` for AC phrases; the deferred ones become `llm` turns, and `offloaded_corpus.py` pins the
 original fixture hash, so the corpus contract has to learn «handed to the adapter» before this image can get an accepted receipt.
-Stacks with `ha-verify-wording`, `uniproxy-close-log` and the correction hook: they touch other files; this one only
-`backend/ha-intents.ts` (rebase `BEFORE` if another overlay edits the same lines; the baseline SHA-256 refuses a stale base).
+Stacks with `uniproxy-close-log` and the correction hook: they touch other files; this one only `backend/ha-intents.ts` (rebase
+`BEFORE` if another overlay edits the same lines; the baseline SHA-256 refuses a stale base).
 
 ## Provenance
 
-Baseline: `/src/backend/ha-intents.ts` of `aisis-quasar-prod-green` on 2026-11-20 (image id
-`sha256:de0480613e23dadad99952f2e54ec86ed2f31e844841a6a1b9103859762523fe`), SHA-256
-`f4ab25c368fc5d6a39d280dcfa298eb3a11e261261fc9dae3dd7d82f36a494c3`; patched file
-`de2ed07891e34ca5ceec68eca55c0dea1fb415399884926ec7545f10ccb56f92`.
+Baseline: `src/backend/ha-intents.ts` of aisis-quasar commit `403a97d` (the direct Home Assistant connection, PR #8; the file of
+the image deployed from it), SHA-256 `95956ee643e222f4afa9925be39ec67112341e710730c6662d1bdd0a6fc408d8`; patched file
+`7c2022233bb0dbba823e550518756f00af28b8e8dedb5dce08973df3a319ad4f`. The previous baseline (image
+`sha256:de048061…`, `f4ab25c3…`) is no longer accepted.

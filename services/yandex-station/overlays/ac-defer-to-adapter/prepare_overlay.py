@@ -32,8 +32,8 @@ import hashlib
 import sys
 from pathlib import Path
 
-BASELINE_SHA256 = "f4ab25c368fc5d6a39d280dcfa298eb3a11e261261fc9dae3dd7d82f36a494c3"
-PATCHED_SHA256 = "de2ed07891e34ca5ceec68eca55c0dea1fb415399884926ec7545f10ccb56f92"
+BASELINE_SHA256 = "95956ee643e222f4afa9925be39ec67112341e710730c6662d1bdd0a6fc408d8"
+PATCHED_SHA256 = "7c2022233bb0dbba823e550518756f00af28b8e8dedb5dce08973df3a319ad4f"
 
 BEFORE = """\
 export function decideFastIntent (rawText: string, reg: HaRegistry, defaultArea: string = DEFAULT_AREA): FastDecision {
